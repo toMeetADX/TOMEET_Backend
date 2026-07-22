@@ -16,6 +16,7 @@ flowchart TB
     API --> Jobs["llm_jobs"]
     Jobs --> Worker["Intelligence Worker · Railway"]
     Worker --> LLM["Multimodal LLM / Text LLM"]
+    Worker --> Search["Tavily Web Search"]
     Worker --> DB
     Worker --> Storage
 ```
@@ -49,6 +50,7 @@ flowchart TB
 - 用户模型和长期记忆更新。
 - LLM 组人和线下游戏选择。
 - 活动后反馈整理。
+- 对实时信息和陌生专名生成搜索计划、获取网页证据并生成带来源的回复。
 
 ### Supabase
 
@@ -98,6 +100,8 @@ Agent 每次响应时组装：
 - 由文字、图片、录音和反馈持续更新的 `VibeNarrative`。
 
 多模态输入由真实多模态 LLM 整理为摘要和连续 vibe 叙事，写入 `UserModel`。运行时不提供 Mock 模型。
+
+Agent 回复采用两阶段联网编排：首轮模型在结构化回复中判断是否需要搜索并生成最多两条短查询；Worker 调用 Tavily 后，只把经过 URL 校验、去重和长度限制的证据交给第二轮回复生成。网页内容不能修改业务 action、`VibeNarrative` 或用户长期资料。来源标题和 URL 由代码追加到消息正文；没有搜索密钥或搜索失败时，Agent 明确表示无法核实，不使用模型记忆猜测实时事实。
 
 ## LLM 匹配
 

@@ -25,6 +25,19 @@ export const messageSchema = z.object({
 });
 export type Message = z.infer<typeof messageSchema>;
 
+export const webSearchSourceSchema = z.object({
+  title: z.string().min(1).max(500),
+  url: z.string().url().max(2_000),
+  publishedAt: z.string().max(100).optional()
+});
+export type WebSearchSource = z.infer<typeof webSearchSourceSchema>;
+
+export const webSearchMetaSchema = z.object({
+  status: z.enum(["not_needed", "completed", "failed", "unavailable"]),
+  sources: z.array(webSearchSourceSchema).max(8)
+});
+export type WebSearchMeta = z.infer<typeof webSearchMetaSchema>;
+
 export const matchRequestSchema = z.object({
   requestId: idSchema,
   userId: idSchema,
@@ -148,6 +161,7 @@ export interface AgentReplyResult {
   message: Message;
   userModel: UserModel;
   socialIntentDetected: boolean;
+  webSearch?: WebSearchMeta;
 }
 
 export interface ApiErrorBody {
