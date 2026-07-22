@@ -1,4 +1,11 @@
-import type { MatchRequest, MatchRoom, Message, PostEventFeedback, UserModel } from "@tomeet/contracts";
+import type {
+  MatchRequest,
+  MatchRoom,
+  Message,
+  PostEventFeedback,
+  UserModel,
+  WebSearchMeta
+} from "@tomeet/contracts";
 
 export type AgentAction =
   | { type: "start_match"; intent: Record<string, unknown> }
@@ -30,6 +37,7 @@ export interface ConversationInsight {
   longTermProfilePatch?: Record<string, unknown>;
   currentIntent?: Record<string, unknown>;
   actions: AgentAction[];
+  webSearch?: WebSearchMeta;
 }
 
 export interface FeedbackInsight {

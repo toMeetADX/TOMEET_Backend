@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { MemoryStore, SupabaseStore, type DataStore } from "@tomeet/data";
-import { HostedLlmIntelligence, JobProcessor } from "@tomeet/intelligence";
+import { HostedLlmIntelligence, JobProcessor, TavilyWebSearchProvider } from "@tomeet/intelligence";
 import { buildApp } from "./app.js";
 import { config } from "dotenv";
 
@@ -24,12 +24,20 @@ if (demoMode) {
   const apiKey = process.env.LLM_API_KEY;
   const textModel = process.env.LLM_TEXT_MODEL;
   if (!apiKey || !textModel) throw new Error("本地预览也必须配置 LLM_API_KEY 和 LLM_TEXT_MODEL，运行时不提供 Mock 模型");
+  const webSearchProvider = process.env.TAVILY_API_KEY
+    ? new TavilyWebSearchProvider({
+        apiKey: process.env.TAVILY_API_KEY,
+        baseUrl: process.env.TAVILY_API_BASE_URL
+      })
+    : undefined;
   const hosted = new HostedLlmIntelligence({
     apiKey,
     baseUrl: process.env.LLM_API_BASE_URL ?? "https://api.siliconflow.cn/v1",
     textModel,
     visionModel: process.env.LLM_VISION_MODEL ?? textModel,
-    audioModel: process.env.LLM_AUDIO_MODEL ?? "whisper-1"
+    audioModel: process.env.LLM_AUDIO_MODEL ?? "whisper-1",
+    webSearchProvider,
+    onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event }))
   });
   inlineProcessor = new JobProcessor(store, hosted, hosted);
 }

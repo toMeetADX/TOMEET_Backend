@@ -40,9 +40,17 @@ API 与前端完全分离。正式 Vercel 前端只需要配置 `NEXT_PUBLIC_API
 {
   "message": {},
   "userModel": {},
-  "socialIntentDetected": true
+  "socialIntentDetected": true,
+  "webSearch": {
+    "status": "not_needed | completed | failed | unavailable",
+    "sources": [
+      { "title": "来源标题", "url": "https://example.com", "publishedAt": "可选发布时间" }
+    ]
+  }
 }
 ```
+
+`webSearch` 是兼容旧客户端的可选字段。网页正文和搜索查询不会进入公共任务结果；完成搜索时，最终消息正文也会包含可核验的来源 URL。
 
 ### `GET /agent/messages/:userId`
 

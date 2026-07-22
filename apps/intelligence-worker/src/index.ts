@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { SupabaseStore } from "@tomeet/data";
-import { HostedLlmIntelligence, JobProcessor } from "@tomeet/intelligence";
+import { HostedLlmIntelligence, JobProcessor, TavilyWebSearchProvider } from "@tomeet/intelligence";
 import { config } from "dotenv";
 
 config({ path: resolve(process.cwd(), ".env") });
@@ -14,12 +14,21 @@ if (!supabaseUrl || !serviceRoleKey) throw new Error("Worker 缺少 SUPABASE_URL
 const apiKey = process.env.LLM_API_KEY;
 const textModel = process.env.LLM_TEXT_MODEL;
 if (!apiKey || !textModel) throw new Error("Worker 必须配置 LLM_API_KEY 和 LLM_TEXT_MODEL，运行时不提供 Mock 模型");
+const tavilyApiKey = process.env.TAVILY_API_KEY;
+const webSearchProvider = tavilyApiKey
+  ? new TavilyWebSearchProvider({
+      apiKey: tavilyApiKey,
+      baseUrl: process.env.TAVILY_API_BASE_URL
+    })
+  : undefined;
 const hosted = new HostedLlmIntelligence({
   apiKey,
   baseUrl: process.env.LLM_API_BASE_URL ?? "https://api.siliconflow.cn/v1",
   textModel,
   visionModel: process.env.LLM_VISION_MODEL ?? textModel,
-  audioModel: process.env.LLM_AUDIO_MODEL ?? "whisper-1"
+  audioModel: process.env.LLM_AUDIO_MODEL ?? "whisper-1",
+  webSearchProvider,
+  onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event }))
 });
 
 const store = new SupabaseStore(supabaseUrl, serviceRoleKey);
@@ -56,7 +65,14 @@ async function runSlot(slot: number): Promise<void> {
   }
 }
 
-console.info(JSON.stringify({ level: "info", event: "worker_started", workerId, concurrency, model: textModel }));
+console.info(JSON.stringify({
+  level: "info",
+  event: "worker_started",
+  workerId,
+  concurrency,
+  model: textModel,
+  webSearchEnabled: Boolean(webSearchProvider)
+}));
 const slots = Array.from({ length: concurrency }, (_, index) => runSlot(index + 1));
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

@@ -7,6 +7,7 @@ import { type MatchmakingIntelligence, validateMatchDecision } from "@tomeet/mat
 import { applyConversationInsight, applyMultimodalInsight } from "@tomeet/user-model";
 
 export * from "./hosted-llm.js";
+export * from "./web-search.js";
 
 function requireString(payload: Record<string, unknown>, key: string): string {
   const value = payload[key];
@@ -114,6 +115,7 @@ export class JobProcessor {
       message,
       userModel: updatedModel,
       socialIntentDetected: insight.socialIntentDetected,
+      webSearch: insight.webSearch,
       actions: actionResults,
       matchRequest,
       room

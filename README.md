@@ -53,6 +53,7 @@ DEMO_MODE=true
 LLM_API_BASE_URL=https://api.siliconflow.cn/v1
 LLM_TEXT_MODEL=Qwen/Qwen3-Omni-30B-A3B-Instruct
 LLM_VISION_MODEL=Qwen/Qwen3-Omni-30B-A3B-Instruct
+TAVILY_API_KEY=...
 ```
 
 这时只有业务数据和测试成员保存在内存中，Agent 理解、图片理解、动作识别、组人和游戏选择全部由真实模型完成。运行时不提供 Mock 模型；Mock 只存在于自动测试代码中。
@@ -80,9 +81,13 @@ LLM_API_BASE_URL=https://api.siliconflow.cn/v1
 LLM_TEXT_MODEL=Qwen/Qwen3-Omni-30B-A3B-Instruct
 LLM_VISION_MODEL=Qwen/Qwen3-Omni-30B-A3B-Instruct
 LLM_AUDIO_MODEL=FunAudioLLM/SenseVoiceSmall
+TAVILY_API_KEY=...
+TAVILY_API_BASE_URL=https://api.tavily.com
 ```
 
 LLM 适配器采用 OpenAI 兼容的 Chat Completions HTTP 边界，当前已通过硅基流动 `Qwen/Qwen3-Omni-30B-A3B-Instruct` 的文本、图片和 JSON 输出验证。
+
+Agent 会先生成受约束的搜索计划。明确要求联网、询问实时信息或出现无法可靠识别的专名时，Worker 使用 Tavily 搜索，再让模型只依据搜索证据生成回复，并由代码追加来源 URL。普通聊天、稳定常识和单纯的社交意图不会调用搜索。未配置 `TAVILY_API_KEY` 时服务仍可启动，但 Agent 会明确说明无法联网核实，不会根据模型记忆猜测实时事实。
 
 真实模型会输出受约束的结构化动作：`start_match`、`confirm_room`、`complete_room`、`submit_feedback`。Worker 执行动作前仍会通过领域规则和 Supabase RPC 校验，模型不能绕过房间状态或匹配约束。
 
@@ -100,7 +105,7 @@ LLM 适配器采用 OpenAI 兼容的 Chat Completions HTTP 边界，当前已通
 ### Intelligence Worker Service
 
 - Config file：`/railway.worker.toml`
-- 环境变量：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY` 和真实模型配置。
+- 环境变量：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、真实模型配置和用于联网搜索的 `TAVILY_API_KEY`。
 - `WORKER_CONCURRENCY` 默认 `8`，单实例最大允许 `32`；也可以在 Railway 横向增加副本。
 
 Worker 使用 Supabase PostgreSQL 的 `FOR UPDATE SKIP LOCKED` 领取任务。多槽位和多副本不会重复领取同一任务；失败任务使用指数退避，进程中断后的锁会自动回收。
@@ -141,6 +146,12 @@ pnpm --filter @tomeet/intelligence-worker smoke:llm
 ```
 
 该检查会真实调用配置的模型，验证发起匹配、确认房间、完成活动、反馈整理，以及匹配结果必须包含触发用户。
+
+同时配置 `LLM_API_KEY` 和 `TAVILY_API_KEY` 后，可以验证真实联网搜索、证据引用和 AdventureX 官方来源：
+
+```bash
+pnpm --filter @tomeet/intelligence-worker smoke:web-search
+```
 
 安装 [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) 后可运行基础 API 压测：
 
@@ -184,6 +195,7 @@ flowchart TB
     DB["PostgreSQL · Supabase"]
     Storage["Multimodal Storage · Supabase"]
     LLM["Multimodal LLM / Text LLM"]
+    Search["Tavily Web Search"]
 
     DNS --> Web
     DNS --> API
@@ -195,6 +207,7 @@ flowchart TB
     Worker --> DB
     Worker --> Storage
     Worker --> LLM
+    Worker --> Search
 ```
 
 采用单仓库、模块化单体和独立智能任务 Worker：
@@ -204,6 +217,7 @@ flowchart TB
 - Supabase 保存业务数据和多模态原文件。
 - Cloudflare 只负责域名 DNS 解析。
 - LLM 负责用户理解、长期记忆更新、组人和游戏选择。
+- Tavily 只接收模型生成的短搜索查询，为实时外部事实提供网页证据。
 
 ## 3. 核心模块
 
@@ -485,6 +499,7 @@ DATABASE_URL
 SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 LLM_API_KEY
+TAVILY_API_KEY
 ```
 
 ## 11. 完成标准
