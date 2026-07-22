@@ -23,6 +23,8 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@tomeet/agent-core": "workspace:*",
+    "@tomeet/matchmaking": "workspace:*",
     "vitest": "^3.2.0"
   }
 }

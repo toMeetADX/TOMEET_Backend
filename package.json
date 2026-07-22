@@ -10,12 +10,19 @@
     "dev": "pnpm --parallel --filter @tomeet/api --filter @tomeet/web dev",
     "dev:all": "pnpm --parallel --filter @tomeet/api --filter @tomeet/web --filter @tomeet/intelligence-worker dev",
     "build": "pnpm -r build",
+    "lint": "eslint \"apps/**/*.{ts,tsx}\" \"packages/**/*.ts\" --max-warnings=0",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "check": "pnpm typecheck && pnpm test && pnpm build"
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "3.3.6",
+    "@eslint/js": "9.39.2",
+    "@next/eslint-plugin-next": "15.5.21",
     "@types/node": "^22.15.0",
+    "eslint": "9.39.2",
+    "eslint-config-next": "15.5.21",
+    "typescript-eslint": "8.65.0",
     "typescript": "^5.8.3"
   }
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -62,11 +63,10 @@ export default function ChatPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
 
-  async function refreshMessages(id = userId) {
-    if (!id) return;
+  const refreshMessages = useCallback(async (id: string) => {
     const response = await api<{ messages: ChatMessage[] }>(`/agent/messages/${id}`);
     setMessages(response.messages);
-  }
+  }, []);
 
   useEffect(() => {
     const stored = localStorage.getItem("tomeet-chat-user-id");
@@ -74,13 +74,13 @@ export default function ChatPage() {
     localStorage.setItem("tomeet-chat-user-id", id);
     setUserId(id);
     refreshMessages(id).catch(() => undefined);
-  }, []);
+  }, [refreshMessages]);
 
   useEffect(() => {
     if (!userId) return;
-    const timer = window.setInterval(() => refreshMessages().catch(() => undefined), 1500);
+    const timer = window.setInterval(() => refreshMessages(userId).catch(() => undefined), 1500);
     return () => window.clearInterval(timer);
-  }, [userId]);
+  }, [refreshMessages, userId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -114,10 +114,10 @@ export default function ChatPage() {
       });
       const job = await waitForJob(response.job);
       if (job.status === "failed") throw new Error(job.error || "Agent 处理失败");
-      await refreshMessages();
+      await refreshMessages(userId);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
-      await refreshMessages().catch(() => undefined);
+      await refreshMessages(userId).catch(() => undefined);
     } finally {
       setSending(false);
     }
@@ -170,10 +170,10 @@ export default function ChatPage() {
       });
       const job = await waitForJob(response.job);
       if (job.status === "failed") throw new Error(job.error || "图片理解失败");
-      await refreshMessages();
+      await refreshMessages(userId);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
-      await refreshMessages().catch(() => undefined);
+      await refreshMessages(userId).catch(() => undefined);
     } finally {
       setSending(false);
     }

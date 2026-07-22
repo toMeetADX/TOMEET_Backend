@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "NEXT_DIST_DIR=.next-dev next dev --turbopack",
-    "build": "NEXT_DIST_DIR=.next-build next build",
-    "start": "NEXT_DIST_DIR=.next-build next start",
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "echo 'web: no unit tests'"
   },
