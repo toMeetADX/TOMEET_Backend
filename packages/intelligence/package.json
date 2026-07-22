@@ -1,0 +1,22 @@
+{
+  "name": "@tomeet/intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@tomeet/agent-core": "workspace:*",
+    "@tomeet/contracts": "workspace:*",
+    "@tomeet/data": "workspace:*",
+    "@tomeet/feedback": "workspace:*",
+    "@tomeet/matchmaking": "workspace:*",
+    "@tomeet/user-model": "workspace:*",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": { "vitest": "^3.2.0" }
+}

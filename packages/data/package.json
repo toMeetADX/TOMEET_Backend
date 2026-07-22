@@ -1,0 +1,23 @@
+{
+  "name": "@tomeet/data",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.50.0",
+    "@tomeet/contracts": "workspace:*",
+    "@tomeet/game-catalog": "workspace:*",
+    "@tomeet/matchmaking": "workspace:*",
+    "@tomeet/user-model": "workspace:*"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.8",
+    "vitest": "^3.2.0"
+  }
+}
