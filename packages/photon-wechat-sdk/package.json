@@ -1,0 +1,19 @@
+{
+  "name": "photon-wechat-sdk",
+  "version": "0.1.0-tomeet.1",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@spectrum-ts/core": "8.2.2",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.0"
+  }
+}

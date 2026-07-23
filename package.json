@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "pnpm --parallel --filter @tomeet/api --filter @tomeet/web dev",
     "dev:all": "pnpm --parallel --filter @tomeet/api --filter @tomeet/web --filter @tomeet/intelligence-worker dev",
+    "dev:wechat": "pnpm --filter @tomeet/wechat-gateway dev",
     "build": "pnpm -r build",
     "lint": "eslint \"apps/**/*.{ts,tsx}\" \"packages/**/*.ts\" --max-warnings=0",
     "typecheck": "pnpm -r typecheck",

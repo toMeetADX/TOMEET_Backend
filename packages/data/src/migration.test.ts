@@ -51,6 +51,42 @@ describe("Supabase migration", () => {
     expect(memoryTables.rows).toHaveLength(2);
   });
 
+  it("keeps WeChat identities server-managed and one-to-one", async () => {
+    const table = await db.query<{ relrowsecurity: boolean }>(`
+      select relrowsecurity
+      from pg_class
+      where oid = 'public.channel_identities'::regclass
+    `);
+    expect(table.rows[0]?.relrowsecurity).toBe(true);
+
+    const clientGrants = await db.query<{ grantee: string }>(`
+      select grantee
+      from information_schema.role_table_grants
+      where table_schema = 'public'
+        and table_name = 'channel_identities'
+        and grantee in ('anon', 'authenticated')
+    `);
+    expect(clientGrants.rows).toHaveLength(0);
+
+    const firstUserId = "23000000-0000-4000-8000-000000000001";
+    const secondUserId = "23000000-0000-4000-8000-000000000002";
+    await db.query("select ensure_tomeet_user($1::uuid, 'First Channel User')", [firstUserId]);
+    await db.query("select ensure_tomeet_user($1::uuid, 'Second Channel User')", [secondUserId]);
+    await db.query(`
+      insert into public.channel_identities (provider, external_user_id, user_id)
+      values ('wechat', 'wxid_first', $1::uuid)
+    `, [firstUserId]);
+
+    await expect(db.query(`
+      insert into public.channel_identities (provider, external_user_id, user_id)
+      values ('wechat', 'wxid_first', $1::uuid)
+    `, [secondUserId])).rejects.toThrow();
+    await expect(db.query(`
+      insert into public.channel_identities (provider, external_user_id, user_id)
+      values ('wechat', 'wxid_second', $1::uuid)
+    `, [firstUserId])).rejects.toThrow();
+  });
+
   it("executes idempotent request and skip-locked job RPCs", async () => {
     const userId = "20000000-0000-4000-8000-000000000001";
     await db.query("select ensure_tomeet_user($1::uuid, '迁移测试用户')", [userId]);

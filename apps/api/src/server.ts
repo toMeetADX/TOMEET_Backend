@@ -66,6 +66,7 @@ const app = await buildApp({
   store,
   inlineProcessor,
   frontendOrigin,
+  internalApiToken: process.env.TOMEET_INTERNAL_API_TOKEN,
   logger: true,
   verifyAccessToken,
   trustProxy: isProduction,

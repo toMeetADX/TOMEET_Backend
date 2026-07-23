@@ -1,12 +1,14 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import {
   agentMessageInputSchema,
   createMatchRequestInputSchema,
+  linkChannelIdentityInputSchema,
   multimodalInputSchema,
   postEventFeedbackSchema,
+  resolveChannelIdentityInputSchema,
   uuidSchema
 } from "@tomeet/contracts";
 import type { DataStore } from "@tomeet/data";
@@ -30,6 +32,7 @@ export interface BuildAppOptions {
   store: DataStore;
   inlineProcessor?: JobProcessor;
   frontendOrigin?: string;
+  internalApiToken?: string;
   logger?: boolean;
   verifyAccessToken?: AccessTokenVerifier;
   trustProxy?: boolean;
@@ -132,6 +135,49 @@ export async function buildApp(options: BuildAppOptions) {
       }
       return reply.code(503).send({ status: "not_ready", message: "依赖服务暂不可用" });
     }
+  });
+
+  function internalTokenMatches(candidate: unknown): boolean {
+    if (!options.internalApiToken || typeof candidate !== "string") return false;
+    const expectedHash = createHash("sha256").update(options.internalApiToken).digest();
+    const candidateHash = createHash("sha256").update(candidate).digest();
+    return timingSafeEqual(expectedHash, candidateHash);
+  }
+
+  app.post("/internal/channel-identities/resolve", async (request, reply) => {
+    if (!options.internalApiToken) {
+      return reply.code(503).send({
+        error: "internal_api_disabled",
+        message: "内部渠道 API 未配置"
+      });
+    }
+    if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
+      return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
+    }
+    const input = resolveChannelIdentityInputSchema.parse(request.body);
+    const identity = await options.store.resolveChannelIdentity(input.provider, input.externalUserId);
+    if (!identity) {
+      return reply.code(404).send({
+        error: "channel_identity_unlinked",
+        message: "该渠道身份尚未绑定 TOMEET 账号"
+      });
+    }
+    return { identity };
+  });
+
+  app.post("/internal/channel-identities", async (request, reply) => {
+    if (!options.internalApiToken) {
+      return reply.code(503).send({
+        error: "internal_api_disabled",
+        message: "内部渠道 API 未配置"
+      });
+    }
+    if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
+      return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
+    }
+    const input = linkChannelIdentityInputSchema.parse(request.body);
+    const identity = await options.store.linkChannelIdentity(input);
+    return reply.code(201).send({ identity });
   });
 
   app.post("/agent/messages", async (request, reply) => {
