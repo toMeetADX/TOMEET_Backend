@@ -50,7 +50,7 @@ API 与前端完全分离。正式 Vercel 前端只需要配置 `NEXT_PUBLIC_API
 }
 ```
 
-`webSearch` 是兼容旧客户端的可选字段。网页正文和搜索查询不会进入公共任务结果；完成搜索时，最终消息正文也会包含可核验的来源 URL。
+`webSearch` 是兼容旧客户端的可选字段。网页正文和搜索查询不会进入公共任务结果；来源 URL 仅保留在该元数据中，不会拼接到最终消息正文。
 
 ### `GET /agent/messages/:userId`
 
@@ -103,7 +103,7 @@ API 与前端完全分离。正式 Vercel 前端只需要配置 `NEXT_PUBLIC_API
 
 返回结构化长期用户模型。
 
-用户模型包含由文字、图片、录音和活动反馈持续更新的 `vibeNarrative`。匹配只读取该连续叙事、当次原话和多模态 vibe 片段，不读取兴趣或性格标签。
+该接口保留现有兼容结构。Agent Memory V2 的 `user_memories` 与 `user_memory_profiles` 是仅后端可读的内部数据，不通过本接口返回。匹配只读取当次原话和经过治理的自然语言 `matchingNarrative`，不读取兴趣/性格标签、原始 profile 或详细记忆。
 
 ## 匹配
 

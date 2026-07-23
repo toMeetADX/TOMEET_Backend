@@ -5,6 +5,8 @@ import {
   matchRoomSchema,
   messageSchema,
   offlineGameSchema,
+  userMemoryProfileSchema,
+  userMemorySchema,
   userModelSchema,
   type LlmJob,
   type MatchDecision,
@@ -13,10 +15,19 @@ import {
   type Message,
   type OfflineGame,
   type PostEventFeedback,
+  type UserMemory,
+  type UserMemoryProfile,
   type UserModel
 } from "@tomeet/contracts";
 import type { MatchCandidate } from "@tomeet/matchmaking";
-import type { ConversationState, DataStore, EnqueueJobInput, MultimodalRecordInput } from "./store.js";
+import type {
+  ApplyMemoryChangesInput,
+  ApplyMemoryChangesResult,
+  ConversationState,
+  DataStore,
+  EnqueueJobInput,
+  MultimodalRecordInput
+} from "./store.js";
 import { StoreConflictError, StoreNotFoundError } from "./store.js";
 
 type JsonRow = Record<string, unknown>;
@@ -86,7 +97,43 @@ function mapJob(row: JsonRow): LlmJob {
     error: row.error ?? null,
     attempts: row.attempts ?? 0,
     maxAttempts: row.max_attempts ?? row.maxAttempts ?? 3,
+    partitionKey: row.partition_key ?? row.partitionKey ?? null,
     createdAt: row.created_at ?? row.createdAt,
+    updatedAt: row.updated_at ?? row.updatedAt
+  });
+}
+
+function mapMemory(row: JsonRow): UserMemory {
+  return userMemorySchema.parse({
+    id: row.id,
+    userId: row.user_id ?? row.userId,
+    kind: row.memory_kind ?? row.kind,
+    stableKey: row.stable_key ?? row.stableKey,
+    content: row.content,
+    sourceType: row.source_type ?? row.sourceType,
+    sourceId: row.source_id ?? row.sourceId,
+    explicitness: row.explicitness,
+    status: row.status,
+    supersededBy: row.superseded_by ?? row.supersededBy ?? null,
+    confirmationCount: row.confirmation_count ?? row.confirmationCount ?? 1,
+    usageCount: row.usage_count ?? row.usageCount ?? 0,
+    lastConfirmedAt: row.last_confirmed_at ?? row.lastConfirmedAt,
+    lastUsedAt: row.last_used_at ?? row.lastUsedAt ?? null,
+    expiresAt: row.expires_at ?? row.expiresAt ?? null,
+    createdAt: row.created_at ?? row.createdAt,
+    updatedAt: row.updated_at ?? row.updatedAt
+  });
+}
+
+function mapMemoryProfile(row: JsonRow): UserMemoryProfile {
+  return userMemoryProfileSchema.parse({
+    userId: row.user_id ?? row.userId,
+    profileNarrative: row.profile_narrative ?? row.profileNarrative ?? "",
+    matchingNarrative: row.matching_narrative ?? row.matchingNarrative ?? "",
+    sourceMemoryIds: row.source_memory_ids ?? row.sourceMemoryIds ?? [],
+    sourceWatermark: row.source_watermark ?? row.sourceWatermark ?? null,
+    version: row.version ?? 0,
+    stale: row.stale ?? false,
     updatedAt: row.updated_at ?? row.updatedAt
   });
 }
@@ -231,6 +278,98 @@ export class SupabaseStore implements DataStore {
     return mapUserModel(data);
   }
 
+  async listActiveMemories(userId: string, limit = 128): Promise<UserMemory[]> {
+    await this.ensureUser(userId);
+    const { data, error } = await this.client
+      .from("user_memories")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("status", "active")
+      .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
+      .order("last_confirmed_at", { ascending: false })
+      .limit(Math.min(Math.max(limit, 1), 128));
+    if (error) this.throwError("读取用户记忆", error);
+    return (data ?? []).map((row) => mapMemory(row));
+  }
+
+  async applyMemoryChanges(input: ApplyMemoryChangesInput): Promise<ApplyMemoryChangesResult> {
+    const { data, error } = await this.client.rpc("apply_user_memory_changes", {
+      p_user_id: input.userId,
+      p_source_type: input.sourceType,
+      p_source_id: input.sourceId,
+      p_explicitness: input.explicitness,
+      p_candidates: input.candidates,
+      p_forget_memory_ids: input.forgetMemoryIds,
+      p_forget_all: input.forgetAll
+    });
+    if (error) this.throwError("更新用户记忆", error);
+    const result = unwrapRpcData(data) as {
+      memories?: JsonRow[];
+      forgotten_count?: number;
+      forgottenCount?: number;
+    };
+    return {
+      memories: (result.memories ?? []).map((row) => mapMemory(row)),
+      forgottenCount: Number(result.forgotten_count ?? result.forgottenCount ?? 0)
+    };
+  }
+
+  async getMemoryProfile(userId: string): Promise<UserMemoryProfile> {
+    await this.ensureUser(userId);
+    const { error: expirationError } = await this.client.rpc("expire_user_memories", {
+      p_user_id: userId
+    });
+    if (expirationError) this.throwError("清理过期用户记忆", expirationError);
+    const { data, error } = await this.client
+      .from("user_memory_profiles")
+      .select("*")
+      .eq("user_id", userId)
+      .single();
+    if (error) this.throwError("读取用户记忆画像", error);
+    return mapMemoryProfile(data);
+  }
+
+  async saveMemoryProfile(
+    profile: UserMemoryProfile,
+    expectedVersion: number
+  ): Promise<UserMemoryProfile> {
+    const { data, error } = await this.client
+      .from("user_memory_profiles")
+      .update({
+        profile_narrative: profile.profileNarrative,
+        matching_narrative: profile.matchingNarrative,
+        source_memory_ids: profile.sourceMemoryIds,
+        source_watermark: profile.sourceWatermark,
+        version: profile.version,
+        stale: profile.stale,
+        updated_at: profile.updatedAt
+      })
+      .eq("user_id", profile.userId)
+      .eq("version", expectedVersion)
+      .select("*")
+      .maybeSingle();
+    if (error) this.throwError("更新用户记忆画像", error);
+    if (!data) throw new StoreConflictError("用户记忆画像已被其他任务更新");
+    return mapMemoryProfile(data);
+  }
+
+  async markMemoryProfileStale(userId: string): Promise<void> {
+    const { error } = await this.client
+      .from("user_memory_profiles")
+      .update({ stale: true, updated_at: new Date().toISOString() })
+      .eq("user_id", userId);
+    if (error) this.throwError("标记用户记忆画像待更新", error);
+  }
+
+  async recordMemoryUsage(userId: string, memoryIds: string[]): Promise<void> {
+    if (memoryIds.length === 0) return;
+    const { error } = await this.client.rpc("record_user_memory_usage", {
+      p_user_id: userId,
+      p_memory_ids: [...new Set(memoryIds)]
+    });
+    if (error) this.throwError("记录用户记忆使用", error);
+  }
+
   async saveMultimodalInput(input: MultimodalRecordInput): Promise<string> {
     await this.ensureUser(input.userId);
     if (!input.storagePath.startsWith(`${input.userId}/`) || input.storagePath.includes("..")) {
@@ -316,9 +455,16 @@ export class SupabaseStore implements DataStore {
   async listMatchCandidates(limit = 50): Promise<MatchCandidate[]> {
     const { data, error } = await this.client.rpc("list_match_candidates", { p_limit: Math.min(limit, 100) });
     if (error) this.throwError("读取匹配候选人", error);
-    return ((data ?? []) as Array<{ request: JsonRow; user_model: JsonRow }>).map((row) => ({
+    return ((data ?? []) as Array<{
+      request: JsonRow;
+      user_model: JsonRow;
+      matching_narrative?: unknown;
+    }>).map((row) => ({
       request: mapMatchRequest(row.request),
-      userModel: mapUserModel(row.user_model)
+      userModel: mapUserModel(row.user_model),
+      matchingNarrative: typeof row.matching_narrative === "string"
+        ? row.matching_narrative
+        : undefined
     }));
   }
 
@@ -384,7 +530,8 @@ export class SupabaseStore implements DataStore {
       p_job_type: input.type,
       p_payload: input.payload,
       p_idempotency_key: input.idempotencyKey,
-      p_max_attempts: input.maxAttempts ?? 3
+      p_max_attempts: input.maxAttempts ?? 3,
+      p_partition_key: input.partitionKey ?? null
     });
     if (error) this.throwError("创建智能任务", error);
     return mapJob(unwrapRpcData(data) as JsonRow);

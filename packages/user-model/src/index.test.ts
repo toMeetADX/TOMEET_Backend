@@ -7,14 +7,14 @@ import {
 } from "./index.js";
 
 describe("user model", () => {
-  it("merges interests without duplicates and increments the version", () => {
+  it("does not write Agent-generated profile fields into the legacy model", () => {
     const initial = createDefaultUserModel("u1");
     const next = applyConversationInsight(initial, { interests: ["徒步", "徒步", "摄影"] });
-    expect(next.longTermProfile.interests).toEqual(["徒步", "摄影"]);
+    expect(next.longTermProfile.interests).toEqual([]);
     expect(next.version).toBe(1);
   });
 
-  it("replaces the current intent and deep-merges long-term profile patches", () => {
+  it("replaces current intent without coupling the reply to profile mutations", () => {
     const initial = createDefaultUserModel("u1");
     initial.currentIntent = { rawText: "旧意图", preferredSize: 8 };
     initial.longTermProfile = { interests: ["徒步"], interactionStyle: { pace: "慢" } };
@@ -25,14 +25,14 @@ describe("user model", () => {
       currentIntent: { rawText: "这次想认识摄影同好" }
     });
     expect(next.longTermProfile).toEqual({
-      interests: ["徒步", "摄影"],
-      interactionStyle: { pace: "慢", depth: "深入" }
+      interests: ["徒步"],
+      interactionStyle: { pace: "慢" }
     });
     expect(next.currentIntent).toEqual({ rawText: "这次想认识摄影同好" });
-    expect(next.vibeNarrative).toContain("共同观察");
+    expect(next.vibeNarrative).toBe("");
   });
 
-  it("applies multimodal and feedback insights to long-term understanding", () => {
+  it("keeps multimodal observations bounded and leaves durable memory to the memory layer", () => {
     const initial = createDefaultUserModel("u1");
     const multimodal = applyMultimodalInsight(initial, "input-1", {
       summary: "用户经常拍城市建筑",
@@ -46,18 +46,12 @@ describe("user model", () => {
       gameFeedback: "安静的故事卡更自然",
       connectionUserIds: [],
       nextIntent: "下次想要四人深聊"
-    }, {
-      memory: "偏好小组深聊和安静游戏",
-      vibeNarrative: "在线下更容易在小组和有留白的共同体验里自然打开。",
-      longTermProfilePatch: { socialPreferences: { groupSize: "small" } },
-      currentIntent: { rawText: "四人深聊" }
-    });
-    expect(feedback.longTermProfile).toMatchObject({
-      interests: ["建筑摄影"],
-      socialPreferences: { groupSize: "small" }
-    });
+    }, { currentIntent: { rawText: "四人深聊" } });
+    expect(feedback.longTermProfile).toEqual(initial.longTermProfile);
     expect(feedback.currentIntent).toEqual({ rawText: "四人深聊" });
-    expect(feedback.vibeNarrative).toContain("自然打开");
-    expect(feedback.feedbackMemory).toContain("偏好小组深聊和安静游戏");
+    expect(feedback.vibeNarrative).toBe("");
+    expect(feedback.feedbackMemory[0]).toContain("更喜欢小组交流");
+    expect(feedback.multimodalUnderstanding["input-1"]).not.toHaveProperty("longTermProfilePatch");
+    expect(feedback.multimodalUnderstanding["input-1"]).not.toHaveProperty("vibeNarrative");
   });
 });

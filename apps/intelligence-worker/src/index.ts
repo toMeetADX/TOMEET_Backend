@@ -40,6 +40,40 @@ const abortController = new AbortController();
 
 const delay = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
+function emitJobMetrics(type: string, result: Record<string, unknown>): void {
+  if (type === "agent_reply" && result.contextBudget && typeof result.contextBudget === "object") {
+    const budget = result.contextBudget as Record<string, unknown>;
+    console.info(JSON.stringify({
+      level: "info",
+      event: "agent_context_assembled",
+      totalEstimatedTokens: budget.totalEstimatedTokens,
+      recentMessageTokens: budget.recentMessageTokens,
+      checkpointTokens: budget.checkpointTokens,
+      profileTokens: budget.profileTokens,
+      memoryTokens: budget.memoryTokens,
+      runtimeTokens: budget.runtimeTokens,
+      truncatedSections: budget.truncatedSections,
+      usedMemoryCount: result.usedMemoryCount
+    }));
+  } else if (type === "memory_extract") {
+    console.info(JSON.stringify({
+      level: "info",
+      event: "memory_extraction",
+      noOutput: result.noOutput,
+      createdOrUpdatedCount: result.createdOrUpdatedCount,
+      forgottenCount: result.forgottenCount,
+      rejectedSensitiveCount: result.rejectedSensitiveCount
+    }));
+  } else if (type === "memory_consolidate") {
+    console.info(JSON.stringify({
+      level: "info",
+      event: "memory_consolidation",
+      profileVersion: result.profileVersion,
+      sourceMemoryCount: result.sourceMemoryCount
+    }));
+  }
+}
+
 async function runSlot(slot: number): Promise<void> {
   const slotId = `${workerId}:${slot}`;
   while (!abortController.signal.aborted) {
@@ -52,6 +86,7 @@ async function runSlot(slot: number): Promise<void> {
       try {
         const result = await processor.process(job);
         await store.completeJob(job.id, result);
+        emitJobMetrics(job.type, result);
         console.info(JSON.stringify({ level: "info", event: "job_completed", worker: slotId, jobId: job.id, type: job.type }));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

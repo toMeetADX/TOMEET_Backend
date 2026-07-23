@@ -66,7 +66,9 @@ describe("TOMEET core flow", () => {
 
     const modelResponse = await app.inject({ method: "GET", url: `/users/${userId}/model` });
     expect(modelResponse.json().userModel.currentIntent.nextIntent).toContain("深度交流");
-    expect(modelResponse.json().userModel.longTermProfile.socialPreferences).toBeTruthy();
+    expect(modelResponse.json().userModel.longTermProfile.socialPreferences).toBeUndefined();
+    expect(modelResponse.json().userModel).not.toHaveProperty("profileNarrative");
+    expect(modelResponse.json().userModel.feedbackMemory[0]).toContain("大家很自然");
     expect(modelResponse.json().userModel.socialHistory.filter((id: string) => id === roomId)).toHaveLength(1);
   });
 
@@ -108,8 +110,8 @@ describe("TOMEET core flow", () => {
     expect(response.statusCode).toBe(409);
   });
 
-  it("accepts an image upload and folds its vibe into the conversation", async () => {
-    const { app } = setup();
+  it("accepts an image upload and stores only an expiring multimodal impression", async () => {
+    const { app, store } = setup();
     const userId = randomUUID();
     const uploaded = await app.inject({
       method: "POST",
@@ -137,9 +139,38 @@ describe("TOMEET core flow", () => {
     });
     expect(understood.statusCode).toBe(200);
     const model = await app.inject({ method: "GET", url: `/users/${userId}/model` });
-    expect(model.json().userModel.vibeNarrative).toContain("夜晚街景");
+    expect(model.json().userModel.vibeNarrative).toBe("");
+    const memories = await store.listActiveMemories(userId);
+    expect(memories[0]?.kind).toBe("multimodal_impression");
+    expect(memories[0]?.expiresAt).toBeTruthy();
+    expect((await store.getMemoryProfile(userId)).profileNarrative).toContain("夜晚街景");
     const messages = await app.inject({ method: "GET", url: `/agent/messages/${userId}` });
     expect(messages.json().messages.some((message: { role: string }) => message.role === "assistant")).toBe(true);
+  });
+
+  it("builds a hidden profile and forgets it through conversation without exposing it", async () => {
+    const { app, store } = setup();
+    const userId = randomUUID();
+    const send = (content: string) => app.inject({
+      method: "POST",
+      url: "/agent/messages",
+      payload: { userId, displayName: "记忆用户", content, idempotencyKey: randomUUID() }
+    });
+
+    await send("我喜欢安静、有自然光的咖啡馆");
+    const active = await store.listActiveMemories(userId);
+    expect(active).toHaveLength(1);
+    expect(active[0]?.content).toContain("咖啡馆");
+    expect((await store.getMemoryProfile(userId)).profileNarrative).toContain("咖啡馆");
+
+    const publicModel = await app.inject({ method: "GET", url: `/users/${userId}/model` });
+    expect(JSON.stringify(publicModel.json())).not.toContain("有自然光的咖啡馆");
+
+    await send("请忘记我喜欢咖啡馆这件事");
+    expect(await store.listActiveMemories(userId)).toHaveLength(0);
+    const forgottenProfile = await store.getMemoryProfile(userId);
+    expect(forgottenProfile.stale).toBe(false);
+    expect(forgottenProfile.profileNarrative).toBe("");
   });
 
   it("deduplicates concurrent active match requests for one user", async () => {

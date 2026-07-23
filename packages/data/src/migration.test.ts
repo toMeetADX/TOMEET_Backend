@@ -43,6 +43,12 @@ describe("Supabase migration", () => {
         and table_name in ('users','messages','user_models','match_requests','match_rooms','room_members','offline_games','post_event_feedback','llm_jobs')
     `);
     expect(result.rows).toHaveLength(9);
+    const memoryTables = await db.query<{ table_name: string }>(`
+      select table_name from information_schema.tables
+      where table_schema = 'public'
+        and table_name in ('user_memories', 'user_memory_profiles')
+    `);
+    expect(memoryTables.rows).toHaveLength(2);
   });
 
   it("executes idempotent request and skip-locked job RPCs", async () => {
@@ -80,6 +86,136 @@ describe("Supabase migration", () => {
         and column_name = 'vibe_narrative'
     `);
     expect(vibeColumn.rows).toHaveLength(1);
+  });
+
+  it("stores, supersedes, and forgets only owned memory rows", async () => {
+    const userId = "21000000-0000-4000-8000-000000000001";
+    const sourceId = "22000000-0000-4000-8000-000000000001";
+    await db.query("select ensure_tomeet_user($1::uuid, '记忆测试用户')", [userId]);
+    const first = await db.query<{
+      apply_user_memory_changes: { memories: Array<{ id: string }> };
+    }>(`
+      select apply_user_memory_changes(
+        $1::uuid,
+        'message',
+        $2,
+        'explicit',
+        $3::jsonb,
+        '{}'::uuid[]
+      )
+    `, [
+      userId,
+      sourceId,
+      JSON.stringify([{
+        kind: "preference",
+        stableKey: "coffee_place",
+        content: "用户明确喜欢安静的咖啡馆",
+        expiresAt: null
+      }])
+    ]);
+    const firstId = first.rows[0]!.apply_user_memory_changes.memories[0]!.id;
+
+    const corrected = await db.query<{
+      apply_user_memory_changes: { memories: Array<{ id: string }> };
+    }>(`
+      select apply_user_memory_changes(
+        $1::uuid,
+        'message',
+        $2,
+        'explicit',
+        $3::jsonb,
+        '{}'::uuid[]
+      )
+    `, [
+      userId,
+      sourceId,
+      JSON.stringify([{
+        kind: "preference",
+        stableKey: "coffee_place",
+        content: "用户明确更喜欢有自然光的咖啡馆",
+        expiresAt: null
+      }])
+    ]);
+    const correctedId = corrected.rows[0]!.apply_user_memory_changes.memories[0]!.id;
+    expect(correctedId).not.toBe(firstId);
+    const statuses = await db.query<{ id: string; status: string; superseded_by: string | null }>(
+      "select id, status, superseded_by from user_memories where user_id = $1::uuid order by created_at",
+      [userId]
+    );
+    expect(statuses.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: firstId, status: "superseded", superseded_by: correctedId }),
+      expect.objectContaining({ id: correctedId, status: "active" })
+    ]));
+
+    await db.query(`
+      select apply_user_memory_changes(
+        $1::uuid,
+        'message',
+        $2,
+        'explicit',
+        '[]'::jsonb,
+        array[$3::uuid]
+      )
+    `, [userId, sourceId, correctedId]);
+    const forgotten = await db.query<{ status: string }>(
+      "select status from user_memories where id = $1::uuid",
+      [correctedId]
+    );
+    expect(forgotten.rows[0]?.status).toBe("forgotten");
+    const profile = await db.query<{ stale: boolean }>(
+      "select stale from user_memory_profiles where user_id = $1::uuid",
+      [userId]
+    );
+    expect(profile.rows[0]?.stale).toBe(true);
+  });
+
+  it("serializes jobs per user partition while allowing other users to proceed", async () => {
+    await db.query(
+      "select enqueue_llm_job('agent_reply', '{}'::jsonb, 'fifo-a-1', 3, 'user:a')"
+    );
+    await db.query(
+      "select enqueue_llm_job('memory_extract', '{}'::jsonb, 'fifo-a-2', 3, 'user:a')"
+    );
+    await db.query(
+      "select enqueue_llm_job('agent_reply', '{}'::jsonb, 'fifo-b-1', 3, 'user:b')"
+    );
+    const first = await db.query<{ claim_llm_job: { id: string; partition_key: string } }>(
+      "select claim_llm_job('fifo-worker-1')"
+    );
+    expect(first.rows[0]?.claim_llm_job.partition_key).toBe("user:a");
+    const second = await db.query<{ claim_llm_job: { id: string; partition_key: string } }>(
+      "select claim_llm_job('fifo-worker-2')"
+    );
+    expect(second.rows[0]?.claim_llm_job.partition_key).toBe("user:b");
+    await db.query("select complete_llm_job($1::uuid, '{}'::jsonb)", [
+      first.rows[0]!.claim_llm_job.id
+    ]);
+    const third = await db.query<{ claim_llm_job: { partition_key: string } }>(
+      "select claim_llm_job('fifo-worker-3')"
+    );
+    expect(third.rows[0]?.claim_llm_job.partition_key).toBe("user:a");
+  });
+
+  it("keeps memory tables and mutation RPCs unavailable to public roles", async () => {
+    const privileges = await db.query<{
+      anon_table: boolean;
+      authenticated_table: boolean;
+      anon_function: boolean;
+    }>(`
+      select
+        has_table_privilege('anon', 'public.user_memories', 'select') as anon_table,
+        has_table_privilege('authenticated', 'public.user_memory_profiles', 'select') as authenticated_table,
+        has_function_privilege(
+          'anon',
+          'public.apply_user_memory_changes(uuid,text,text,text,jsonb,uuid[],boolean)',
+          'execute'
+        ) as anon_function
+    `);
+    expect(privileges.rows[0]).toEqual({
+      anon_table: false,
+      authenticated_table: false,
+      anon_function: false
+    });
   });
 
   it("enforces the aligned match, room, history, and feedback lifecycle", async () => {

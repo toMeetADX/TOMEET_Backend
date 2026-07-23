@@ -1,9 +1,6 @@
 import type { PostEventFeedback, UserModel } from "@tomeet/contracts";
 
 interface FeedbackModelInsight {
-  memory: string;
-  vibeNarrative?: string;
-  longTermProfilePatch: Record<string, unknown>;
   currentIntent: Record<string, unknown>;
 }
 
@@ -55,15 +52,8 @@ export function applyConversationInsight(
     currentIntent?: Record<string, unknown>;
   }
 ): UserModel {
-  const profilePatch = mergeLongTermProfile(
-    insight.longTermProfilePatch ?? {},
-    { interests: insight.interests ?? [] }
-  );
-
   return {
     ...model,
-    vibeNarrative: insight.vibeNarrative ?? model.vibeNarrative,
-    longTermProfile: mergeLongTermProfile(model.longTermProfile, profilePatch),
     currentIntent: insight.currentIntent
       ? structuredClone(insight.currentIntent)
       : model.currentIntent,
@@ -77,15 +67,16 @@ export function applyMultimodalInsight(
   inputId: string,
   insight: Record<string, unknown>
 ): UserModel {
-  const profilePatch = isRecord(insight.longTermProfilePatch) ? insight.longTermProfilePatch : {};
+  const safeInsight = { ...insight };
+  delete safeInsight.longTermProfilePatch;
+  delete safeInsight.vibeNarrative;
+  const boundedUnderstanding = Object.fromEntries([
+    ...Object.entries(model.multimodalUnderstanding),
+    [inputId, safeInsight]
+  ].slice(-20));
   return {
     ...model,
-    vibeNarrative: typeof insight.vibeNarrative === "string" ? insight.vibeNarrative : model.vibeNarrative,
-    longTermProfile: mergeLongTermProfile(model.longTermProfile, profilePatch),
-    multimodalUnderstanding: {
-      ...model.multimodalUnderstanding,
-      [inputId]: insight
-    },
+    multimodalUnderstanding: boundedUnderstanding,
     version: model.version + 1,
     updatedAt: new Date().toISOString()
   };
@@ -96,15 +87,12 @@ export function applyPostEventFeedback(
   feedback: PostEventFeedback,
   insight?: FeedbackModelInsight
 ): UserModel {
-  const memory = insight?.memory
-    ?? `人群：${feedback.peopleFeedback}；游戏：${feedback.gameFeedback}；下次：${feedback.nextIntent}`;
+  const memory = `人群：${feedback.peopleFeedback}；游戏：${feedback.gameFeedback}；下次：${feedback.nextIntent}`;
   const socialHistory = model.socialHistory.includes(feedback.roomId)
     ? model.socialHistory
     : [...model.socialHistory, feedback.roomId].slice(-50);
   return {
     ...model,
-    vibeNarrative: insight?.vibeNarrative ?? model.vibeNarrative,
-    longTermProfile: mergeLongTermProfile(model.longTermProfile, insight?.longTermProfilePatch ?? {}),
     currentIntent: insight?.currentIntent ?? { nextIntent: feedback.nextIntent },
     socialHistory,
     feedbackMemory: [...model.feedbackMemory, memory].slice(-50),

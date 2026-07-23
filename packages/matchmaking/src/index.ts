@@ -4,6 +4,7 @@ import { gamesSupportingPlayerCount } from "@tomeet/game-catalog";
 export interface MatchCandidate {
   request: MatchRequest;
   userModel: UserModel;
+  matchingNarrative?: string;
 }
 
 export interface MatchmakingIntelligence {

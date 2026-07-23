@@ -1,5 +1,22 @@
-import { buildAgentContext, type AgentAction, type AgentIntelligence } from "@tomeet/agent-core";
-import { postEventFeedbackSchema, type LlmJob, type MatchRequest, type MatchRoom, type UserModel } from "@tomeet/contracts";
+import {
+  buildAgentContext,
+  containsSensitivePersonalData,
+  countRecentMessagesToKeep,
+  sanitizeMemoryCandidates,
+  selectRelevantMemories,
+  truncateToEstimatedTokens,
+  type AgentAction,
+  type AgentIntelligence
+} from "@tomeet/agent-core";
+import {
+  postEventFeedbackSchema,
+  userMemorySourceTypeSchema,
+  type LlmJob,
+  type MatchRequest,
+  type MatchRoom,
+  type UserMemoryProfile,
+  type UserModel
+} from "@tomeet/contracts";
 import type { DataStore } from "@tomeet/data";
 import { StoreConflictError, StoreNotFoundError } from "@tomeet/data";
 import { updateModelFromFeedback } from "@tomeet/feedback";
@@ -8,6 +25,7 @@ import { applyConversationInsight, applyMultimodalInsight } from "@tomeet/user-m
 
 export * from "./hosted-llm.js";
 export * from "./web-search.js";
+export { buildAgentContext } from "@tomeet/agent-core";
 
 function requireString(payload: Record<string, unknown>, key: string): string {
   const value = payload[key];
@@ -32,6 +50,10 @@ export class JobProcessor {
         return this.processMatchmaking(job);
       case "feedback_update":
         return this.processFeedback(job);
+      case "memory_extract":
+        return this.processMemoryExtract(job);
+      case "memory_consolidate":
+        return this.processMemoryConsolidate(job);
     }
   }
 
@@ -55,23 +77,34 @@ export class JobProcessor {
   private async processAgentReply(job: LlmJob): Promise<Record<string, unknown>> {
     const userId = requireString(job.payload, "userId");
     const userContent = requireString(job.payload, "content");
-    const [model, initialMatchRequest, initialRoom] = await Promise.all([
+    const userMessageId = requireString(job.payload, "userMessageId");
+    const [model, initialMatchRequest, initialRoom, memoryProfile] = await Promise.all([
       this.store.getUserModel(userId),
       this.store.getLatestMatchRequestForUser(userId),
-      this.store.getLatestRoomForUser(userId)
+      this.store.getLatestRoomForUser(userId),
+      this.store.getMemoryProfile(userId)
     ]);
-    const [messages, rollingSummary] = await Promise.all([
-      this.store.listRecentMessages(userId, 20),
-      this.updateRollingSummary(userId)
+    const [messages, checkpoint] = await Promise.all([
+      this.store.listRecentMessages(userId, 32),
+      this.updateConversationCheckpoint(userId)
     ]);
+    const context = buildAgentContext(messages, model, {
+      matchRequest: initialMatchRequest,
+      room: initialRoom,
+      checkpoint,
+      memoryProfile,
+      excludeMessageId: userMessageId
+    });
     const insight = await this.agent.reply(
-      buildAgentContext(messages, model, {
-        matchRequest: initialMatchRequest,
-        room: initialRoom,
-        rollingSummary
-      }),
-      userContent
+      context,
+      userContent,
+      async (queries) => selectRelevantMemories(
+        await this.store.listActiveMemories(userId, 128),
+        queries,
+        6
+      )
     );
+    await this.store.recordMemoryUsage(userId, insight.usedMemoryIds);
     const currentIntent = insight.currentIntent && insight.socialIntentDetected
       ? {
           ...insight.currentIntent,
@@ -81,9 +114,6 @@ export class JobProcessor {
       : insight.currentIntent;
     const updatedModel = await this.saveModelWithRetry(userId, (current) =>
       applyConversationInsight(current, {
-        interests: insight.interests,
-        vibeNarrative: insight.vibeNarrative,
-        longTermProfilePatch: insight.longTermProfilePatch,
         currentIntent
       })
     );
@@ -111,6 +141,19 @@ export class JobProcessor {
       content: replyContent,
       idempotencyKey: `agent-reply:${job.id}`
     });
+    const memoryJob = await this.store.enqueueJob({
+      type: "memory_extract",
+      payload: {
+        userId,
+        sourceType: "message",
+        sourceId: userMessageId,
+        content: userContent,
+        assistantReply: replyContent,
+        memoryReviewSuggested: insight.memoryReviewSuggested
+      },
+      idempotencyKey: `memory:message:${userMessageId}`,
+      partitionKey: `user:${userId}`
+    });
     return {
       message,
       userModel: updatedModel,
@@ -118,14 +161,19 @@ export class JobProcessor {
       webSearch: insight.webSearch,
       actions: actionResults,
       matchRequest,
-      room
+      room,
+      memoryJobId: memoryJob.id,
+      contextBudget: context.budget,
+      usedMemoryCount: insight.usedMemoryIds.length
     };
   }
 
-  private async updateRollingSummary(userId: string): Promise<string> {
+  private async updateConversationCheckpoint(userId: string): Promise<string> {
     let state = await this.store.getConversationState(userId);
     const messageCount = await this.store.countMessages(userId);
-    const targetCount = Math.max(0, messageCount - 20);
+    const recentMessages = await this.store.listRecentMessages(userId, 100);
+    const keepCount = countRecentMessagesToKeep(recentMessages, 16, 4_000);
+    const targetCount = Math.max(0, messageCount - keepCount);
 
     while (state.summarizedMessageCount < targetCount) {
       const batchSize = Math.min(100, targetCount - state.summarizedMessageCount);
@@ -180,7 +228,8 @@ export class JobProcessor {
         const matchmakingJob = await this.store.enqueueJob({
           type: "matchmaking",
           payload: { requestId: matchRequest.requestId },
-          idempotencyKey: `match:${matchRequest.requestId}`
+          idempotencyKey: `match:${matchRequest.requestId}`,
+          partitionKey: `user:${userId}`
         });
         return {
           result: { matchRequest, jobId: matchmakingJob.id },
@@ -212,7 +261,8 @@ export class JobProcessor {
         const feedbackJob = await this.store.enqueueJob({
           type: "feedback_update",
           payload: { feedback, feedbackId },
-          idempotencyKey: `feedback:${feedbackId}`
+          idempotencyKey: `feedback:${feedbackId}`,
+          partitionKey: `user:${userId}`
         });
         return {
           result: { feedbackId, jobId: feedbackJob.id },
@@ -248,7 +298,26 @@ export class JobProcessor {
       content: reply,
       idempotencyKey: `multimodal-reply:${job.id}`
     });
-    return { inputId, understanding, userModel, message };
+    const memoryContent = typeof understanding.recentImpression === "string"
+      ? understanding.recentImpression
+      : typeof understanding.summary === "string"
+        ? understanding.summary
+        : "";
+    const memoryJob = memoryContent
+      ? await this.store.enqueueJob({
+          type: "memory_extract",
+          payload: {
+            userId,
+            sourceType: "multimodal",
+            sourceId: inputId,
+            content: memoryContent,
+            assistantReply: reply
+          },
+          idempotencyKey: `memory:multimodal:${inputId}`,
+          partitionKey: `user:${userId}`
+        })
+      : null;
+    return { inputId, understanding, userModel, message, memoryJobId: memoryJob?.id ?? null };
   }
 
   private async processMatchmaking(job: LlmJob): Promise<Record<string, unknown>> {
@@ -288,6 +357,122 @@ export class JobProcessor {
     const userModel = await this.saveModelWithRetry(feedback.userId, (latest) =>
       updateModelFromFeedback(latest, feedback, insight)
     );
-    return { userModel };
+    const feedbackId = requireString(job.payload, "feedbackId");
+    const memoryJob = await this.store.enqueueJob({
+      type: "memory_extract",
+      payload: {
+        userId: feedback.userId,
+        sourceType: "feedback",
+        sourceId: feedbackId,
+        content: JSON.stringify({
+          peopleFeedback: feedback.peopleFeedback,
+          gameFeedback: feedback.gameFeedback,
+          nextIntent: feedback.nextIntent
+        })
+      },
+      idempotencyKey: `memory:feedback:${feedbackId}`,
+      partitionKey: `user:${feedback.userId}`
+    });
+    return { userModel, memoryJobId: memoryJob.id };
+  }
+
+  private async processMemoryExtract(job: LlmJob): Promise<Record<string, unknown>> {
+    const userId = requireString(job.payload, "userId");
+    const sourceType = userMemorySourceTypeSchema.parse(job.payload.sourceType);
+    const sourceId = requireString(job.payload, "sourceId");
+    const content = requireString(job.payload, "content");
+    const activeMemories = await this.store.listActiveMemories(userId, 128);
+    const extracted = await this.agent.extractMemories({
+      userId,
+      sourceType,
+      sourceId,
+      content,
+      assistantReply: typeof job.payload.assistantReply === "string"
+        ? job.payload.assistantReply
+        : undefined,
+      activeMemoryIndex: activeMemories
+    });
+    const allowedMemoryIds = new Set(activeMemories.map((memory) => memory.id));
+    const forgetMemoryIds = [...new Set(extracted.forgetMemoryIds)]
+      .filter((memoryId) => allowedMemoryIds.has(memoryId));
+    const sanitized = sanitizeMemoryCandidates(extracted.candidates, sourceType);
+    const applied = await this.store.applyMemoryChanges({
+      userId,
+      sourceType,
+      sourceId,
+      explicitness: sourceType === "message"
+        ? "explicit"
+        : sourceType === "feedback"
+          ? "experienced"
+          : "observed",
+      candidates: extracted.forgetAll ? [] : sanitized.accepted,
+      forgetMemoryIds,
+      forgetAll: extracted.forgetAll
+    });
+    const changed = applied.memories.length > 0 || applied.forgottenCount > 0;
+    const consolidationJob = changed
+      ? await this.store.enqueueJob({
+          type: "memory_consolidate",
+          payload: { userId },
+          idempotencyKey: `memory-profile:${job.id}`,
+          partitionKey: `user:${userId}`
+        })
+      : null;
+    return {
+      noOutput: !changed,
+      createdOrUpdatedCount: applied.memories.length,
+      forgottenCount: applied.forgottenCount,
+      rejectedSensitiveCount: extracted.rejectedSensitiveCount + sanitized.rejectedCount,
+      consolidationJobId: consolidationJob?.id ?? null
+    };
+  }
+
+  private async processMemoryConsolidate(job: LlmJob): Promise<Record<string, unknown>> {
+    const userId = requireString(job.payload, "userId");
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const [memories, profile] = await Promise.all([
+        this.store.listActiveMemories(userId, 128),
+        this.store.getMemoryProfile(userId)
+      ]);
+      const draft = await this.agent.consolidateMemoryProfile(memories, profile);
+      const allowedMemoryIds = new Set(memories.map((memory) => memory.id));
+      const sourceMemoryIds = [...new Set(draft.sourceMemoryIds)]
+        .filter((memoryId) => allowedMemoryIds.has(memoryId))
+        .slice(0, 128);
+      const profileNarrative = truncateToEstimatedTokens(draft.profileNarrative, 1_200);
+      const matchingNarrative = truncateToEstimatedTokens(draft.matchingNarrative, 1_000);
+      if (
+        containsSensitivePersonalData(profileNarrative)
+        || containsSensitivePersonalData(matchingNarrative)
+      ) {
+        throw new Error("记忆画像包含不允许持久化的敏感信息");
+      }
+      const sourceWatermark = memories
+        .map((memory) => memory.updatedAt)
+        .sort()
+        .at(-1) ?? null;
+      const next: UserMemoryProfile = {
+        ...profile,
+        profileNarrative,
+        matchingNarrative,
+        sourceMemoryIds,
+        sourceWatermark,
+        version: profile.version + 1,
+        stale: false,
+        updatedAt: new Date().toISOString()
+      };
+      try {
+        const saved = await this.store.saveMemoryProfile(next, profile.version);
+        return {
+          profileVersion: saved.version,
+          sourceMemoryCount: saved.sourceMemoryIds.length
+        };
+      } catch (error) {
+        lastError = error;
+        if (!(error instanceof StoreConflictError)) throw error;
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("更新用户记忆画像冲突");
   }
 }
