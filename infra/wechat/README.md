@@ -39,6 +39,11 @@ For a fresh clone without that convenience launcher:
 5. open `http://localhost:6174/vnc/?token=<agent-wechat-token>` and scan the QR;
 6. start the API, then run `pnpm dev:wechat`.
 
+The local launcher enables `WECHAT_AUTO_PROVISION=true` for `DEMO_MODE=true`, so
+the first message creates a deterministic temporary TOMEET profile and can reply
+immediately. In Supabase/non-demo environments this option is ignored; the
+WeChat identity must be linked to an existing account.
+
 ## Production notes
 
 - Replace the floating container tag with a reviewed image digest before a

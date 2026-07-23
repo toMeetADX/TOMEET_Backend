@@ -67,6 +67,8 @@ const app = await buildApp({
   inlineProcessor,
   frontendOrigin,
   internalApiToken: process.env.TOMEET_INTERNAL_API_TOKEN,
+  autoProvisionChannelUsers:
+    demoMode && process.env.WECHAT_AUTO_PROVISION === "true",
   logger: true,
   verifyAccessToken,
   trustProxy: isProduction,

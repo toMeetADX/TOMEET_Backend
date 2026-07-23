@@ -33,11 +33,29 @@ export interface BuildAppOptions {
   inlineProcessor?: JobProcessor;
   frontendOrigin?: string;
   internalApiToken?: string;
+  autoProvisionChannelUsers?: boolean;
   logger?: boolean;
   verifyAccessToken?: AccessTokenVerifier;
   trustProxy?: boolean;
   rateLimitMax?: number;
   exposeInternalErrors?: boolean;
+}
+
+function deterministicChannelUserId(provider: string, externalUserId: string): string {
+  const bytes = createHash("sha256")
+    .update(`${provider}:${externalUserId}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20)
+  ].join("-");
 }
 
 export async function buildApp(options: BuildAppOptions) {
@@ -155,7 +173,16 @@ export async function buildApp(options: BuildAppOptions) {
       return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
     }
     const input = resolveChannelIdentityInputSchema.parse(request.body);
-    const identity = await options.store.resolveChannelIdentity(input.provider, input.externalUserId);
+    let identity = await options.store.resolveChannelIdentity(input.provider, input.externalUserId);
+    if (!identity && options.autoProvisionChannelUsers) {
+      const userId = deterministicChannelUserId(input.provider, input.externalUserId);
+      await options.store.ensureUser(userId, "微信测试用户");
+      identity = await options.store.linkChannelIdentity({
+        ...input,
+        userId,
+        displayName: "微信测试用户"
+      });
+    }
     if (!identity) {
       return reply.code(404).send({
         error: "channel_identity_unlinked",
