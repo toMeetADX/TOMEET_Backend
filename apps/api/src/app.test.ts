@@ -137,7 +137,12 @@ describe("TOMEET core flow", () => {
     const store = new MemoryStore();
     const processor = new JobProcessor(store, new MockAgentIntelligence(), new MockMatchmakingIntelligence());
     const internalApiToken = "test-internal-token-that-is-at-least-32-characters";
-    const app = await buildApp({ store, inlineProcessor: processor, internalApiToken });
+    const app = await buildApp({
+      store,
+      inlineProcessor: processor,
+      internalApiToken,
+      rateLimitMax: 1
+    });
     apps.push(app);
     const userId = randomUUID();
     await store.ensureUser(userId, "Channel User");

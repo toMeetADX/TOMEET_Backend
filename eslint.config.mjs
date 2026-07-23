@@ -13,6 +13,7 @@ const compat = new FlatCompat({
 const nonWebTypeScriptFiles = [
   "apps/api/**/*.ts",
   "apps/intelligence-worker/**/*.ts",
+  "apps/wechat-ilink-worker/**/*.ts",
   "packages/**/*.ts"
 ];
 const webRootDirectory = fileURLToPath(new URL("./apps/web/", import.meta.url));

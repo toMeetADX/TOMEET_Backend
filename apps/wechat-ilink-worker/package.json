@@ -1,5 +1,5 @@
 {
-  "name": "@tomeet/wechat-gateway",
+  "name": "@tomeet/wechat-ilink-worker",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,10 +11,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@spectrum-ts/core": "8.2.2",
     "@tomeet/contracts": "workspace:*",
+    "@tomeet/data": "workspace:*",
+    "@tomeet/wechat-ilink": "workspace:*",
     "dotenv": "^16.5.0",
-    "photon-wechat-sdk": "workspace:*",
     "tsx": "^4.19.0"
   },
   "devDependencies": {

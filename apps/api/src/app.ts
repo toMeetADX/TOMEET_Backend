@@ -14,13 +14,14 @@ import {
 import type { DataStore } from "@tomeet/data";
 import { StoreConflictError, StoreNotFoundError } from "@tomeet/data";
 import type { JobProcessor } from "@tomeet/intelligence";
-import Fastify, { type FastifyRequest } from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import {
   AuthenticationError,
   AuthorizationError,
   type AccessTokenVerifier
 } from "./auth.js";
+import { registerWechatRoutes, type WechatApiRuntime } from "./wechat-routes.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -34,6 +35,7 @@ export interface BuildAppOptions {
   frontendOrigin?: string;
   internalApiToken?: string;
   autoProvisionChannelUsers?: boolean;
+  wechat?: WechatApiRuntime;
   logger?: boolean;
   verifyAccessToken?: AccessTokenVerifier;
   trustProxy?: boolean;
@@ -78,12 +80,25 @@ export async function buildApp(options: BuildAppOptions) {
     origin: allowedOrigins,
     credentials: true,
     methods: ["GET", "POST"],
-    allowedHeaders: ["authorization", "content-type", "x-request-id"]
+    allowedHeaders: [
+      "authorization",
+      "content-type",
+      "x-request-id",
+      "x-tomeet-internal-token",
+      "x-wechat-session-token"
+    ]
   });
   app.addHook("preValidation", async (request) => {
     if (!options.verifyAccessToken || request.method === "OPTIONS") return;
     const path = request.url.split("?", 1)[0];
-    if (path === "/health" || path === "/ready") return;
+    if (
+      path === "/health"
+      || path === "/ready"
+      || path?.startsWith("/internal/")
+      || path?.startsWith("/wechat/connect/sessions")
+    ) {
+      return;
+    }
     const authorization = request.headers.authorization;
     if (!authorization?.startsWith("Bearer ")) {
       throw new AuthenticationError("缺少 Bearer access token");
@@ -162,7 +177,13 @@ export async function buildApp(options: BuildAppOptions) {
     return timingSafeEqual(expectedHash, candidateHash);
   }
 
-  app.post("/internal/channel-identities/resolve", async (request, reply) => {
+  registerWechatRoutes(app, {
+    runtime: options.wechat,
+    internalApiEnabled: Boolean(options.internalApiToken),
+    internalTokenMatches
+  });
+
+  app.post("/internal/channel-identities/resolve", { config: { rateLimit: false } }, async (request, reply) => {
     if (!options.internalApiToken) {
       return reply.code(503).send({
         error: "internal_api_disabled",
@@ -192,7 +213,7 @@ export async function buildApp(options: BuildAppOptions) {
     return { identity };
   });
 
-  app.post("/internal/channel-identities", async (request, reply) => {
+  app.post("/internal/channel-identities", { config: { rateLimit: false } }, async (request, reply) => {
     if (!options.internalApiToken) {
       return reply.code(503).send({
         error: "internal_api_disabled",
@@ -207,7 +228,7 @@ export async function buildApp(options: BuildAppOptions) {
     return reply.code(201).send({ identity });
   });
 
-  app.post("/agent/messages", async (request, reply) => {
+  async function submitAgentMessage(request: FastifyRequest, reply: FastifyReply) {
     const input = agentMessageInputSchema.parse(request.body);
     assertCurrentUser(request, input.userId);
     await options.store.ensureUser(input.userId, input.displayName);
@@ -225,12 +246,36 @@ export async function buildApp(options: BuildAppOptions) {
     });
     const currentJob = await runInline(job.id);
     return reply.code(currentJob?.status === "completed" ? 200 : 202).send({ userMessage, job: currentJob });
+  }
+
+  app.post("/agent/messages", submitAgentMessage);
+
+  app.post("/internal/agent/messages", { config: { rateLimit: false } }, async (request, reply) => {
+    if (!options.internalApiToken) {
+      return reply.code(503).send({
+        error: "internal_api_disabled",
+        message: "内部渠道 API 未配置"
+      });
+    }
+    if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
+      return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
+    }
+    return submitAgentMessage(request, reply);
   });
 
-  app.get("/agent/messages/:userId", async (request) => {
+  async function listAgentMessages(request: FastifyRequest) {
     const { userId } = z.object({ userId: uuidSchema }).parse(request.params);
     assertCurrentUser(request, userId);
     return { messages: await options.store.listRecentMessages(userId, 100) };
+  }
+
+  app.get("/agent/messages/:userId", listAgentMessages);
+
+  app.get("/internal/agent/messages/:userId", { config: { rateLimit: false } }, async (request, reply) => {
+    if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
+      return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
+    }
+    return listAgentMessages(request);
   });
 
   app.post("/agent/multimodal-inputs", async (request, reply) => {
@@ -348,7 +393,7 @@ export async function buildApp(options: BuildAppOptions) {
     return { matchRequest: await options.store.cancelMatchRequest(id) };
   });
 
-  app.get("/jobs/:id", async (request) => {
+  async function getJob(request: FastifyRequest) {
     const { id } = z.object({ id: uuidSchema }).parse(request.params);
     const job = await options.store.getJob(id);
     if (!job) throw new StoreNotFoundError("任务不存在");
@@ -356,6 +401,15 @@ export async function buildApp(options: BuildAppOptions) {
       throw new StoreNotFoundError("任务不存在");
     }
     return { job };
+  }
+
+  app.get("/jobs/:id", getJob);
+
+  app.get("/internal/jobs/:id", { config: { rateLimit: false } }, async (request, reply) => {
+    if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
+      return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
+    }
+    return getJob(request);
   });
 
   app.get("/rooms/:id", async (request) => {
