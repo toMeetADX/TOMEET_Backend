@@ -1,9 +1,6 @@
 import type { PostEventFeedback, UserModel } from "@tomeet/contracts";
 
 interface FeedbackModelInsight {
-  memory: string;
-  vibeNarrative?: string;
-  longTermProfilePatch: Record<string, unknown>;
   currentIntent: Record<string, unknown>;
 }
 import { applyPostEventFeedback } from "@tomeet/user-model";

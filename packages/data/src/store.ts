@@ -7,6 +7,11 @@ import type {
   Message,
   OfflineGame,
   PostEventFeedback,
+  UserMemory,
+  UserMemoryCandidate,
+  UserMemoryExplicitness,
+  UserMemoryProfile,
+  UserMemorySourceType,
   UserModel
 } from "@tomeet/contracts";
 import type { MatchCandidate } from "@tomeet/matchmaking";
@@ -16,6 +21,7 @@ export interface EnqueueJobInput {
   payload: Record<string, unknown>;
   idempotencyKey: string;
   maxAttempts?: number;
+  partitionKey?: string;
 }
 
 export interface MultimodalRecordInput {
@@ -30,6 +36,21 @@ export interface MultimodalRecordInput {
 export interface ConversationState {
   rollingSummary: string;
   summarizedMessageCount: number;
+}
+
+export interface ApplyMemoryChangesInput {
+  userId: string;
+  sourceType: UserMemorySourceType;
+  sourceId: string;
+  explicitness: UserMemoryExplicitness;
+  candidates: UserMemoryCandidate[];
+  forgetMemoryIds: string[];
+  forgetAll: boolean;
+}
+
+export interface ApplyMemoryChangesResult {
+  memories: UserMemory[];
+  forgottenCount: number;
 }
 
 export interface DataStore {
@@ -52,6 +73,15 @@ export interface DataStore {
   ): Promise<void>;
   getUserModel(userId: string): Promise<UserModel>;
   saveUserModel(model: UserModel, expectedVersion: number): Promise<UserModel>;
+  listActiveMemories(userId: string, limit?: number): Promise<UserMemory[]>;
+  applyMemoryChanges(input: ApplyMemoryChangesInput): Promise<ApplyMemoryChangesResult>;
+  getMemoryProfile(userId: string): Promise<UserMemoryProfile>;
+  saveMemoryProfile(
+    profile: UserMemoryProfile,
+    expectedVersion: number
+  ): Promise<UserMemoryProfile>;
+  markMemoryProfileStale(userId: string): Promise<void>;
+  recordMemoryUsage(userId: string, memoryIds: string[]): Promise<void>;
   saveMultimodalInput(input: MultimodalRecordInput): Promise<string>;
   uploadFile(storagePath: string, mimeType: string, bytes: Uint8Array): Promise<void>;
   createSignedUpload(storagePath: string): Promise<{ path: string; token: string }>;

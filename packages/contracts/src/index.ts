@@ -98,11 +98,102 @@ export const postEventFeedbackSchema = z.object({
 });
 export type PostEventFeedback = z.infer<typeof postEventFeedbackSchema>;
 
+export const userMemoryKindSchema = z.enum([
+  "stable_fact",
+  "preference",
+  "interaction_preference",
+  "social_learning",
+  "boundary",
+  "temporary_state",
+  "multimodal_impression"
+]);
+export type UserMemoryKind = z.infer<typeof userMemoryKindSchema>;
+
+export const userMemoryStatusSchema = z.enum([
+  "active",
+  "superseded",
+  "forgotten",
+  "expired"
+]);
+export type UserMemoryStatus = z.infer<typeof userMemoryStatusSchema>;
+
+export const userMemorySourceTypeSchema = z.enum([
+  "message",
+  "multimodal",
+  "feedback"
+]);
+export type UserMemorySourceType = z.infer<typeof userMemorySourceTypeSchema>;
+
+export const userMemoryExplicitnessSchema = z.enum([
+  "explicit",
+  "experienced",
+  "observed"
+]);
+export type UserMemoryExplicitness = z.infer<typeof userMemoryExplicitnessSchema>;
+
+export const userMemorySchema = z.object({
+  id: idSchema,
+  userId: idSchema,
+  kind: userMemoryKindSchema,
+  stableKey: z.string().min(1).max(200),
+  content: z.string().min(1).max(1_000),
+  sourceType: userMemorySourceTypeSchema,
+  sourceId: idSchema,
+  explicitness: userMemoryExplicitnessSchema,
+  status: userMemoryStatusSchema,
+  supersededBy: idSchema.nullable(),
+  confirmationCount: z.number().int().positive(),
+  usageCount: z.number().int().nonnegative(),
+  lastConfirmedAt: z.string().datetime(),
+  lastUsedAt: z.string().datetime().nullable(),
+  expiresAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+});
+export type UserMemory = z.infer<typeof userMemorySchema>;
+
+export const userMemoryCandidateSchema = z.object({
+  kind: userMemoryKindSchema,
+  stableKey: z.string().trim().min(1).max(200),
+  content: z.string().trim().min(1).max(1_000),
+  expiresAt: z.string().datetime().nullable().optional()
+});
+export type UserMemoryCandidate = z.infer<typeof userMemoryCandidateSchema>;
+
+export const memoryExtractionResultSchema = z.object({
+  candidates: z.array(userMemoryCandidateSchema).max(8),
+  forgetMemoryIds: z.array(idSchema).max(32),
+  forgetAll: z.boolean(),
+  rejectedSensitiveCount: z.number().int().nonnegative().max(100)
+});
+export type MemoryExtractionResult = z.infer<typeof memoryExtractionResultSchema>;
+
+export const userMemoryProfileSchema = z.object({
+  userId: idSchema,
+  profileNarrative: z.string().max(6_000),
+  matchingNarrative: z.string().max(4_000),
+  sourceMemoryIds: z.array(idSchema).max(128),
+  sourceWatermark: z.string().datetime().nullable(),
+  version: z.number().int().nonnegative(),
+  stale: z.boolean(),
+  updatedAt: z.string().datetime()
+});
+export type UserMemoryProfile = z.infer<typeof userMemoryProfileSchema>;
+
+export const memoryProfileDraftSchema = z.object({
+  profileNarrative: z.string().max(6_000),
+  matchingNarrative: z.string().max(4_000),
+  sourceMemoryIds: z.array(idSchema).max(128)
+});
+export type MemoryProfileDraft = z.infer<typeof memoryProfileDraftSchema>;
+
 export const llmJobTypeSchema = z.enum([
   "agent_reply",
   "multimodal_understanding",
   "matchmaking",
-  "feedback_update"
+  "feedback_update",
+  "memory_extract",
+  "memory_consolidate"
 ]);
 export type LlmJobType = z.infer<typeof llmJobTypeSchema>;
 
@@ -115,6 +206,7 @@ export const llmJobSchema = z.object({
   error: z.string().nullable(),
   attempts: z.number().int().nonnegative(),
   maxAttempts: z.number().int().positive(),
+  partitionKey: z.string().max(200).nullable().default(null),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime()
 });

@@ -92,7 +92,8 @@ export function buildApp(options: BuildAppOptions) {
     const job = await options.store.enqueueJob({
       type: "agent_reply",
       payload: { userId: input.userId, content: input.content, userMessageId: userMessage.id },
-      idempotencyKey: `agent:${userMessage.id}`
+      idempotencyKey: `agent:${userMessage.id}`,
+      partitionKey: `user:${input.userId}`
     });
     const currentJob = await runInline(job.id);
     return reply.code(currentJob?.status === "completed" ? 200 : 202).send({ userMessage, job: currentJob });
@@ -120,7 +121,8 @@ export function buildApp(options: BuildAppOptions) {
     const job = await options.store.enqueueJob({
       type: "multimodal_understanding",
       payload: { ...input, inputId },
-      idempotencyKey: `multimodal:${inputId}`
+      idempotencyKey: `multimodal:${inputId}`,
+      partitionKey: `user:${input.userId}`
     });
     const currentJob = await runInline(job.id);
     return reply.code(currentJob?.status === "completed" ? 200 : 202).send({ inputId, job: currentJob });
@@ -185,7 +187,8 @@ export function buildApp(options: BuildAppOptions) {
     const job = await options.store.enqueueJob({
       type: "matchmaking",
       payload: { requestId: matchRequest.requestId },
-      idempotencyKey: `match:${matchRequest.requestId}`
+      idempotencyKey: `match:${matchRequest.requestId}`,
+      partitionKey: `user:${input.userId}`
     });
     const currentJob = await runInline(job.id);
     const latestRequest = await options.store.getMatchRequest(matchRequest.requestId);
@@ -237,7 +240,8 @@ export function buildApp(options: BuildAppOptions) {
     const job = await options.store.enqueueJob({
       type: "feedback_update",
       payload: { feedback, feedbackId },
-      idempotencyKey: `feedback:${feedbackId}`
+      idempotencyKey: `feedback:${feedbackId}`,
+      partitionKey: `user:${feedback.userId}`
     });
     const currentJob = await runInline(job.id);
     return reply.code(currentJob?.status === "completed" ? 200 : 202).send({ feedbackId, job: currentJob });

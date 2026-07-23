@@ -7,13 +7,21 @@ import type {
   Message,
   OfflineGame,
   PostEventFeedback,
+  UserMemory,
+  UserMemoryProfile,
   UserModel
 } from "@tomeet/contracts";
 import { curatedGames } from "@tomeet/game-catalog";
 import type { MatchCandidate } from "@tomeet/matchmaking";
 import { validateMatchDecision } from "@tomeet/matchmaking";
 import { createDefaultUserModel } from "@tomeet/user-model";
-import type { DataStore, EnqueueJobInput, MultimodalRecordInput } from "./store.js";
+import type {
+  ApplyMemoryChangesInput,
+  ApplyMemoryChangesResult,
+  DataStore,
+  EnqueueJobInput,
+  MultimodalRecordInput
+} from "./store.js";
 import { StoreConflictError, StoreNotFoundError } from "./store.js";
 
 interface MemoryUser {
@@ -36,9 +44,24 @@ export class MemoryStore implements DataStore {
   private readonly uploadedFiles = new Map<string, { mimeType: string; bytes: Uint8Array }>();
   private readonly feedbackKeys = new Map<string, string>();
   private readonly sourceJobRooms = new Map<string, string>();
+  private readonly userMemories = new Map<string, UserMemory>();
+  private readonly memoryProfiles = new Map<string, UserMemoryProfile>();
 
   constructor(options: { seedDemoData?: boolean } = {}) {
     if (options.seedDemoData) this.seedDemoData();
+  }
+
+  private createMemoryProfile(userId: string): UserMemoryProfile {
+    return {
+      userId,
+      profileNarrative: "",
+      matchingNarrative: "",
+      sourceMemoryIds: [],
+      sourceWatermark: null,
+      version: 0,
+      stale: false,
+      updatedAt: new Date().toISOString()
+    };
   }
 
   private seedDemoData(): void {
@@ -57,6 +80,7 @@ export class MemoryStore implements DataStore {
         model,
         conversation: { rollingSummary: "", summarizedMessageCount: 0 }
       });
+      this.memoryProfiles.set(userId, this.createMemoryProfile(userId));
       const now = new Date().toISOString();
       const requestId = randomUUID();
       this.matchRequests.set(requestId, {
@@ -78,8 +102,12 @@ export class MemoryStore implements DataStore {
         model: createDefaultUserModel(userId),
         conversation: { rollingSummary: "", summarizedMessageCount: 0 }
       });
+      this.memoryProfiles.set(userId, this.createMemoryProfile(userId));
     } else if (displayName !== "新朋友") {
       this.users.get(userId)!.displayName = displayName;
+    }
+    if (!this.memoryProfiles.has(userId)) {
+      this.memoryProfiles.set(userId, this.createMemoryProfile(userId));
     }
   }
 
@@ -151,6 +179,142 @@ export class MemoryStore implements DataStore {
     if (user.model.version !== expectedVersion) throw new StoreConflictError("用户模型已被其他任务更新");
     user.model = structuredClone(model);
     return structuredClone(user.model);
+  }
+
+  async listActiveMemories(userId: string, limit = 128): Promise<UserMemory[]> {
+    await this.ensureUser(userId);
+    const now = Date.now();
+    let expired = false;
+    for (const memory of this.userMemories.values()) {
+      if (
+        memory.userId === userId
+        && memory.status === "active"
+        && memory.expiresAt
+        && new Date(memory.expiresAt).getTime() <= now
+      ) {
+        memory.status = "expired";
+        memory.updatedAt = new Date().toISOString();
+        expired = true;
+      }
+    }
+    if (expired) await this.markMemoryProfileStale(userId);
+    return [...this.userMemories.values()]
+      .filter((memory) => memory.userId === userId && memory.status === "active")
+      .sort((left, right) => right.lastConfirmedAt.localeCompare(left.lastConfirmedAt))
+      .slice(0, Math.min(Math.max(limit, 1), 128))
+      .map((memory) => structuredClone(memory));
+  }
+
+  async applyMemoryChanges(input: ApplyMemoryChangesInput): Promise<ApplyMemoryChangesResult> {
+    await this.ensureUser(input.userId);
+    const now = new Date().toISOString();
+    let forgottenCount = 0;
+    if (input.forgetAll) {
+      for (const memory of this.userMemories.values()) {
+        if (memory.userId !== input.userId || memory.status !== "active") continue;
+        memory.status = "forgotten";
+        memory.updatedAt = now;
+        forgottenCount += 1;
+      }
+    }
+    for (const memoryId of new Set(input.forgetMemoryIds)) {
+      const memory = this.userMemories.get(memoryId);
+      if (!memory || memory.userId !== input.userId || memory.status !== "active") continue;
+      memory.status = "forgotten";
+      memory.updatedAt = now;
+      forgottenCount += 1;
+    }
+
+    const written: UserMemory[] = [];
+    for (const candidate of input.candidates) {
+      const existing = [...this.userMemories.values()].find((memory) =>
+        memory.userId === input.userId
+        && memory.status === "active"
+        && memory.kind === candidate.kind
+        && memory.stableKey === candidate.stableKey
+      );
+      if (existing?.content === candidate.content) {
+        existing.confirmationCount += 1;
+        existing.lastConfirmedAt = now;
+        existing.sourceType = input.sourceType;
+        existing.sourceId = input.sourceId;
+        existing.explicitness = input.explicitness;
+        existing.expiresAt = candidate.expiresAt ?? null;
+        existing.updatedAt = now;
+        written.push(structuredClone(existing));
+        continue;
+      }
+
+      const id = randomUUID();
+      const memory: UserMemory = {
+        id,
+        userId: input.userId,
+        kind: candidate.kind,
+        stableKey: candidate.stableKey,
+        content: candidate.content,
+        sourceType: input.sourceType,
+        sourceId: input.sourceId,
+        explicitness: input.explicitness,
+        status: "active",
+        supersededBy: null,
+        confirmationCount: 1,
+        usageCount: 0,
+        lastConfirmedAt: now,
+        lastUsedAt: null,
+        expiresAt: candidate.expiresAt ?? null,
+        createdAt: now,
+        updatedAt: now
+      };
+      if (existing) {
+        existing.status = "superseded";
+        existing.supersededBy = id;
+        existing.updatedAt = now;
+      }
+      this.userMemories.set(id, memory);
+      written.push(structuredClone(memory));
+    }
+
+    if (forgottenCount > 0 || written.length > 0) {
+      await this.markMemoryProfileStale(input.userId);
+    }
+    return { memories: written, forgottenCount };
+  }
+
+  async getMemoryProfile(userId: string): Promise<UserMemoryProfile> {
+    await this.ensureUser(userId);
+    await this.listActiveMemories(userId, 1);
+    return structuredClone(this.memoryProfiles.get(userId)!);
+  }
+
+  async saveMemoryProfile(
+    profile: UserMemoryProfile,
+    expectedVersion: number
+  ): Promise<UserMemoryProfile> {
+    await this.ensureUser(profile.userId);
+    const current = this.memoryProfiles.get(profile.userId)!;
+    if (current.version !== expectedVersion) {
+      throw new StoreConflictError("用户记忆画像已被其他任务更新");
+    }
+    this.memoryProfiles.set(profile.userId, structuredClone(profile));
+    return structuredClone(profile);
+  }
+
+  async markMemoryProfileStale(userId: string): Promise<void> {
+    await this.ensureUser(userId);
+    const profile = this.memoryProfiles.get(userId)!;
+    profile.stale = true;
+    profile.updatedAt = new Date().toISOString();
+  }
+
+  async recordMemoryUsage(userId: string, memoryIds: string[]): Promise<void> {
+    const now = new Date().toISOString();
+    for (const memoryId of new Set(memoryIds)) {
+      const memory = this.userMemories.get(memoryId);
+      if (!memory || memory.userId !== userId || memory.status !== "active") continue;
+      memory.usageCount += 1;
+      memory.lastUsedAt = now;
+      memory.updatedAt = now;
+    }
   }
 
   async saveMultimodalInput(input: MultimodalRecordInput): Promise<string> {
@@ -237,7 +401,15 @@ export class MemoryStore implements DataStore {
       .slice(0, limit);
     return requests.map((request) => ({
       request: structuredClone(request),
-      userModel: structuredClone(this.users.get(request.userId)!.model)
+      userModel: structuredClone(this.users.get(request.userId)!.model),
+      matchingNarrative: this.memoryProfiles.get(request.userId)?.stale
+        ? this.memoryProfiles.get(request.userId)?.version === 0
+          ? this.users.get(request.userId)!.model.vibeNarrative
+          : ""
+        : this.memoryProfiles.get(request.userId)?.version === 0
+          ? this.memoryProfiles.get(request.userId)?.matchingNarrative
+            || this.users.get(request.userId)!.model.vibeNarrative
+          : this.memoryProfiles.get(request.userId)?.matchingNarrative ?? ""
     }));
   }
 
@@ -356,6 +528,7 @@ export class MemoryStore implements DataStore {
       error: null,
       attempts: 0,
       maxAttempts: input.maxAttempts ?? 3,
+      partitionKey: input.partitionKey ?? null,
       createdAt: now,
       updatedAt: now
     };
@@ -370,7 +543,17 @@ export class MemoryStore implements DataStore {
   }
 
   async claimJob(_workerId: string): Promise<LlmJob | null> {
-    const job = [...this.jobs.values()].find((item) => item.status === "pending" || item.status === "retry");
+    const processingPartitions = new Set(
+      [...this.jobs.values()]
+        .filter((item) => item.status === "processing" && item.partitionKey)
+        .map((item) => item.partitionKey)
+    );
+    const job = [...this.jobs.values()]
+      .filter((item) =>
+        (item.status === "pending" || item.status === "retry")
+        && (!item.partitionKey || !processingPartitions.has(item.partitionKey))
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
     if (!job) return null;
     job.status = "processing";
     job.attempts += 1;

@@ -1,6 +1,10 @@
 import { resolve } from "node:path";
 import { config } from "dotenv";
-import { HostedLlmIntelligence, TavilyWebSearchProvider } from "@tomeet/intelligence";
+import {
+  buildAgentContext,
+  HostedLlmIntelligence,
+  TavilyWebSearchProvider
+} from "@tomeet/intelligence";
 
 config({ path: resolve(process.cwd(), ".env") });
 config({ path: resolve(process.cwd(), "../../.env"), override: false });
@@ -25,10 +29,8 @@ const intelligence = new HostedLlmIntelligence({
   timeZone: "Asia/Shanghai"
 });
 
-const insight = await intelligence.reply({
-  recentMessages: [],
-  rollingSummary: "",
-  userModel: {
+const insight = await intelligence.reply(
+  buildAgentContext([], {
     userId: "00000000-0000-4000-8000-000000000001",
     vibeNarrative: "",
     longTermProfile: {},
@@ -38,12 +40,9 @@ const insight = await intelligence.reply({
     multimodalUnderstanding: {},
     version: 0,
     updatedAt: new Date().toISOString()
-  },
-  relevantFeedback: [],
-  relevantMatches: [],
-  matchRequest: null,
-  room: null
-}, "AdventureX 2026 是什么，日期和地点是什么？请联网核实并给出来源。");
+  }),
+  "AdventureX 2026 是什么，日期和地点是什么？请联网核实并给出来源。"
+);
 
 if (insight.webSearch?.status !== "completed") {
   throw new Error(`联网搜索未完成：${insight.webSearch?.status ?? "missing"}`);

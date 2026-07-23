@@ -7,7 +7,8 @@ import {
   useState,
   type ChangeEvent,
   type FormEvent,
-  type KeyboardEvent
+  type KeyboardEvent,
+  type ReactNode
 } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
@@ -23,6 +24,47 @@ interface Job {
   id: string;
   status: "pending" | "processing" | "completed" | "retry" | "failed";
   error?: string | null;
+}
+
+const MARKDOWN_LINK_PATTERN = /\[([^\]\n]{1,160})\]\((https?:\/\/[^\s)]+)\)/gu;
+
+function isSafeExternalUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+function MessageContent({ content }: Readonly<{ content: string }>) {
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+
+  for (const match of content.matchAll(MARKDOWN_LINK_PATTERN)) {
+    const index = match.index;
+    const label = match[1];
+    const url = match[2];
+    if (index === undefined || !label || !url || !isSafeExternalUrl(url)) continue;
+
+    if (index > cursor) parts.push(content.slice(cursor, index));
+    parts.push(
+      <a
+        className="venueLink"
+        href={url}
+        key={`${index}-${url}`}
+        rel="noopener noreferrer"
+        target="_blank"
+      >
+        {label}
+        <span aria-hidden="true">↗</span>
+      </a>
+    );
+    cursor = index + match[0].length;
+  }
+
+  if (cursor < content.length) parts.push(content.slice(cursor));
+  return <>{parts.length > 0 ? parts : content}</>;
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -123,40 +165,50 @@ export default function ChatPage() {
     }
   }
 
+  /**
+   * 处理图片上传并发送到服务器
+   * @param event - 触发上传事件的input元素事件对象
+   */
   async function sendImage(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
+    const file = event.target.files?.[0]; // 获取用户选择的文件
+    event.target.value = ""; // 重置input的值，允许用户再次选择同一文件
+    // 检查文件是否存在、用户ID是否存在以及是否正在发送中
     if (!file || !userId || sending) return;
+    // 验证文件类型是否为支持的图片格式
     if (!(["image/jpeg", "image/png", "image/webp"] as string[]).includes(file.type)) {
       setError("请选择 JPG、PNG 或 WebP 图片");
       return;
     }
+    // 验证文件大小是否超过10MB限制
     if (file.size > 10 * 1024 * 1024) {
       setError("图片不能超过 10MB");
       return;
     }
 
-    const hint = draft.trim();
-    setDraft("");
-    setError("");
-    setSending(true);
+    const hint = draft.trim(); // 获取并处理用户输入的提示文本
+    setDraft(""); // 清空草稿
+    setError(""); // 清空错误信息
+    setSending(true); // 设置发送状态为true
+    // 将用户消息（包含图片和提示）添加到消息列表中
     setMessages((current) => [...current, {
-      id: `local-${crypto.randomUUID()}`,
-      role: "user",
-      content: `[图片] ${file.name}${hint ? `\n${hint}` : ""}`,
-      createdAt: new Date().toISOString()
+      id: `local-${crypto.randomUUID()}`, // 生成临时ID
+      role: "user", // 设置消息角色为用户
+      content: `[图片] ${file.name}${hint ? `\n${hint}` : ""}`, // 消息内容包含图片名和提示
+      createdAt: new Date().toISOString() // 添加时间戳
     }]);
 
     try {
+      // 上传图片到服务器
       const uploaded = await api<{ storagePath: string; mimeType: string; sizeBytes: number }>("/uploads", {
         method: "POST",
         body: JSON.stringify({
           userId,
           fileName: file.name,
           mimeType: file.type,
-          dataUrl: await readAsDataUrl(file)
+          dataUrl: await readAsDataUrl(file) // 将文件转换为Data URL格式
         })
       });
+      // 发送图片信息到多模态输入接口
       const response = await api<{ job: Job }>("/agent/multimodal-inputs", {
         method: "POST",
         body: JSON.stringify({
@@ -165,16 +217,21 @@ export default function ChatPage() {
           storagePath: uploaded.storagePath,
           mimeType: uploaded.mimeType,
           sizeBytes: uploaded.sizeBytes,
-          hint: hint || undefined
+          hint: hint || undefined // 如果有提示则发送，否则为undefined
         })
       });
+      // 等待任务处理完成
       const job = await waitForJob(response.job);
       if (job.status === "failed") throw new Error(job.error || "图片理解失败");
+      // 刷新消息列表
       await refreshMessages(userId);
     } catch (caught) {
+      // 错误处理
       setError(caught instanceof Error ? caught.message : String(caught));
+      // 尝试刷新消息列表，即使出错也要更新UI
       await refreshMessages(userId).catch(() => undefined);
     } finally {
+      // 无论成功失败，最终都要将发送状态设为false
       setSending(false);
     }
   }
@@ -207,7 +264,7 @@ export default function ChatPage() {
 
         {messages.map((message) => (
           <div className={`message ${message.role}`} key={message.id}>
-            <div className="bubble">{message.content}</div>
+            <div className="bubble"><MessageContent content={message.content} /></div>
           </div>
         ))}
 

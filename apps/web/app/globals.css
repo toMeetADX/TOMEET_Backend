@@ -15,6 +15,11 @@ h1 { margin:0; font-size:16px; letter-spacing:.02em; }
 .bubble { max-width:min(78%,560px); padding:12px 15px; border-radius:6px 18px 18px 18px; white-space:pre-wrap; word-break:break-word; background:var(--soft); }
 .user .bubble { color:#fff; border-radius:18px 6px 18px 18px; background:var(--green); }
 .welcome .bubble { color:#3f4d45; }
+.venueLink { display:inline-flex; align-items:baseline; gap:4px; color:#0f6847; font-weight:700; text-decoration:underline; text-decoration-color:#86b7a3; text-decoration-thickness:1px; text-underline-offset:3px; }
+.venueLink:hover { color:#084d34; text-decoration-color:currentColor; }
+.venueLink:focus-visible { border-radius:4px; outline:2px solid #52a781; outline-offset:3px; }
+.venueLink span { font-size:.78em; text-decoration:none; }
+.user .venueLink { color:#fff; text-decoration-color:rgba(255,255,255,.65); }
 .typing { display:flex; align-items:center; gap:4px; min-height:45px; }
 .typing i { width:6px; height:6px; border-radius:50%; background:#8ea097; animation:pulse 1.2s infinite; }
 .typing i:nth-child(2) { animation-delay:.15s; }.typing i:nth-child(3) { animation-delay:.3s; }
