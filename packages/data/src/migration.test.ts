@@ -51,6 +51,253 @@ describe("Supabase migration", () => {
     expect(memoryTables.rows).toHaveLength(2);
   });
 
+  it("keeps WeChat identities server-managed and one-to-one", async () => {
+    const table = await db.query<{ relrowsecurity: boolean }>(`
+      select relrowsecurity
+      from pg_class
+      where oid = 'public.channel_identities'::regclass
+    `);
+    expect(table.rows[0]?.relrowsecurity).toBe(true);
+
+    const clientGrants = await db.query<{ grantee: string }>(`
+      select grantee
+      from information_schema.role_table_grants
+      where table_schema = 'public'
+        and table_name = 'channel_identities'
+        and grantee in ('anon', 'authenticated')
+    `);
+    expect(clientGrants.rows).toHaveLength(0);
+    const clientFunctionGrants = await db.query<{
+      anon_activate: boolean;
+      authenticated_claim: boolean;
+    }>(`
+      select
+        has_function_privilege(
+          'anon',
+          'public.activate_wechat_ilink_session(uuid,uuid,text,text,text,text)',
+          'execute'
+        ) as anon_activate,
+        has_function_privilege(
+          'authenticated',
+          'public.claim_wechat_ilink_connections(text,integer,integer)',
+          'execute'
+        ) as authenticated_claim
+    `);
+    expect(clientFunctionGrants.rows[0]).toEqual({
+      anon_activate: false,
+      authenticated_claim: false
+    });
+
+    const firstUserId = "23000000-0000-4000-8000-000000000001";
+    const secondUserId = "23000000-0000-4000-8000-000000000002";
+    await db.query("select ensure_tomeet_user($1::uuid, 'First Channel User')", [firstUserId]);
+    await db.query("select ensure_tomeet_user($1::uuid, 'Second Channel User')", [secondUserId]);
+    await db.query(`
+      insert into public.channel_identities (provider, external_user_id, user_id)
+      values ('wechat', 'wxid_first', $1::uuid)
+    `, [firstUserId]);
+
+    await expect(db.query(`
+      insert into public.channel_identities (provider, external_user_id, user_id)
+      values ('wechat', 'wxid_first', $1::uuid)
+    `, [secondUserId])).rejects.toThrow();
+    await expect(db.query(`
+      insert into public.channel_identities (provider, external_user_id, user_id)
+      values ('wechat', 'wxid_second', $1::uuid)
+    `, [firstUserId])).rejects.toThrow();
+  });
+
+  it("atomically provisions encrypted iLink connections with server-only access", async () => {
+    const tables = await db.query<{ relname: string; relrowsecurity: boolean }>(`
+      select relname, relrowsecurity
+      from pg_class
+      where oid in (
+        'public.wechat_connection_sessions'::regclass,
+        'public.wechat_ilink_connections'::regclass,
+        'public.wechat_message_receipts'::regclass
+      )
+      order by relname
+    `);
+    expect(tables.rows).toHaveLength(3);
+    expect(tables.rows.every((row) => row.relrowsecurity)).toBe(true);
+    const plaintextQrColumns = await db.query<{ column_name: string }>(`
+      select column_name
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'wechat_connection_sessions'
+        and column_name = 'qr_code_content'
+    `);
+    expect(plaintextQrColumns.rows).toHaveLength(0);
+
+    const clientGrants = await db.query<{ grantee: string }>(`
+      select grantee
+      from information_schema.role_table_grants
+      where table_schema = 'public'
+        and table_name in (
+          'wechat_connection_sessions',
+          'wechat_ilink_connections',
+          'wechat_message_receipts'
+        )
+        and grantee in ('PUBLIC', 'anon', 'authenticated')
+    `);
+    expect(clientGrants.rows).toHaveLength(0);
+
+    const sessionId = "24000000-0000-4000-8000-000000000001";
+    const newUserId = "24000000-0000-4000-8000-000000000002";
+    await db.query(`
+      insert into public.wechat_connection_sessions (
+        id,
+        session_token_hash,
+        qr_token_ciphertext,
+        expires_at
+      ) values (
+        $1::uuid,
+        repeat('a', 64),
+        repeat('b', 64),
+        now() + interval '5 minutes'
+      )
+    `, [sessionId]);
+    const activation = await db.query<{
+      activate_wechat_ilink_session: {
+        session: { status: string; user_id: string };
+        connection: { status: string; user_id: string };
+      };
+    }>(`
+      select public.activate_wechat_ilink_session(
+        $1::uuid,
+        $2::uuid,
+        'ilink-owner-migration',
+        'ilink-bot-migration',
+        repeat('c', 64),
+        'https://ilink.example.com'
+      )
+    `, [sessionId, newUserId]);
+    expect(activation.rows[0]?.activate_wechat_ilink_session.session).toMatchObject({
+      status: "active",
+      user_id: newUserId
+    });
+    expect(activation.rows[0]?.activate_wechat_ilink_session.connection).toMatchObject({
+      status: "active",
+      user_id: newUserId
+    });
+
+    const profileParts = await db.query<{ count: number }>(`
+      select (
+        (select count(*) from public.users where id = $1::uuid)
+        + (select count(*) from public.conversations where user_id = $1::uuid)
+        + (select count(*) from public.user_models where user_id = $1::uuid)
+        + (select count(*) from public.user_memory_profiles where user_id = $1::uuid)
+      )::integer as count
+    `, [newUserId]);
+    expect(profileParts.rows[0]?.count).toBe(4);
+
+    const reconnectSessionId = "24000000-0000-4000-8000-000000000003";
+    const unusedNewUserId = "24000000-0000-4000-8000-000000000004";
+    await db.query(`
+      insert into public.wechat_connection_sessions (
+        id,
+        session_token_hash,
+        qr_token_ciphertext,
+        expires_at
+      ) values (
+        $1::uuid,
+        repeat('d', 64),
+        repeat('e', 64),
+        now() + interval '5 minutes'
+      )
+    `, [reconnectSessionId]);
+    const reconnect = await db.query<{
+      activate_wechat_ilink_session: {
+        session: { user_id: string };
+        connection: { user_id: string; bot_token_ciphertext: string };
+      };
+    }>(`
+      select public.activate_wechat_ilink_session(
+        $1::uuid,
+        $2::uuid,
+        'ilink-owner-migration',
+        'ilink-bot-rotated',
+        repeat('f', 64),
+        'https://ilink-rotated.example.com'
+      )
+    `, [reconnectSessionId, unusedNewUserId]);
+    expect(reconnect.rows[0]?.activate_wechat_ilink_session.session.user_id)
+      .toBe(newUserId);
+    expect(reconnect.rows[0]?.activate_wechat_ilink_session.connection).toMatchObject({
+      user_id: newUserId,
+      bot_token_ciphertext: "f".repeat(64)
+    });
+    const connectionCount = await db.query<{ count: number }>(`
+      select count(*)::integer as count
+      from public.wechat_ilink_connections
+      where owner_ilink_user_id = 'ilink-owner-migration'
+    `);
+    expect(connectionCount.rows[0]?.count).toBe(1);
+
+    const conflictingUserId = "24000000-0000-4000-8000-000000000005";
+    const conflictingSessionId = "24000000-0000-4000-8000-000000000006";
+    await db.query("select ensure_tomeet_user($1::uuid, 'Conflicting WeChat User')", [
+      conflictingUserId
+    ]);
+    await db.query(`
+      insert into public.wechat_connection_sessions (
+        id,
+        session_token_hash,
+        qr_token_ciphertext,
+        expires_at,
+        requested_user_id
+      ) values (
+        $1::uuid,
+        repeat('1', 64),
+        repeat('2', 64),
+        now() + interval '5 minutes',
+        $2::uuid
+      )
+    `, [conflictingSessionId, conflictingUserId]);
+    await expect(db.query(`
+      select public.activate_wechat_ilink_session(
+        $1::uuid,
+        $2::uuid,
+        'ilink-owner-migration',
+        'ilink-bot-conflict',
+        repeat('3', 64),
+        'https://ilink.example.com'
+      )
+    `, [conflictingSessionId, unusedNewUserId])).rejects.toThrow();
+
+    const claimed = await db.query<{
+      claim_wechat_ilink_connections: Array<{ id: string; lease_owner: string }>;
+    }>("select public.claim_wechat_ilink_connections('migration-worker', 4, 90)");
+    expect(claimed.rows[0]?.claim_wechat_ilink_connections).toHaveLength(1);
+    expect(claimed.rows[0]?.claim_wechat_ilink_connections[0]?.lease_owner)
+      .toBe("migration-worker");
+    const connectionId = claimed.rows[0]!.claim_wechat_ilink_connections[0]!.id;
+    await db.query(
+      "select public.fail_wechat_ilink_connection($1::uuid, 'migration-worker', 'reauth', true)",
+      [connectionId]
+    );
+    const reauth = await db.query<{ status: string; lease_owner: string | null }>(`
+      select status, lease_owner
+      from public.wechat_ilink_connections
+      where id = $1::uuid
+    `, [connectionId]);
+    expect(reauth.rows[0]).toEqual({
+      status: "reauth_required",
+      lease_owner: null
+    });
+
+    const firstReceipt = await db.query<{ begin_wechat_message: boolean }>(
+      "select public.begin_wechat_message($1::uuid, 'msg-1')",
+      [connectionId]
+    );
+    const duplicateReceipt = await db.query<{ begin_wechat_message: boolean }>(
+      "select public.begin_wechat_message($1::uuid, 'msg-1')",
+      [connectionId]
+    );
+    expect(firstReceipt.rows[0]?.begin_wechat_message).toBe(true);
+    expect(duplicateReceipt.rows[0]?.begin_wechat_message).toBe(false);
+  });
+
   it("executes idempotent request and skip-locked job RPCs", async () => {
     const userId = "20000000-0000-4000-8000-000000000001";
     await db.query("select ensure_tomeet_user($1::uuid, '迁移测试用户')", [userId]);

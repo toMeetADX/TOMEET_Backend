@@ -1,4 +1,6 @@
 import type {
+  ChannelIdentity,
+  ChannelProvider,
   LlmJob,
   LlmJobType,
   MatchDecision,
@@ -33,6 +35,13 @@ export interface MultimodalRecordInput {
   hint?: string;
 }
 
+export interface LinkChannelIdentityInput {
+  provider: ChannelProvider;
+  externalUserId: string;
+  userId: string;
+  displayName?: string;
+}
+
 export interface ConversationState {
   rollingSummary: string;
   summarizedMessageCount: number;
@@ -55,6 +64,11 @@ export interface ApplyMemoryChangesResult {
 
 export interface DataStore {
   ensureUser(userId: string, displayName?: string): Promise<void>;
+  resolveChannelIdentity(
+    provider: ChannelProvider,
+    externalUserId: string
+  ): Promise<ChannelIdentity | null>;
+  linkChannelIdentity(input: LinkChannelIdentityInput): Promise<ChannelIdentity>;
   appendMessage(input: {
     userId: string;
     role: "user" | "assistant";

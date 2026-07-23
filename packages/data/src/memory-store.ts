@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
+  ChannelIdentity,
+  ChannelProvider,
   LlmJob,
   MatchDecision,
   MatchRequest,
@@ -20,6 +22,7 @@ import type {
   ApplyMemoryChangesResult,
   DataStore,
   EnqueueJobInput,
+  LinkChannelIdentityInput,
   MultimodalRecordInput
 } from "./store.js";
 import { StoreConflictError, StoreNotFoundError } from "./store.js";
@@ -46,6 +49,7 @@ export class MemoryStore implements DataStore {
   private readonly sourceJobRooms = new Map<string, string>();
   private readonly userMemories = new Map<string, UserMemory>();
   private readonly memoryProfiles = new Map<string, UserMemoryProfile>();
+  private readonly channelIdentities = new Map<string, ChannelIdentity>();
 
   constructor(options: { seedDemoData?: boolean } = {}) {
     if (options.seedDemoData) this.seedDemoData();
@@ -109,6 +113,38 @@ export class MemoryStore implements DataStore {
     if (!this.memoryProfiles.has(userId)) {
       this.memoryProfiles.set(userId, this.createMemoryProfile(userId));
     }
+  }
+
+  async resolveChannelIdentity(
+    provider: ChannelProvider,
+    externalUserId: string
+  ): Promise<ChannelIdentity | null> {
+    return structuredClone(this.channelIdentities.get(`${provider}:${externalUserId}`) ?? null);
+  }
+
+  async linkChannelIdentity(input: LinkChannelIdentityInput): Promise<ChannelIdentity> {
+    if (!this.users.has(input.userId)) throw new StoreNotFoundError("用户不存在");
+    const key = `${input.provider}:${input.externalUserId}`;
+    const existing = this.channelIdentities.get(key);
+    if (existing) {
+      if (existing.userId !== input.userId) {
+        throw new StoreConflictError("该渠道身份已绑定其他用户");
+      }
+      return structuredClone(existing);
+    }
+    const duplicateUser = [...this.channelIdentities.values()].find(
+      (identity) => identity.provider === input.provider && identity.userId === input.userId
+    );
+    if (duplicateUser) throw new StoreConflictError("该用户已绑定此渠道");
+    const identity: ChannelIdentity = {
+      provider: input.provider,
+      externalUserId: input.externalUserId,
+      userId: input.userId,
+      displayName: input.displayName ?? null,
+      linkedAt: new Date().toISOString()
+    };
+    this.channelIdentities.set(key, identity);
+    return structuredClone(identity);
   }
 
   async appendMessage(input: {

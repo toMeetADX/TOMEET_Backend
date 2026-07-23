@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import {
+  channelIdentitySchema,
   llmJobSchema,
   matchRequestSchema,
   matchRoomSchema,
@@ -9,6 +10,8 @@ import {
   userMemorySchema,
   userModelSchema,
   type LlmJob,
+  type ChannelIdentity,
+  type ChannelProvider,
   type MatchDecision,
   type MatchRequest,
   type MatchRoom,
@@ -26,6 +29,7 @@ import type {
   ConversationState,
   DataStore,
   EnqueueJobInput,
+  LinkChannelIdentityInput,
   MultimodalRecordInput
 } from "./store.js";
 import { StoreConflictError, StoreNotFoundError } from "./store.js";
@@ -44,6 +48,16 @@ function mapMessage(row: JsonRow): Message {
     role: row.role,
     content: row.content,
     createdAt: row.created_at ?? row.createdAt
+  });
+}
+
+function mapChannelIdentity(row: JsonRow): ChannelIdentity {
+  return channelIdentitySchema.parse({
+    provider: row.provider,
+    externalUserId: row.external_user_id ?? row.externalUserId,
+    userId: row.user_id ?? row.userId,
+    displayName: row.display_name ?? row.displayName ?? null,
+    linkedAt: row.linked_at ?? row.linkedAt
   });
 }
 
@@ -162,6 +176,37 @@ export class SupabaseStore implements DataStore {
       p_display_name: displayName
     });
     if (error) this.throwError("创建用户", error);
+  }
+
+  async resolveChannelIdentity(
+    provider: ChannelProvider,
+    externalUserId: string
+  ): Promise<ChannelIdentity | null> {
+    const { data, error } = await this.client
+      .from("channel_identities")
+      .select("provider,external_user_id,user_id,display_name,linked_at")
+      .eq("provider", provider)
+      .eq("external_user_id", externalUserId)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? mapChannelIdentity(data as JsonRow) : null;
+  }
+
+  async linkChannelIdentity(input: LinkChannelIdentityInput): Promise<ChannelIdentity> {
+    const { data, error } = await this.client
+      .from("channel_identities")
+      .insert({
+        provider: input.provider,
+        external_user_id: input.externalUserId,
+        user_id: input.userId,
+        display_name: input.displayName ?? null
+      })
+      .select("provider,external_user_id,user_id,display_name,linked_at")
+      .single();
+    if (error?.code === "23503") throw new StoreNotFoundError("用户不存在");
+    if (error?.code === "23505") throw new StoreConflictError("渠道身份或用户已绑定");
+    if (error) throw error;
+    return mapChannelIdentity(data as JsonRow);
   }
 
   async appendMessage(input: {

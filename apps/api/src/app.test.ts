@@ -133,6 +133,75 @@ describe("TOMEET core flow", () => {
     expect(limited.json().requestId).toBeTruthy();
   });
 
+  it("protects and resolves server-managed channel identities", async () => {
+    const store = new MemoryStore();
+    const processor = new JobProcessor(store, new MockAgentIntelligence(), new MockMatchmakingIntelligence());
+    const internalApiToken = "test-internal-token-that-is-at-least-32-characters";
+    const app = await buildApp({
+      store,
+      inlineProcessor: processor,
+      internalApiToken,
+      rateLimitMax: 1
+    });
+    apps.push(app);
+    const userId = randomUUID();
+    await store.ensureUser(userId, "Channel User");
+
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: "/internal/channel-identities/resolve",
+      payload: { provider: "wechat", externalUserId: "wxid_unauthorized" }
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const linked = await app.inject({
+      method: "POST",
+      url: "/internal/channel-identities",
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload: {
+        provider: "wechat",
+        externalUserId: "wxid_channel_user",
+        userId,
+        displayName: "WeChat User"
+      }
+    });
+    expect(linked.statusCode).toBe(201);
+    expect(linked.json().identity.userId).toBe(userId);
+
+    const resolved = await app.inject({
+      method: "POST",
+      url: "/internal/channel-identities/resolve",
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload: { provider: "wechat", externalUserId: "wxid_channel_user" }
+    });
+    expect(resolved.statusCode).toBe(200);
+    expect(resolved.json().identity.userId).toBe(userId);
+  });
+
+  it("auto-provisions deterministic channel users only when explicitly enabled", async () => {
+    const store = new MemoryStore();
+    const processor = new JobProcessor(store, new MockAgentIntelligence(), new MockMatchmakingIntelligence());
+    const internalApiToken = "test-internal-token-that-is-at-least-32-characters";
+    const app = await buildApp({
+      store,
+      inlineProcessor: processor,
+      internalApiToken,
+      autoProvisionChannelUsers: true
+    });
+    apps.push(app);
+
+    const resolveIdentity = () => app.inject({
+      method: "POST",
+      url: "/internal/channel-identities/resolve",
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload: { provider: "wechat", externalUserId: "wxid_demo_auto_user" }
+    });
+    const first = await resolveIdentity();
+    const second = await resolveIdentity();
+    expect(first.statusCode).toBe(200);
+    expect(first.json().identity.userId).toBe(second.json().identity.userId);
+  });
+
   it("runs the complete social flow using conversation only", async () => {
     const { app } = await setup();
     const userId = randomUUID();

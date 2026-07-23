@@ -220,6 +220,30 @@ export const agentMessageInputSchema = z.object({
 });
 export type AgentMessageInput = z.infer<typeof agentMessageInputSchema>;
 
+export const channelProviderSchema = z.enum(["wechat"]);
+export type ChannelProvider = z.infer<typeof channelProviderSchema>;
+
+export const channelIdentitySchema = z.object({
+  provider: channelProviderSchema,
+  externalUserId: z.string().trim().min(1).max(255),
+  userId: uuidSchema,
+  displayName: z.string().trim().min(1).max(80).nullable(),
+  linkedAt: z.string().datetime()
+});
+export type ChannelIdentity = z.infer<typeof channelIdentitySchema>;
+
+export const resolveChannelIdentityInputSchema = z.object({
+  provider: channelProviderSchema,
+  externalUserId: z.string().trim().min(1).max(255)
+});
+export type ResolveChannelIdentityInput = z.infer<typeof resolveChannelIdentityInputSchema>;
+
+export const linkChannelIdentityInputSchema = resolveChannelIdentityInputSchema.extend({
+  userId: uuidSchema,
+  displayName: z.string().trim().min(1).max(80).optional()
+});
+export type LinkChannelIdentityInput = z.infer<typeof linkChannelIdentityInputSchema>;
+
 export const createMatchRequestInputSchema = z.object({
   userId: uuidSchema,
   intent: z.record(z.unknown()).optional(),

@@ -1,0 +1,23 @@
+{
+  "name": "@tomeet/wechat-ilink-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@tomeet/contracts": "workspace:*",
+    "@tomeet/data": "workspace:*",
+    "@tomeet/wechat-ilink": "workspace:*",
+    "dotenv": "^16.5.0",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.0"
+  }
+}

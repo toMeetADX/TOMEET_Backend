@@ -1,6 +1,13 @@
 import { resolve } from "node:path";
-import { MemoryStore, SupabaseStore, type DataStore } from "@tomeet/data";
+import {
+  MemoryStore,
+  MemoryWechatStore,
+  SupabaseStore,
+  SupabaseWechatStore,
+  type DataStore
+} from "@tomeet/data";
 import { HostedLlmIntelligence, JobProcessor, TavilyWebSearchProvider } from "@tomeet/intelligence";
+import { CredentialCipher, WechatILinkClient } from "@tomeet/wechat-ilink";
 import { buildApp } from "./app.js";
 import { createSupabaseAccessTokenVerifier, type AccessTokenVerifier } from "./auth.js";
 import { config } from "dotenv";
@@ -28,6 +35,7 @@ for (const rawOrigin of (frontendOrigin ?? "http://localhost:3000").split(",")) 
 
 let store: DataStore;
 let verifyAccessToken: AccessTokenVerifier | undefined;
+let supabaseStore: SupabaseStore | undefined;
 
 if (demoMode) {
   store = new MemoryStore({ seedDemoData: true });
@@ -35,9 +43,23 @@ if (demoMode) {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new Error("缺少 SUPABASE_URL 或 SUPABASE_SERVICE_ROLE_KEY；仅本地预览可设置 DEMO_MODE=true");
-  store = new SupabaseStore(url, key);
+  supabaseStore = new SupabaseStore(url, key);
+  store = supabaseStore;
   verifyAccessToken = createSupabaseAccessTokenVerifier(url, key);
 }
+
+const wechatEncryptionKey = process.env.WECHAT_CREDENTIAL_ENCRYPTION_KEY;
+const wechat = wechatEncryptionKey
+  ? {
+      store: demoMode
+        ? new MemoryWechatStore(store)
+        : new SupabaseWechatStore(supabaseStore!.client),
+      client: new WechatILinkClient({
+        qrBaseUrl: process.env.WECHAT_ILINK_QR_BASE_URL
+      }),
+      cipher: new CredentialCipher(wechatEncryptionKey)
+    }
+  : undefined;
 
 let inlineProcessor: JobProcessor | undefined;
 if (demoMode) {
@@ -66,12 +88,22 @@ const app = await buildApp({
   store,
   inlineProcessor,
   frontendOrigin,
+  internalApiToken: process.env.TOMEET_INTERNAL_API_TOKEN,
+  autoProvisionChannelUsers:
+    demoMode && process.env.WECHAT_AUTO_PROVISION === "true",
+  wechat,
   logger: true,
   verifyAccessToken,
   trustProxy: isProduction,
   rateLimitMax: parsePositiveInteger(process.env.RATE_LIMIT_MAX, 120, "RATE_LIMIT_MAX"),
   exposeInternalErrors: !isProduction
 });
+
+console.info(JSON.stringify({
+  level: "info",
+  event: "wechat_connect_runtime",
+  enabled: Boolean(wechat)
+}));
 
 function parsePositiveInteger(value: string | undefined, fallback: number, name: string): number {
   if (value === undefined || value === "") return fallback;
