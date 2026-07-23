@@ -1,0 +1,944 @@
+openapi: 3.1.0
+info:
+  title: TOMEET API
+  version: 1.0.0
+  description: TOMEET Railway API。除健康检查外，所有接口都使用 Supabase Bearer access token。
+servers:
+  - url: https://{apiHost}
+    description: Railway production
+    variables:
+      apiHost:
+        default: your-api.up.railway.app
+security:
+  - bearerAuth: []
+tags:
+  - name: Operations
+  - name: Agent
+  - name: Uploads
+  - name: Users
+  - name: Matchmaking
+  - name: Rooms
+  - name: Jobs
+paths:
+  /health:
+    get:
+      tags: [Operations]
+      summary: 进程存活检查
+      security: []
+      responses:
+        "200":
+          description: API 进程正常
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /ready:
+    get:
+      tags: [Operations]
+      summary: 依赖服务就绪检查
+      security: []
+      responses:
+        "200":
+          description: Supabase 可访问
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+        "503":
+          description: 依赖服务暂不可用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotReadyResponse"
+  /agent/messages:
+    post:
+      tags: [Agent]
+      summary: 发送用户消息
+      description: 写入用户消息并创建 agent_reply 异步任务。生产环境通常返回 202。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentMessageInput"
+      responses:
+        "200":
+          description: Demo 内联处理已完成
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentMessageResponse"
+        "202":
+          description: 已接受，等待 Worker 处理
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentMessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /agent/messages/{userId}:
+    get:
+      tags: [Agent]
+      summary: 获取最近对话
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: 最近 100 条消息，按时间正序
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages]
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Message"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /agent/multimodal-inputs:
+    post:
+      tags: [Agent]
+      summary: 登记多模态输入
+      description: 文件应先上传到私有 Bucket；本接口登记文件并创建理解任务。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MultimodalInput"
+      responses:
+        "200":
+          description: Demo 内联处理已完成
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultimodalResponse"
+        "202":
+          description: 已接受，等待 Worker 处理
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultimodalResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /uploads/sign:
+    post:
+      tags: [Uploads]
+      summary: 创建一次性上传凭据
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignUploadInput"
+      responses:
+        "200":
+          description: Supabase signed upload path 与 token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignUploadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /uploads:
+    post:
+      tags: [Uploads]
+      summary: Base64 图片上传兼容接口
+      description: 支持 JPG、PNG、WebP，解码后最大 10MB。生产前端优先使用 /uploads/sign。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Base64UploadInput"
+      responses:
+        "200":
+          description: 文件已保存
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+  /users/{userId}/model:
+    get:
+      tags: [Users]
+      summary: 获取公开用户模型
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: 用户模型；不包含内部记忆 profile
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [userModel]
+                properties:
+                  userModel:
+                    $ref: "#/components/schemas/UserModel"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /offline-games:
+    get:
+      tags: [Matchmaking]
+      summary: 获取启用的线下游戏
+      responses:
+        "200":
+          description: 当前游戏目录
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [games]
+                properties:
+                  games:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/OfflineGame"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+  /match-requests:
+    post:
+      tags: [Matchmaking]
+      summary: 创建匹配请求
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMatchRequestInput"
+      responses:
+        "201":
+          description: 请求内已完成匹配
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateMatchRequestResponse"
+        "202":
+          description: 已进入匹配队列
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateMatchRequestResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /match-requests/{id}:
+    get:
+      tags: [Matchmaking]
+      summary: 查询匹配请求
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: 匹配请求
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [matchRequest]
+                properties:
+                  matchRequest:
+                    $ref: "#/components/schemas/MatchRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /match-requests/{id}/cancel:
+    post:
+      tags: [Matchmaking]
+      summary: 取消等待中的匹配请求
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: 已取消
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [matchRequest]
+                properties:
+                  matchRequest:
+                    $ref: "#/components/schemas/MatchRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /jobs/{id}:
+    get:
+      tags: [Jobs]
+      summary: 查询异步任务
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: 当前用户的任务
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [job]
+                properties:
+                  job:
+                    $ref: "#/components/schemas/LlmJob"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /rooms/{id}:
+    get:
+      tags: [Rooms]
+      summary: 查询匹配房间
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: 当前用户所在的房间
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [room]
+                properties:
+                  room:
+                    $ref: "#/components/schemas/MatchRoom"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /rooms/{id}/confirm:
+    post:
+      tags: [Rooms]
+      summary: 确认参加房间
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserIdBody"
+      responses:
+        "200":
+          description: 更新后的房间
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [room]
+                properties:
+                  room:
+                    $ref: "#/components/schemas/MatchRoom"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /rooms/{id}/complete:
+    post:
+      tags: [Rooms]
+      summary: 标记线下活动完成
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: 已完成的房间
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [room]
+                properties:
+                  room:
+                    $ref: "#/components/schemas/MatchRoom"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /rooms/{id}/feedback:
+    post:
+      tags: [Rooms]
+      summary: 提交活动反馈
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostEventFeedbackInput"
+      responses:
+        "200":
+          description: Demo 内联更新已完成
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackResponse"
+        "202":
+          description: 反馈已保存，等待模型更新
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Supabase JWT
+  parameters:
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+      description: 必须等于 access token 对应的用户 ID
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+  responses:
+    BadRequest:
+      description: 请求参数或格式错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    Unauthenticated:
+      description: token 缺失、无效或过期
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    Forbidden:
+      description: token 用户与请求用户不一致
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    NotFound:
+      description: 当前用户可见范围内的资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    Conflict:
+      description: 当前业务状态不允许操作
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    PayloadTooLarge:
+      description: 请求体过大
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    RateLimited:
+      description: 请求过于频繁
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+    JsonObject:
+      type: object
+      additionalProperties: true
+    HealthResponse:
+      type: object
+      required: [status, service, time]
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          const: tomeet-api
+        time:
+          type: string
+          format: date-time
+    ReadyResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ready
+    NotReadyResponse:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: string
+          const: not_ready
+        message:
+          type: string
+    ApiError:
+      type: object
+      required: [error, message, requestId]
+      properties:
+        error:
+          type: string
+          enum:
+            - VALIDATION_ERROR
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - NOT_FOUND
+            - CONFLICT
+            - PAYLOAD_TOO_LARGE
+            - RATE_LIMITED
+            - HTTP_ERROR
+            - INTERNAL_ERROR
+        message:
+          type: string
+        requestId:
+          type: string
+        details:
+          description: 仅校验错误可能出现
+    Message:
+      type: object
+      required: [id, userId, role, content, createdAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+          minLength: 1
+          maxLength: 20000
+        createdAt:
+          type: string
+          format: date-time
+    UserModel:
+      type: object
+      required:
+        - userId
+        - vibeNarrative
+        - longTermProfile
+        - currentIntent
+        - socialHistory
+        - feedbackMemory
+        - multimodalUnderstanding
+        - version
+        - updatedAt
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        vibeNarrative:
+          type: string
+          maxLength: 12000
+        longTermProfile:
+          $ref: "#/components/schemas/JsonObject"
+        currentIntent:
+          $ref: "#/components/schemas/JsonObject"
+        socialHistory:
+          type: array
+          items:
+            type: string
+        feedbackMemory:
+          type: array
+          items:
+            type: string
+        multimodalUnderstanding:
+          $ref: "#/components/schemas/JsonObject"
+        version:
+          type: integer
+          minimum: 0
+        updatedAt:
+          type: string
+          format: date-time
+    LlmJob:
+      type: object
+      required:
+        - id
+        - type
+        - status
+        - payload
+        - result
+        - error
+        - attempts
+        - maxAttempts
+        - partitionKey
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        type:
+          type: string
+          enum:
+            - agent_reply
+            - multimodal_understanding
+            - matchmaking
+            - feedback_update
+            - memory_extract
+            - memory_consolidate
+        status:
+          type: string
+          enum: [pending, processing, completed, retry, failed]
+        payload:
+          $ref: "#/components/schemas/JsonObject"
+        result:
+          oneOf:
+            - $ref: "#/components/schemas/JsonObject"
+            - type: "null"
+        error:
+          type: [string, "null"]
+        attempts:
+          type: integer
+          minimum: 0
+        maxAttempts:
+          type: integer
+          minimum: 1
+        partitionKey:
+          type: [string, "null"]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    OfflineGame:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - minPlayers
+        - maxPlayers
+        - intentTags
+        - traits
+        - requirements
+        - instructions
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        minPlayers:
+          type: integer
+          minimum: 3
+        maxPlayers:
+          type: integer
+          maximum: 10
+        intentTags:
+          type: array
+          items:
+            type: string
+        traits:
+          type: array
+          items:
+            type: string
+        requirements:
+          type: array
+          items:
+            type: string
+        instructions:
+          type: array
+          items:
+            type: string
+    MatchRequest:
+      type: object
+      required: [requestId, userId, intentSnapshot, status, roomId, createdAt, updatedAt]
+      properties:
+        requestId:
+          $ref: "#/components/schemas/Uuid"
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        intentSnapshot:
+          $ref: "#/components/schemas/JsonObject"
+        status:
+          type: string
+          enum: [matching, matched, cancelled]
+        roomId:
+          type: [string, "null"]
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    RoomMember:
+      type: object
+      required: [userId, displayName, confirmed]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        displayName:
+          type: string
+        confirmed:
+          type: boolean
+    MatchRoom:
+      type: object
+      required: [roomId, members, offlineGame, matchSummary, status, createdAt, completedAt]
+      properties:
+        roomId:
+          $ref: "#/components/schemas/Uuid"
+        members:
+          type: array
+          minItems: 3
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/RoomMember"
+        offlineGame:
+          $ref: "#/components/schemas/OfflineGame"
+        matchSummary:
+          type: string
+        status:
+          type: string
+          enum: [confirming, confirmed, completed]
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: [string, "null"]
+          format: date-time
+    AgentMessageInput:
+      type: object
+      additionalProperties: false
+      required: [userId, displayName, content, idempotencyKey]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 80
+        content:
+          type: string
+          minLength: 1
+          maxLength: 20000
+        idempotencyKey:
+          type: string
+          minLength: 8
+          maxLength: 128
+    AgentMessageResponse:
+      type: object
+      required: [userMessage, job]
+      properties:
+        userMessage:
+          $ref: "#/components/schemas/Message"
+        job:
+          $ref: "#/components/schemas/LlmJob"
+    SignUploadInput:
+      type: object
+      additionalProperties: false
+      required: [userId, fileName, mimeType, sizeBytes]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        fileName:
+          type: string
+          minLength: 1
+          maxLength: 255
+        mimeType:
+          $ref: "#/components/schemas/MultimodalMimeType"
+        sizeBytes:
+          type: integer
+          minimum: 1
+          maximum: 20971520
+    SignUploadResponse:
+      type: object
+      required: [path, token]
+      properties:
+        path:
+          type: string
+        token:
+          type: string
+    Base64UploadInput:
+      type: object
+      additionalProperties: false
+      required: [userId, fileName, mimeType, dataUrl]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        fileName:
+          type: string
+          minLength: 1
+          maxLength: 255
+        mimeType:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        dataUrl:
+          type: string
+          maxLength: 15728640
+    UploadResponse:
+      type: object
+      required: [storagePath, mimeType, sizeBytes]
+      properties:
+        storagePath:
+          type: string
+        mimeType:
+          type: string
+        sizeBytes:
+          type: integer
+    MultimodalMimeType:
+      type: string
+      enum:
+        - image/jpeg
+        - image/png
+        - image/webp
+        - audio/mpeg
+        - audio/mp4
+        - audio/webm
+    MultimodalInput:
+      type: object
+      additionalProperties: false
+      required: [userId, kind, storagePath, mimeType, sizeBytes]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        kind:
+          type: string
+          enum: [image, audio]
+        storagePath:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        mimeType:
+          $ref: "#/components/schemas/MultimodalMimeType"
+        sizeBytes:
+          type: integer
+          minimum: 1
+          maximum: 20971520
+        hint:
+          type: string
+          maxLength: 2000
+    MultimodalResponse:
+      type: object
+      required: [inputId, job]
+      properties:
+        inputId:
+          $ref: "#/components/schemas/Uuid"
+        job:
+          $ref: "#/components/schemas/LlmJob"
+    CreateMatchRequestInput:
+      type: object
+      additionalProperties: false
+      required: [userId]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        intent:
+          $ref: "#/components/schemas/JsonObject"
+        idempotencyKey:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: 当前版本保留字段
+    CreateMatchRequestResponse:
+      type: object
+      required: [matchRequest, job]
+      properties:
+        matchRequest:
+          oneOf:
+            - $ref: "#/components/schemas/MatchRequest"
+            - type: "null"
+        job:
+          $ref: "#/components/schemas/LlmJob"
+    UserIdBody:
+      type: object
+      additionalProperties: false
+      required: [userId]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+    PostEventFeedbackInput:
+      type: object
+      additionalProperties: false
+      required: [userId, peopleFeedback, gameFeedback, connectionUserIds, nextIntent]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        peopleFeedback:
+          type: string
+          minLength: 1
+          maxLength: 5000
+        gameFeedback:
+          type: string
+          minLength: 1
+          maxLength: 5000
+        connectionUserIds:
+          type: array
+          maxItems: 9
+          items:
+            $ref: "#/components/schemas/Uuid"
+        nextIntent:
+          type: string
+          minLength: 1
+          maxLength: 2000
+    FeedbackResponse:
+      type: object
+      required: [feedbackId, job]
+      properties:
+        feedbackId:
+          $ref: "#/components/schemas/Uuid"
+        job:
+          $ref: "#/components/schemas/LlmJob"

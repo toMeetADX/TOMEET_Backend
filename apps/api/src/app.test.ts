@@ -5,13 +5,30 @@ import { JobProcessor } from "@tomeet/intelligence";
 import { MockMatchmakingIntelligence } from "@tomeet/matchmaking";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
+import { AuthenticationError } from "./auth.js";
 
-const apps: ReturnType<typeof buildApp>[] = [];
+const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
-function setup() {
+async function setup() {
   const store = new MemoryStore({ seedDemoData: true });
   const processor = new JobProcessor(store, new MockAgentIntelligence(), new MockMatchmakingIntelligence());
-  const app = buildApp({ store, inlineProcessor: processor });
+  const app = await buildApp({ store, inlineProcessor: processor });
+  apps.push(app);
+  return { app, store };
+}
+
+async function setupWithAuth(userByToken: Record<string, string>) {
+  const store = new MemoryStore({ seedDemoData: true });
+  const processor = new JobProcessor(store, new MockAgentIntelligence(), new MockMatchmakingIntelligence());
+  const app = await buildApp({
+    store,
+    inlineProcessor: processor,
+    verifyAccessToken: async (token) => {
+      const userId = userByToken[token];
+      if (!userId) throw new AuthenticationError("登录状态无效或已过期");
+      return userId;
+    }
+  });
   apps.push(app);
   return { app, store };
 }
@@ -21,8 +38,103 @@ afterEach(async () => {
 });
 
 describe("TOMEET core flow", () => {
+  it("requires a valid bearer token while keeping health checks public", async () => {
+    const userId = randomUUID();
+    const { app } = await setupWithAuth({ valid: userId });
+
+    const health = await app.inject({ method: "GET", url: "/health" });
+    expect(health.statusCode).toBe(200);
+
+    const missing = await app.inject({ method: "GET", url: "/offline-games" });
+    expect(missing.statusCode).toBe(401);
+    expect(missing.json().error).toBe("UNAUTHENTICATED");
+
+    const invalid = await app.inject({
+      method: "GET",
+      url: "/offline-games",
+      headers: { authorization: "Bearer invalid" }
+    });
+    expect(invalid.statusCode).toBe(401);
+
+    const valid = await app.inject({
+      method: "GET",
+      url: "/offline-games",
+      headers: { authorization: "Bearer valid" }
+    });
+    expect(valid.statusCode).toBe(200);
+  });
+
+  it("binds user-scoped requests and resources to the authenticated user", async () => {
+    const userId = randomUUID();
+    const otherUserId = randomUUID();
+    const { app, store } = await setupWithAuth({ valid: userId });
+    const headers = { authorization: "Bearer valid" };
+
+    const mismatchedBody = await app.inject({
+      method: "POST",
+      url: "/agent/messages",
+      headers,
+      payload: {
+        userId: otherUserId,
+        displayName: "越权用户",
+        content: "读取别人的数据",
+        idempotencyKey: randomUUID()
+      }
+    });
+    expect(mismatchedBody.statusCode).toBe(403);
+    expect(mismatchedBody.json().error).toBe("FORBIDDEN");
+
+    const otherRequest = await store.createMatchRequest(otherUserId, { rawText: "想认识新朋友" });
+    const hiddenRequest = await app.inject({
+      method: "GET",
+      url: `/match-requests/${otherRequest.requestId}`,
+      headers
+    });
+    expect(hiddenRequest.statusCode).toBe(404);
+
+    const otherJob = await store.enqueueJob({
+      type: "agent_reply",
+      payload: { userId: otherUserId },
+      idempotencyKey: randomUUID(),
+      partitionKey: `user:${otherUserId}`
+    });
+    const hiddenJob = await app.inject({
+      method: "GET",
+      url: `/jobs/${otherJob.id}`,
+      headers
+    });
+    expect(hiddenJob.statusCode).toBe(404);
+  });
+
+  it("rate limits requests before authentication and keeps the API error shape", async () => {
+    const userId = randomUUID();
+    const store = new MemoryStore({ seedDemoData: true });
+    const app = await buildApp({
+      store,
+      rateLimitMax: 1,
+      verifyAccessToken: async () => userId
+    });
+    apps.push(app);
+
+    const first = await app.inject({
+      method: "GET",
+      url: "/offline-games",
+      headers: { authorization: "Bearer valid" }
+    });
+    const limited = await app.inject({
+      method: "GET",
+      url: "/offline-games",
+      headers: { authorization: "Bearer valid" }
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json().error).toBe("RATE_LIMITED");
+    expect(limited.json().requestId).toBeTruthy();
+  });
+
   it("runs the complete social flow using conversation only", async () => {
-    const { app } = setup();
+    const { app } = await setup();
     const userId = randomUUID();
     const send = (content: string) => app.inject({
       method: "POST",
@@ -73,7 +185,7 @@ describe("TOMEET core flow", () => {
   });
 
   it("persists a rolling summary once the recent-message window is exceeded", async () => {
-    const { app, store } = setup();
+    const { app, store } = await setup();
     const userId = randomUUID();
     for (let index = 0; index < 12; index += 1) {
       const response = await app.inject({
@@ -94,7 +206,7 @@ describe("TOMEET core flow", () => {
   });
 
   it("rejects multimodal paths owned by another user", async () => {
-    const { app } = setup();
+    const { app } = await setup();
     const userId = randomUUID();
     const response = await app.inject({
       method: "POST",
@@ -111,7 +223,7 @@ describe("TOMEET core flow", () => {
   });
 
   it("accepts an image upload and stores only an expiring multimodal impression", async () => {
-    const { app, store } = setup();
+    const { app, store } = await setup();
     const userId = randomUUID();
     const uploaded = await app.inject({
       method: "POST",
@@ -149,7 +261,7 @@ describe("TOMEET core flow", () => {
   });
 
   it("builds a hidden profile and forgets it through conversation without exposing it", async () => {
-    const { app, store } = setup();
+    const { app, store } = await setup();
     const userId = randomUUID();
     const send = (content: string) => app.inject({
       method: "POST",
@@ -174,7 +286,7 @@ describe("TOMEET core flow", () => {
   });
 
   it("deduplicates concurrent active match requests for one user", async () => {
-    const { store } = setup();
+    const { store } = await setup();
     const userId = randomUUID();
     const requests = await Promise.all(
       Array.from({ length: 50 }, () => store.createMatchRequest(userId, { rawText: "想认识新朋友" }))
@@ -183,7 +295,7 @@ describe("TOMEET core flow", () => {
   });
 
   it("only cancels match requests that are still matching", async () => {
-    const { store } = setup();
+    const { store } = await setup();
     const userId = randomUUID();
     const request = await store.createMatchRequest(userId, { rawText: "想认识新朋友" });
     await store.cancelMatchRequest(request.requestId);
@@ -191,7 +303,7 @@ describe("TOMEET core flow", () => {
   });
 
   it("claims each queued job at most once across concurrent worker slots", async () => {
-    const { store } = setup();
+    const { store } = await setup();
     await Promise.all(Array.from({ length: 40 }, (_, index) => store.enqueueJob({
       type: "matchmaking",
       payload: { index },

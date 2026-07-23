@@ -12,17 +12,32 @@ import {
 import type { DataStore } from "@tomeet/data";
 import { StoreConflictError, StoreNotFoundError } from "@tomeet/data";
 import type { JobProcessor } from "@tomeet/intelligence";
-import Fastify from "fastify";
+import Fastify, { type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
+import {
+  AuthenticationError,
+  AuthorizationError,
+  type AccessTokenVerifier
+} from "./auth.js";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    authUserId?: string;
+  }
+}
 
 export interface BuildAppOptions {
   store: DataStore;
   inlineProcessor?: JobProcessor;
   frontendOrigin?: string;
   logger?: boolean;
+  verifyAccessToken?: AccessTokenVerifier;
+  trustProxy?: boolean;
+  rateLimitMax?: number;
+  exposeInternalErrors?: boolean;
 }
 
-export function buildApp(options: BuildAppOptions) {
+export async function buildApp(options: BuildAppOptions) {
   const allowedOrigins = (options.frontendOrigin ?? "http://localhost:3000")
     .split(",")
     .map((origin) => origin.trim())
@@ -31,20 +46,49 @@ export function buildApp(options: BuildAppOptions) {
     logger: options.logger ?? false,
     bodyLimit: 21 * 1024 * 1024,
     requestIdHeader: "x-request-id",
-    genReqId: () => randomUUID()
+    genReqId: () => randomUUID(),
+    trustProxy: options.trustProxy ?? false
   });
 
-  app.register(helmet, { contentSecurityPolicy: false });
-  app.register(cors, {
+  app.decorateRequest("authUserId", undefined);
+
+  await app.register(helmet, { contentSecurityPolicy: false });
+  await app.register(cors, {
     origin: allowedOrigins,
     credentials: true,
-    methods: ["GET", "POST"]
+    methods: ["GET", "POST"],
+    allowedHeaders: ["authorization", "content-type", "x-request-id"]
   });
-  app.register(rateLimit, {
-    max: 120,
+  app.addHook("preValidation", async (request) => {
+    if (!options.verifyAccessToken || request.method === "OPTIONS") return;
+    const path = request.url.split("?", 1)[0];
+    if (path === "/health" || path === "/ready") return;
+    const authorization = request.headers.authorization;
+    if (!authorization?.startsWith("Bearer ")) {
+      throw new AuthenticationError("缺少 Bearer access token");
+    }
+    const accessToken = authorization.slice("Bearer ".length).trim();
+    if (!accessToken) throw new AuthenticationError("缺少 Bearer access token");
+    request.authUserId = await options.verifyAccessToken(accessToken);
+  });
+
+  await app.register(rateLimit, {
+    max: options.rateLimitMax ?? 120,
     timeWindow: "1 minute",
-    keyGenerator: (request) => request.headers["x-user-id"]?.toString() ?? request.ip
+    keyGenerator: (request) => request.ip
   });
+
+  function assertCurrentUser(request: FastifyRequest, userId: string): void {
+    if (request.authUserId && request.authUserId !== userId) {
+      throw new AuthorizationError("不能访问或操作其他用户的数据");
+    }
+  }
+
+  function assertRoomMember(request: FastifyRequest, memberIds: string[]): void {
+    if (request.authUserId && !memberIds.includes(request.authUserId)) {
+      throw new StoreNotFoundError("房间不存在");
+    }
+  }
 
   async function runInline(jobId: string) {
     if (!options.inlineProcessor) return options.store.getJob(jobId);
@@ -69,19 +113,30 @@ export function buildApp(options: BuildAppOptions) {
     return options.store.getJob(jobId);
   }
 
-  app.get("/health", async () => ({ status: "ok", service: "tomeet-api", time: new Date().toISOString() }));
+  app.get("/health", { config: { rateLimit: false } }, async () => ({
+    status: "ok",
+    service: "tomeet-api",
+    time: new Date().toISOString()
+  }));
 
-  app.get("/ready", async (_request, reply) => {
+  app.get("/ready", { config: { rateLimit: false } }, async (_request, reply) => {
     try {
       await options.store.ping();
       return { status: "ready" };
     } catch (error) {
-      return reply.code(503).send({ status: "not_ready", message: error instanceof Error ? error.message : String(error) });
+      if (options.exposeInternalErrors) {
+        return reply.code(503).send({
+          status: "not_ready",
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+      return reply.code(503).send({ status: "not_ready", message: "依赖服务暂不可用" });
     }
   });
 
   app.post("/agent/messages", async (request, reply) => {
     const input = agentMessageInputSchema.parse(request.body);
+    assertCurrentUser(request, input.userId);
     await options.store.ensureUser(input.userId, input.displayName);
     const userMessage = await options.store.appendMessage({
       userId: input.userId,
@@ -101,11 +156,13 @@ export function buildApp(options: BuildAppOptions) {
 
   app.get("/agent/messages/:userId", async (request) => {
     const { userId } = z.object({ userId: uuidSchema }).parse(request.params);
+    assertCurrentUser(request, userId);
     return { messages: await options.store.listRecentMessages(userId, 100) };
   });
 
   app.post("/agent/multimodal-inputs", async (request, reply) => {
     const input = multimodalInputSchema.parse(request.body);
+    assertCurrentUser(request, input.userId);
     if (!input.storagePath.startsWith(`${input.userId}/`)) {
       throw new StoreConflictError("多模态文件不属于当前用户");
     }
@@ -135,6 +192,7 @@ export function buildApp(options: BuildAppOptions) {
       mimeType: z.enum(["image/jpeg", "image/png", "image/webp", "audio/mpeg", "audio/mp4", "audio/webm"]),
       sizeBytes: z.number().int().positive().max(20 * 1024 * 1024)
     }).parse(request.body);
+    assertCurrentUser(request, input.userId);
     await options.store.ensureUser(input.userId);
     const extension = input.fileName.split(".").pop()?.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8) || "bin";
     const storagePath = `${input.userId}/${randomUUID()}.${extension}`;
@@ -148,6 +206,7 @@ export function buildApp(options: BuildAppOptions) {
       mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
       dataUrl: z.string().max(15 * 1024 * 1024)
     }).parse(request.body);
+    assertCurrentUser(request, input.userId);
     const match = /^data:(image\/(?:jpeg|png|webp));base64,([a-zA-Z0-9+/=]+)$/.exec(input.dataUrl);
     const encoded = match?.[2];
     if (!match || match[1] !== input.mimeType || !encoded) throw new StoreConflictError("图片数据与 MIME 不一致");
@@ -164,6 +223,7 @@ export function buildApp(options: BuildAppOptions) {
 
   app.get("/users/:userId/model", async (request) => {
     const { userId } = z.object({ userId: uuidSchema }).parse(request.params);
+    assertCurrentUser(request, userId);
     return { userModel: await options.store.getUserModel(userId) };
   });
 
@@ -171,6 +231,7 @@ export function buildApp(options: BuildAppOptions) {
 
   app.post("/match-requests", async (request, reply) => {
     const input = createMatchRequestInputSchema.parse(request.body);
+    assertCurrentUser(request, input.userId);
     const [model, latestRoom] = await Promise.all([
       options.store.getUserModel(input.userId),
       options.store.getLatestRoomForUser(input.userId)
@@ -199,11 +260,18 @@ export function buildApp(options: BuildAppOptions) {
     const { id } = z.object({ id: uuidSchema }).parse(request.params);
     const matchRequest = await options.store.getMatchRequest(id);
     if (!matchRequest) throw new StoreNotFoundError("匹配请求不存在");
+    if (request.authUserId && matchRequest.userId !== request.authUserId) {
+      throw new StoreNotFoundError("匹配请求不存在");
+    }
     return { matchRequest };
   });
 
   app.post("/match-requests/:id/cancel", async (request) => {
     const { id } = z.object({ id: uuidSchema }).parse(request.params);
+    const matchRequest = await options.store.getMatchRequest(id);
+    if (!matchRequest || (request.authUserId && matchRequest.userId !== request.authUserId)) {
+      throw new StoreNotFoundError("匹配请求不存在");
+    }
     return { matchRequest: await options.store.cancelMatchRequest(id) };
   });
 
@@ -211,6 +279,9 @@ export function buildApp(options: BuildAppOptions) {
     const { id } = z.object({ id: uuidSchema }).parse(request.params);
     const job = await options.store.getJob(id);
     if (!job) throw new StoreNotFoundError("任务不存在");
+    if (request.authUserId && job.partitionKey !== `user:${request.authUserId}`) {
+      throw new StoreNotFoundError("任务不存在");
+    }
     return { job };
   });
 
@@ -218,17 +289,22 @@ export function buildApp(options: BuildAppOptions) {
     const { id } = z.object({ id: uuidSchema }).parse(request.params);
     const room = await options.store.getRoom(id);
     if (!room) throw new StoreNotFoundError("房间不存在");
+    assertRoomMember(request, room.members.map((member) => member.userId));
     return { room };
   });
 
   app.post("/rooms/:id/confirm", async (request) => {
     const { id } = z.object({ id: uuidSchema }).parse(request.params);
     const { userId } = z.object({ userId: uuidSchema }).parse(request.body);
+    assertCurrentUser(request, userId);
     return { room: await options.store.confirmRoom(id, userId) };
   });
 
   app.post("/rooms/:id/complete", async (request) => {
     const { id } = z.object({ id: uuidSchema }).parse(request.params);
+    const room = await options.store.getRoom(id);
+    if (!room) throw new StoreNotFoundError("房间不存在");
+    assertRoomMember(request, room.members.map((member) => member.userId));
     return { room: await options.store.completeRoom(id) };
   });
 
@@ -236,6 +312,7 @@ export function buildApp(options: BuildAppOptions) {
     const { id } = z.object({ id: uuidSchema }).parse(request.params);
     const body = z.object({ userId: uuidSchema }).passthrough().parse(request.body);
     const feedback = postEventFeedbackSchema.parse({ ...body, roomId: id });
+    assertCurrentUser(request, feedback.userId);
     const feedbackId = await options.store.saveFeedback(feedback);
     const job = await options.store.enqueueJob({
       type: "feedback_update",
@@ -260,16 +337,54 @@ export function buildApp(options: BuildAppOptions) {
         requestId: request.id
       });
     }
+    if (error instanceof AuthenticationError) {
+      return reply.code(401).send({
+        error: "UNAUTHENTICATED",
+        message: error.message,
+        requestId: request.id
+      });
+    }
+    if (error instanceof AuthorizationError) {
+      return reply.code(403).send({
+        error: "FORBIDDEN",
+        message: error.message,
+        requestId: request.id
+      });
+    }
     if (error instanceof StoreNotFoundError) {
       return reply.code(404).send({ error: "NOT_FOUND", message: error.message, requestId: request.id });
     }
     if (error instanceof StoreConflictError) {
       return reply.code(409).send({ error: "CONFLICT", message: error.message, requestId: request.id });
     }
+    const httpError = error as { statusCode?: number; message?: string };
+    if (httpError.statusCode === 413) {
+      return reply.code(413).send({
+        error: "PAYLOAD_TOO_LARGE",
+        message: "请求体过大",
+        requestId: request.id
+      });
+    }
+    if (httpError.statusCode === 429) {
+      return reply.code(429).send({
+        error: "RATE_LIMITED",
+        message: "请求过于频繁，请稍后重试",
+        requestId: request.id
+      });
+    }
+    if (httpError.statusCode && httpError.statusCode >= 400 && httpError.statusCode < 500) {
+      return reply.code(httpError.statusCode).send({
+        error: "HTTP_ERROR",
+        message: httpError.message ?? "请求无法处理",
+        requestId: request.id
+      });
+    }
     request.log.error(error);
     return reply.code(500).send({
       error: "INTERNAL_ERROR",
-      message: error instanceof Error ? error.message : "未知服务错误",
+      message: options.exposeInternalErrors && error instanceof Error
+        ? error.message
+        : "服务暂时不可用",
       requestId: request.id
     });
   });

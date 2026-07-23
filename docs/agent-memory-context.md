@@ -110,4 +110,4 @@ memory_consolidate
 
 ## 当前安全边界
 
-当前 API 仍信任客户端提交的 `userId`，项目尚未接入 Supabase Auth。因此新表在数据库层对公共角色不可见，但现阶段只能提供服务端逻辑隔离，不能形成完整的生产级租户身份隔离。上线真实个人信息前仍需完成匿名 Auth / 会话身份绑定；该工作需要前端配合，不属于本次仅后端改造范围。
+生产 API 已校验 Supabase Bearer access token，并要求请求中的 `userId` 与 token 用户一致；匹配请求、任务和房间读取也会执行所有权或成员校验。新表在数据库层继续对公共角色不可见，详细记忆与隐藏 profile 只允许 service role 后端流程读取。

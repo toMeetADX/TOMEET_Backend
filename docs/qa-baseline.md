@@ -1,5 +1,7 @@
 # Phase 1 QA baseline
 
+> Historical snapshot: this document records the earlier `feat/addBaseline` audit and its 18-test result. Current production authentication and Railway guidance are documented in [`docs/api.md`](api.md) and [`docs/railway-production.md`](railway-production.md).
+
 > Audit date: 2026-07-23
 >
 > Branch: `feat/addBaseline`

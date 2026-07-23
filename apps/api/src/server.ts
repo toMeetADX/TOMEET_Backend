@@ -2,13 +2,32 @@ import { resolve } from "node:path";
 import { MemoryStore, SupabaseStore, type DataStore } from "@tomeet/data";
 import { HostedLlmIntelligence, JobProcessor, TavilyWebSearchProvider } from "@tomeet/intelligence";
 import { buildApp } from "./app.js";
+import { createSupabaseAccessTokenVerifier, type AccessTokenVerifier } from "./auth.js";
 import { config } from "dotenv";
 
 config({ path: resolve(process.cwd(), ".env") });
 config({ path: resolve(process.cwd(), "../../.env"), override: false });
 
 const demoMode = process.env.DEMO_MODE === "true";
+const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.RAILWAY_ENVIRONMENT_ID);
+if (isProduction && demoMode) throw new Error("生产环境禁止 DEMO_MODE=true");
+
+const frontendOrigin = process.env.FRONTEND_ORIGIN;
+if (!demoMode && !frontendOrigin) throw new Error("生产 API 必须配置 FRONTEND_ORIGIN");
+for (const rawOrigin of (frontendOrigin ?? "http://localhost:3000").split(",")) {
+  const origin = rawOrigin.trim();
+  if (!origin) continue;
+  const parsed = new URL(origin);
+  if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw new Error(`FRONTEND_ORIGIN 必须是纯 Origin，不能包含路径：${origin}`);
+  }
+  if (parsed.protocol !== "https:" && parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") {
+    throw new Error(`FRONTEND_ORIGIN 仅允许 HTTPS 或本机地址：${origin}`);
+  }
+}
+
 let store: DataStore;
+let verifyAccessToken: AccessTokenVerifier | undefined;
 
 if (demoMode) {
   store = new MemoryStore({ seedDemoData: true });
@@ -17,6 +36,7 @@ if (demoMode) {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new Error("缺少 SUPABASE_URL 或 SUPABASE_SERVICE_ROLE_KEY；仅本地预览可设置 DEMO_MODE=true");
   store = new SupabaseStore(url, key);
+  verifyAccessToken = createSupabaseAccessTokenVerifier(url, key);
 }
 
 let inlineProcessor: JobProcessor | undefined;
@@ -42,14 +62,25 @@ if (demoMode) {
   inlineProcessor = new JobProcessor(store, hosted, hosted);
 }
 
-const app = buildApp({
+const app = await buildApp({
   store,
   inlineProcessor,
-  frontendOrigin: process.env.FRONTEND_ORIGIN,
-  logger: true
+  frontendOrigin,
+  logger: true,
+  verifyAccessToken,
+  trustProxy: isProduction,
+  rateLimitMax: parsePositiveInteger(process.env.RATE_LIMIT_MAX, 120, "RATE_LIMIT_MAX"),
+  exposeInternalErrors: !isProduction
 });
 
-const port = Number(process.env.PORT ?? 4000);
+function parsePositiveInteger(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} 必须是正整数`);
+  return parsed;
+}
+
+const port = parsePositiveInteger(process.env.PORT, 4000, "PORT");
 await app.listen({ port, host: "0.0.0.0" });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

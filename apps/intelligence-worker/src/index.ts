@@ -34,8 +34,30 @@ const hosted = new HostedLlmIntelligence({
 const store = new SupabaseStore(supabaseUrl, serviceRoleKey);
 const processor = new JobProcessor(store, hosted, hosted);
 const workerId = `${process.env.RAILWAY_REPLICA_ID ?? "local"}:${randomUUID().slice(0, 8)}`;
-const concurrency = Math.min(Math.max(Number(process.env.WORKER_CONCURRENCY ?? 8), 1), 32);
-const pollInterval = Math.max(Number(process.env.WORKER_POLL_INTERVAL_MS ?? 1000), 100);
+
+function parseIntegerInRange(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string
+): number {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} 必须是 ${minimum}-${maximum} 的整数`);
+  }
+  return parsed;
+}
+
+const concurrency = parseIntegerInRange(process.env.WORKER_CONCURRENCY, 8, 1, 32, "WORKER_CONCURRENCY");
+const pollInterval = parseIntegerInRange(
+  process.env.WORKER_POLL_INTERVAL_MS,
+  1000,
+  100,
+  60_000,
+  "WORKER_POLL_INTERVAL_MS"
+);
 const abortController = new AbortController();
 
 const delay = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
