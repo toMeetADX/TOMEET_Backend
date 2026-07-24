@@ -11,6 +11,18 @@ beforeAll(async () => {
     create role anon;
     create role authenticated;
     create role service_role bypassrls;
+    create schema auth;
+    create table auth.users (
+      id uuid primary key,
+      email text,
+      raw_user_meta_data jsonb
+    );
+    insert into auth.users (id, email, raw_user_meta_data)
+    values (
+      '25000000-0000-4000-8000-000000000001',
+      'existing@example.com',
+      '{"display_name":"已有 Auth 用户"}'::jsonb
+    );
     create schema storage;
     create table storage.buckets (
       id text primary key,
@@ -296,6 +308,60 @@ describe("Supabase migration", () => {
     );
     expect(firstReceipt.rows[0]?.begin_wechat_message).toBe(true);
     expect(duplicateReceipt.rows[0]?.begin_wechat_message).toBe(false);
+  });
+
+  it("backfills and synchronizes Supabase Auth users", async () => {
+    const existingUserId = "25000000-0000-4000-8000-000000000001";
+    const existing = await db.query<{ display_name: string }>(
+      "select display_name from public.users where id = $1::uuid",
+      [existingUserId]
+    );
+    expect(existing.rows[0]?.display_name).toBe("已有 Auth 用户");
+
+    const newUserId = "25000000-0000-4000-8000-000000000002";
+    await db.query(`
+      insert into auth.users (id, email, raw_user_meta_data)
+      values ($1::uuid, 'new@example.com', '{"full_name":"新注册用户"}'::jsonb)
+    `, [newUserId]);
+
+    const created = await db.query<{
+      display_name: string;
+      conversation_count: number;
+      model_count: number;
+      profile_count: number;
+    }>(`
+      select
+        u.display_name,
+        (select count(*)::integer from conversations where user_id = u.id) as conversation_count,
+        (select count(*)::integer from user_models where user_id = u.id) as model_count,
+        (select count(*)::integer from user_memory_profiles where user_id = u.id) as profile_count
+      from users u
+      where u.id = $1::uuid
+    `, [newUserId]);
+    expect(created.rows[0]).toEqual({
+      display_name: "新注册用户",
+      conversation_count: 1,
+      model_count: 1,
+      profile_count: 1
+    });
+
+    await db.query(`
+      update auth.users
+      set raw_user_meta_data = '{"display_name":"更新后的名字"}'::jsonb
+      where id = $1::uuid
+    `, [newUserId]);
+    const updated = await db.query<{ display_name: string }>(
+      "select display_name from public.users where id = $1::uuid",
+      [newUserId]
+    );
+    expect(updated.rows[0]?.display_name).toBe("更新后的名字");
+
+    await db.query("delete from auth.users where id = $1::uuid", [newUserId]);
+    const deleted = await db.query<{ count: number }>(
+      "select count(*)::integer as count from public.users where id = $1::uuid",
+      [newUserId]
+    );
+    expect(deleted.rows[0]?.count).toBe(0);
   });
 
   it("executes idempotent request and skip-locked job RPCs", async () => {
