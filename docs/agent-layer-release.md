@@ -66,6 +66,22 @@ Production 还必须设置：
 Staging 和 Production 的 Supabase URL、key、数据库密码不得交叉使用。两个环境需启用
 匿名 Auth 登录，smoke 会创建两个独立临时用户并在结束时删除。
 
+### Repository secret
+
+`Agent Layer Sync` 创建同步 PR 时必须使用仓库级 Actions secret
+`AGENT_SYNC_PR_TOKEN`。不要把它放进 `staging` 或 `production` Environment，
+因为同步 workflow 不应获得任何部署凭据。
+
+推荐创建只授权 `toMeetADX/TOMEET_Backend` 的 fine-grained personal access token：
+
+- Repository permission `Pull requests`: `Read and write`
+- Repository permission `Contents`: `Read-only`
+- 设置合理的过期时间，并在到期前轮换仓库 secret
+
+同步分支仍由受限的 `GITHUB_TOKEN` 推送；专用 token 只用于查询、创建或更新
+`automation/agent-sync-main-to-wechat -> feat/wechat-channel` PR。若 secret 缺失、
+失效或无权创建 PR，workflow 会在修改自动化分支前失败关闭，并输出明确错误。
+
 ## 3. Railway 服务配置
 
 三个配置文件已使用 `/ready` 作为部署健康检查，超时为 120 秒。Railway 只有在
@@ -130,7 +146,8 @@ git push origin prod-web-stable prod-wechat-stable
 - 两个分支均要求 `Agent Layer Sync / validate-pr`；
 - `feat/wechat-channel` 额外要求 Agent tree parity；
 - 同步 PR 仍需人工审核，不启用自动合并；
-- Actions 允许 `contents: write` 和 `pull-requests: write`，允许 Actions 创建 PR。
+- Repository Actions secret `AGENT_SYNC_PR_TOKEN` 已按第 2 节配置；
+- 默认 `GITHUB_TOKEN` 只保留同步分支所需的 `contents: write`，不用于创建 PR。
 
 `Production Watch` 每五分钟检查四个 Railway service 的最新 deployment 状态及两个
 API 的 `/ready`。异常时会复用一个打开状态的 GitHub incident issue，避免重复刷屏。
