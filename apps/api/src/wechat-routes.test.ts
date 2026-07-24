@@ -1,5 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { MockAgentIntelligence } from "@tomeet/agent-core";
 import { MemoryStore, MemoryWechatStore } from "@tomeet/data";
+import { JobProcessor } from "@tomeet/intelligence";
+import { MockMatchmakingIntelligence } from "@tomeet/matchmaking";
 import { CredentialCipher, WechatILinkClient } from "@tomeet/wechat-ilink";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app.js";
@@ -14,7 +17,11 @@ async function setup(
   statuses: Array<Record<string, unknown>>,
   internalApiToken?: string,
   sessionTtlMs?: number,
-  wechatQrRateLimitMax?: number
+  wechatQrRateLimitMax?: number,
+  integration?: {
+    processJobsInline?: boolean;
+    userByToken?: Record<string, string>;
+  }
 ) {
   let qrIndex = 0;
   const fetchMock = vi.fn(async (input: string | URL | Request) => {
@@ -30,11 +37,21 @@ async function setup(
   });
   const store = new MemoryStore();
   const wechatStore = new MemoryWechatStore(store);
-  const verifyAccessToken = vi.fn(async () => {
+  const verifyAccessToken = vi.fn(async (accessToken: string) => {
+    const userId = integration?.userByToken?.[accessToken];
+    if (userId) return userId;
     throw new Error("WeChat route unexpectedly required a bearer token");
   });
+  const inlineProcessor = integration?.processJobsInline
+    ? new JobProcessor(
+        store,
+        new MockAgentIntelligence(),
+        new MockMatchmakingIntelligence()
+      )
+    : undefined;
   const app = await buildApp({
     store,
+    inlineProcessor,
     internalApiToken,
     wechatQrRateLimitMax,
     verifyAccessToken,
@@ -154,6 +171,114 @@ describe("WeChat one-time QR onboarding", () => {
     expect(confirmed.json()).toMatchObject({ status: "active" });
     expect(await store.resolveChannelIdentity("wechat", owner))
       .toMatchObject({ userId });
+  });
+
+  it("automatically matches independent Web and WeChat users in one shared room", async () => {
+    const internalApiToken = "cross-channel-internal-token-at-least-32-characters";
+    const webUsers = [
+      { userId: randomUUID(), token: "web-user-token-a", displayName: "Web 用户 A" },
+      { userId: randomUUID(), token: "web-user-token-b", displayName: "Web 用户 B" }
+    ];
+    const ownerIlinkUserId = "cross-channel-wechat-owner";
+    const { app, store } = await setup(
+      [{
+        status: "confirmed",
+        bot_token: "cross-channel-bot-secret",
+        ilink_bot_id: "cross-channel-bot",
+        baseurl: "https://ilink-api.example.com",
+        ilink_user_id: ownerIlinkUserId
+      }],
+      internalApiToken,
+      undefined,
+      undefined,
+      {
+        processJobsInline: true,
+        userByToken: Object.fromEntries(
+          webUsers.map((user) => [user.token, user.userId])
+        )
+      }
+    );
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    expect(created.statusCode).toBe(201);
+    const session = created.json();
+    const activated = await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${session.sessionId}`,
+      headers: { "x-wechat-session-token": session.sessionToken }
+    });
+    expect(activated.json()).toMatchObject({ status: "active" });
+
+    const wechatIdentity = await store.resolveChannelIdentity(
+      "wechat",
+      ownerIlinkUserId
+    );
+    expect(wechatIdentity).not.toBeNull();
+    const wechatUserId = wechatIdentity!.userId;
+    expect(webUsers.map((user) => user.userId)).not.toContain(wechatUserId);
+
+    for (const webUser of webUsers) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/agent/messages",
+        headers: { authorization: `Bearer ${webUser.token}` },
+        payload: {
+          userId: webUser.userId,
+          displayName: webUser.displayName,
+          content: "我想认识一些新朋友，轻松自然地聊聊",
+          idempotencyKey: randomUUID()
+        }
+      });
+      expect(response.statusCode).toBe(200);
+    }
+
+    const wechatResponse = await app.inject({
+      method: "POST",
+      url: "/internal/agent/messages",
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload: {
+        userId: wechatUserId,
+        displayName: "微信用户",
+        content: "我也想认识新朋友，轻松自然一点",
+        idempotencyKey: randomUUID()
+      }
+    });
+    expect(wechatResponse.statusCode).toBe(200);
+
+    const allUserIds = [...webUsers.map((user) => user.userId), wechatUserId];
+    const rooms = await Promise.all(
+      allUserIds.map((userId) => store.getLatestRoomForUser(userId))
+    );
+    expect(rooms.every(Boolean)).toBe(true);
+    expect(new Set(rooms.map((room) => room!.roomId))).toHaveLength(1);
+    expect(new Set(rooms[0]!.members.map((member) => member.userId)))
+      .toEqual(new Set(allUserIds));
+
+    for (const webUser of webUsers) {
+      const history = await app.inject({
+        method: "GET",
+        url: `/agent/messages/${webUser.userId}`,
+        headers: { authorization: `Bearer ${webUser.token}` }
+      });
+      expect(history.statusCode).toBe(200);
+      expect(history.json().messages.some(
+        (message: { content: string }) => message.content.includes("匹配完成了")
+      )).toBe(true);
+    }
+
+    const wechatHistory = await app.inject({
+      method: "GET",
+      url: `/internal/agent/messages/${wechatUserId}`,
+      headers: { "x-tomeet-internal-token": internalApiToken }
+    });
+    expect(wechatHistory.statusCode).toBe(200);
+    expect(wechatHistory.json().messages.some(
+      (message: { content: string }) => message.content.includes("匹配完成了")
+    )).toBe(true);
   });
 
   it("supports redirect and verification-required protocol states", async () => {
