@@ -92,9 +92,7 @@ if (demoMode) {
     webSearchProvider,
     onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event }))
   });
-  inlineProcessor = new JobProcessor(store, hosted, hosted, {
-    adventurexMatchingV1: process.env.ADVENTUREX_MATCHING_V1 === "true"
-  });
+  inlineProcessor = new JobProcessor(store, hosted, hosted);
 }
 
 const app = await buildApp({
