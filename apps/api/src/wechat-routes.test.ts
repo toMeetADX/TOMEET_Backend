@@ -322,6 +322,40 @@ describe("WeChat one-time QR onboarding", () => {
     expect(completed.json().status).toBe("active");
   });
 
+  it("streams QR state changes over SSE until the session is terminal", async () => {
+    const { app } = await setup([
+      { status: "scaned" },
+      {
+        status: "confirmed",
+        bot_token: "bot-secret",
+        ilink_bot_id: "bot-streamed",
+        baseurl: "https://ilink-api.example.com",
+        ilink_user_id: "streamed-owner"
+      }
+    ]);
+    const created = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    const session = created.json();
+    const events = await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${session.sessionId}/events`,
+      headers: {
+        accept: "text/event-stream",
+        "x-wechat-session-token": session.sessionToken
+      }
+    });
+
+    expect(events.statusCode).toBe(200);
+    expect(events.headers["content-type"]).toContain("text/event-stream");
+    expect(events.payload).toContain('"status":"pending"');
+    expect(events.payload).toContain('"status":"scanned"');
+    expect(events.payload).toContain('"status":"active"');
+    expect(events.payload).toContain("event: done");
+  });
+
   it("expires stale QR sessions without polling upstream", async () => {
     const { app, fetchMock } = await setup([], undefined, -1);
     const created = await app.inject({
@@ -456,10 +490,10 @@ describe("WeChat one-time QR onboarding", () => {
     expect(conflict.statusCode).toBe(409);
   });
 
-  it("limits public QR creation to five attempts per ten minutes", async () => {
+  it("limits public QR creation to thirty attempts per ten minutes", async () => {
     const { app } = await setup([]);
     const responses = [];
-    for (let index = 0; index < 6; index += 1) {
+    for (let index = 0; index < 31; index += 1) {
       responses.push(await app.inject({
         method: "POST",
         url: "/wechat/connect/sessions",
@@ -467,12 +501,12 @@ describe("WeChat one-time QR onboarding", () => {
       }));
     }
 
-    expect(responses.slice(0, 5).every((response) => response.statusCode === 201))
+    expect(responses.slice(0, 30).every((response) => response.statusCode === 201))
       .toBe(true);
-    expect(responses[5]?.statusCode).toBe(429);
+    expect(responses[30]?.statusCode).toBe(429);
   });
 
-  it("supports a higher bounded QR limit for a managed kiosk", async () => {
+  it("supports a configurable bounded QR limit for a managed kiosk", async () => {
     const { app } = await setup([], undefined, undefined, 7);
     const responses = [];
     for (let index = 0; index < 8; index += 1) {

@@ -51,10 +51,19 @@ export class MemoryWechatStore implements WechatConnectionStore {
 
   async updateWechatSession(
     sessionId: string,
-    update: WechatSessionUpdate
+    update: WechatSessionUpdate,
+    options?: {
+      ifStatusIn?: WechatConnectionSession["status"][];
+    }
   ): Promise<WechatConnectionSession> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new StoreNotFoundError("微信扫码会话不存在");
+    if (
+      options?.ifStatusIn
+      && !options.ifStatusIn.includes(session.status)
+    ) {
+      return structuredClone(session);
+    }
     Object.assign(session, update, { updatedAt: new Date().toISOString() });
     return structuredClone(session);
   }

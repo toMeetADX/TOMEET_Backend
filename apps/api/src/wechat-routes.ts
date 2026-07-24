@@ -7,6 +7,7 @@ import {
   hashSessionToken,
   sessionTokenMatches,
   type WechatConnectionSession,
+  type WechatConnectionSessionStatus,
   type WechatILinkClient
 } from "@tomeet/wechat-ilink";
 import { uuidSchema } from "@tomeet/contracts";
@@ -15,6 +16,12 @@ const sessionParamsSchema = z.object({ sessionId: uuidSchema });
 const verifyCodeSchema = z.object({
   code: z.string().trim().regex(/^\d{4,12}$/)
 });
+const NON_TERMINAL_SESSION_STATUSES = [
+  "pending",
+  "scanned",
+  "verification_required"
+] satisfies WechatConnectionSessionStatus[];
+const SSE_HEARTBEAT_MS = 15_000;
 
 export interface WechatApiRuntime {
   store: WechatConnectionStore;
@@ -39,6 +46,37 @@ function publicSession(session: WechatConnectionSession) {
     errorCode: session.errorCode,
     errorMessage: session.errorMessage
   };
+}
+
+function isTerminalSession(session: WechatConnectionSession): boolean {
+  return session.status === "active"
+    || session.status === "expired"
+    || session.status === "failed";
+}
+
+function writeSseEvent(
+  reply: FastifyReply,
+  event: string,
+  data: unknown
+): void {
+  if (reply.raw.destroyed || reply.raw.writableEnded) return;
+  reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+function waitForSignal(delayMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delayMs);
+    signal.addEventListener("abort", finish, { once: true });
+  });
 }
 
 function ensureHttpsBaseUrl(value: string): string {
@@ -75,9 +113,10 @@ async function requireSession(
 async function pollSession(
   runtime: WechatApiRuntime,
   session: WechatConnectionSession,
-  verifyCode?: string
+  verifyCode?: string,
+  signal?: AbortSignal
 ): Promise<WechatConnectionSession> {
-  if (session.status === "active" || session.status === "expired" || session.status === "failed") {
+  if (isTerminalSession(session)) {
     return session;
   }
   if (new Date(session.expiresAt).getTime() <= Date.now()) {
@@ -85,6 +124,8 @@ async function pollSession(
       status: "expired",
       errorCode: "qr_expired",
       errorMessage: "二维码已过期，请重新生成"
+    }, {
+      ifStatusIn: NON_TERMINAL_SESSION_STATUSES
     });
   }
 
@@ -95,41 +136,52 @@ async function pollSession(
   const result = await runtime.client.pollLoginQr({
     qrCode,
     baseUrl: session.pollBaseUrl,
-    verifyCode
+    verifyCode,
+    signal
   });
 
   switch (result.status) {
     case "wait":
-      return session;
+      return (await runtime.store.getWechatSession(session.id)) ?? session;
     case "scaned":
       return runtime.store.updateWechatSession(session.id, {
         status: "scanned",
         errorCode: null,
         errorMessage: null
+      }, {
+        ifStatusIn: ["pending", "scanned"]
       });
     case "need_verifycode":
       return runtime.store.updateWechatSession(session.id, {
         status: "verification_required",
         errorCode: "verification_required",
         errorMessage: "请在当前页面输入微信显示的验证码"
+      }, {
+        ifStatusIn: NON_TERMINAL_SESSION_STATUSES
       });
     case "verify_code_blocked":
       return runtime.store.updateWechatSession(session.id, {
         status: "failed",
         errorCode: "verification_blocked",
         errorMessage: "验证码尝试次数过多，请重新生成二维码"
+      }, {
+        ifStatusIn: NON_TERMINAL_SESSION_STATUSES
       });
     case "expired":
       return runtime.store.updateWechatSession(session.id, {
         status: "expired",
         errorCode: "qr_expired",
         errorMessage: "二维码已过期，请重新生成"
+      }, {
+        ifStatusIn: NON_TERMINAL_SESSION_STATUSES
       });
     case "binded_redirect":
       return runtime.store.updateWechatSession(session.id, {
         status: "failed",
         errorCode: "already_bound_elsewhere",
         errorMessage: "该微信已绑定其他 iLink 客户端，请先解除旧连接后重试"
+      }, {
+        ifStatusIn: NON_TERMINAL_SESSION_STATUSES
       });
     case "scaned_but_redirect": {
       if (!result.redirectHost) return session;
@@ -141,11 +193,15 @@ async function pollSession(
           status: "failed",
           errorCode: "invalid_redirect_host",
           errorMessage: "微信返回了无效的重定向地址，请重新生成二维码"
+        }, {
+          ifStatusIn: NON_TERMINAL_SESSION_STATUSES
         });
       }
       return runtime.store.updateWechatSession(session.id, {
         status: "scanned",
         pollBaseUrl
+      }, {
+        ifStatusIn: ["pending", "scanned"]
       });
     }
     case "confirmed": {
@@ -159,6 +215,8 @@ async function pollSession(
           status: "failed",
           errorCode: "invalid_confirmation",
           errorMessage: "微信确认响应不完整，请重新生成二维码"
+        }, {
+          ifStatusIn: NON_TERMINAL_SESSION_STATUSES
         });
       }
       let baseUrl: string;
@@ -169,6 +227,8 @@ async function pollSession(
           status: "failed",
           errorCode: "invalid_confirmation_host",
           errorMessage: "微信返回了无效的服务地址，请重新生成二维码"
+        }, {
+          ifStatusIn: NON_TERMINAL_SESSION_STATUSES
         });
       }
       const activation = await runtime.store.activateWechatSession({
@@ -223,7 +283,7 @@ export function registerWechatRoutes(
     {
       config: {
         rateLimit: {
-          max: options.publicSessionRateLimitMax ?? 5,
+          max: options.publicSessionRateLimitMax ?? 30,
           timeWindow: "10 minutes"
         }
       }
@@ -288,6 +348,82 @@ export function registerWechatRoutes(
     const current = await pollSession(runtime, session);
     reply.header("Cache-Control", "no-store");
     return publicSession(current);
+  });
+
+  app.get("/wechat/connect/sessions/:sessionId/events", async (request, reply) => {
+    const runtime = options.runtime;
+    if (!runtime) {
+      return reply.code(503).send({
+        error: "wechat_connect_disabled",
+        message: "微信扫码接入尚未配置"
+      });
+    }
+    const session = await requireSession(runtime, request, reply);
+    if (!session) return;
+
+    reply
+      .header("Content-Type", "text/event-stream; charset=utf-8")
+      .header("Cache-Control", "no-cache, no-store, no-transform")
+      .header("Connection", "keep-alive")
+      .header("X-Accel-Buffering", "no");
+    reply.hijack();
+    for (const [name, value] of Object.entries(reply.getHeaders())) {
+      if (value !== undefined) reply.raw.setHeader(name, value);
+    }
+    reply.raw.statusCode = 200;
+    reply.raw.flushHeaders();
+    reply.raw.write("retry: 1500\n\n");
+
+    const controller = new AbortController();
+    let closed = false;
+    const close = () => {
+      closed = true;
+      controller.abort();
+    };
+    reply.raw.once("close", close);
+    const heartbeat = setInterval(() => {
+      if (!closed && !reply.raw.destroyed && !reply.raw.writableEnded) {
+        reply.raw.write(`: heartbeat ${Date.now()}\n\n`);
+      }
+    }, SSE_HEARTBEAT_MS);
+
+    let current = session;
+    let lastPayload = "";
+    const pushSession = () => {
+      const payload = publicSession(current);
+      const serialized = JSON.stringify(payload);
+      if (serialized === lastPayload) return;
+      lastPayload = serialized;
+      writeSseEvent(reply, "session", payload);
+    };
+
+    try {
+      pushSession();
+      while (!closed && !isTerminalSession(current)) {
+        if (current.status === "verification_required") {
+          await waitForSignal(500, controller.signal);
+          current = (await runtime.store.getWechatSession(current.id)) ?? current;
+        } else {
+          current = await pollSession(runtime, current, undefined, controller.signal);
+        }
+        pushSession();
+      }
+      if (!closed) {
+        writeSseEvent(reply, "done", publicSession(current));
+        reply.raw.end();
+      }
+    } catch {
+      if (!closed) {
+        writeSseEvent(reply, "error", {
+          error: "wechat_session_stream_failed",
+          message: "微信状态推送暂时中断"
+        });
+        reply.raw.end();
+      }
+    } finally {
+      clearInterval(heartbeat);
+      reply.raw.off("close", close);
+    }
   });
 
   app.post("/wechat/connect/sessions/:sessionId/verify", async (request, reply) => {

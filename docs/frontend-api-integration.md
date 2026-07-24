@@ -210,7 +210,8 @@ export interface MatchRoom {
 | `POST` | `/rooms/:id/complete` | Bearer | 200 | 标记活动完成 |
 | `POST` | `/rooms/:id/feedback` | Bearer | 200/202 | 提交活动反馈 |
 | `POST` | `/wechat/connect/sessions` | 无 | 201 | 创建微信扫码会话 |
-| `GET` | `/wechat/connect/sessions/:sessionId` | 微信会话 token | 200 | 轮询扫码状态 |
+| `GET` | `/wechat/connect/sessions/:sessionId/events` | 微信会话 token | 200 SSE | 实时推送扫码状态 |
+| `GET` | `/wechat/connect/sessions/:sessionId` | 微信会话 token | 200 | 查询扫码状态（SSE 降级） |
 | `POST` | `/wechat/connect/sessions/:sessionId/verify` | 微信会话 token | 200 | 提交微信验证码 |
 
 ## 5. Agent 聊天
@@ -601,7 +602,22 @@ interface WechatConnectSession {
 
 前端使用 `qrCodeContent` 生成二维码。`sessionToken` 只在创建响应中返回，不应写入日志或持久化到浏览器存储。
 
-### 10.2 轮询状态
+### 10.2 SSE 状态流
+
+`GET /wechat/connect/sessions/:sessionId/events`
+
+请求头：
+
+```http
+accept: text/event-stream
+x-wechat-session-token: <sessionToken>
+```
+
+后端立即发送当前状态，随后通过 `event: session` 推送每次状态变化，并在终态发送 `event: done` 后关闭连接。因为原生 `EventSource` 不能设置自定义请求头，前端应使用 `fetch` 读取 `ReadableStream`，不能把 `sessionToken` 放进 URL。
+
+收到 `scanned` 后，网页应立即遮住旧码、创建并展示下一张二维码，同时继续保留并监听旧会话。旧会话进入 `failed` 或扫码后的 `expired` 时，引导对应用户重新扫描当前新码。
+
+### 10.3 查询状态（降级）
 
 `GET /wechat/connect/sessions/:sessionId`
 
@@ -611,9 +627,9 @@ interface WechatConnectSession {
 x-wechat-session-token: <sessionToken>
 ```
 
-建议每 800–1500ms 轮询一次，进入 `active`、`expired` 或 `failed` 后停止。状态响应不再包含 `sessionToken` 和 `qrCodeContent`。
+仅在 SSE 建连或重连失败时调用；进入 `active`、`expired` 或 `failed` 后停止。状态响应不再包含 `sessionToken` 和 `qrCodeContent`。
 
-### 10.3 提交验证码
+### 10.4 提交验证码
 
 `POST /wechat/connect/sessions/:sessionId/verify`
 

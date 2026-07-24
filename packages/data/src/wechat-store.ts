@@ -11,7 +11,10 @@ export interface WechatConnectionStore {
   getWechatSession(sessionId: string): Promise<WechatConnectionSession | null>;
   updateWechatSession(
     sessionId: string,
-    update: WechatSessionUpdate
+    update: WechatSessionUpdate,
+    options?: {
+      ifStatusIn?: WechatConnectionSession["status"][];
+    }
   ): Promise<WechatConnectionSession>;
   activateWechatSession(input: ActivateWechatSessionInput): Promise<{
     session: WechatConnectionSession;

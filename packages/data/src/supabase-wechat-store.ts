@@ -97,21 +97,30 @@ export class SupabaseWechatStore implements WechatConnectionStore {
 
   async updateWechatSession(
     sessionId: string,
-    update: WechatSessionUpdate
+    update: WechatSessionUpdate,
+    options?: {
+      ifStatusIn?: WechatConnectionSession["status"][];
+    }
   ): Promise<WechatConnectionSession> {
     const values: JsonRow = { updated_at: new Date().toISOString() };
     if (update.status !== undefined) values.status = update.status;
     if (update.pollBaseUrl !== undefined) values.poll_base_url = update.pollBaseUrl;
     if (update.errorCode !== undefined) values.error_code = update.errorCode;
     if (update.errorMessage !== undefined) values.error_message = update.errorMessage;
-    const { data, error } = await this.client
+    let query = this.client
       .from("wechat_connection_sessions")
       .update(values)
-      .eq("id", sessionId)
-      .select("*")
-      .maybeSingle();
+      .eq("id", sessionId);
+    if (options?.ifStatusIn?.length) {
+      query = query.in("status", options.ifStatusIn);
+    }
+    const { data, error } = await query.select("*").maybeSingle();
     if (error) this.throwError("Update WeChat session", error);
-    if (!data) throw new StoreNotFoundError("微信扫码会话不存在");
+    if (!data) {
+      const current = await this.getWechatSession(sessionId);
+      if (!current) throw new StoreNotFoundError("微信扫码会话不存在");
+      return current;
+    }
     return mapSession(data as JsonRow);
   }
 
