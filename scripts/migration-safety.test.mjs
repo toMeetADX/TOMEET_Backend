@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   analyzeMigration,
   checkMigrations,
+  parseArguments as parseMigrationArguments,
   stripSqlCommentsAndStrings
 } from "./migration-safety.mjs";
 
@@ -17,6 +18,20 @@ function git(cwd, ...args) {
     stdio: ["ignore", "pipe", "pipe"]
   }).trim();
 }
+
+test("migration CLI accepts pnpm's argument separator", () => {
+  assert.deepEqual(
+    parseMigrationArguments([
+      "check",
+      "--",
+      "--base",
+      "origin/main",
+      "--head",
+      "HEAD"
+    ]),
+    { base: "origin/main", head: "HEAD" }
+  );
+});
 
 test("migration analyzer allows additive changes", () => {
   const result = analyzeMigration(`

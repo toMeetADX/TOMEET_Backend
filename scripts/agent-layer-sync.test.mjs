@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   applySync,
   checkSync,
+  parseArguments as parseSyncArguments,
   verifyRelease
 } from "./agent-layer-sync.mjs";
 
@@ -46,6 +47,23 @@ async function fixture() {
   };
   return { repoRoot, config };
 }
+
+test("sync CLI accepts pnpm's argument separator", () => {
+  assert.deepEqual(
+    parseSyncArguments([
+      "check",
+      "--",
+      "--source",
+      "origin/main",
+      "--target",
+      "HEAD"
+    ]),
+    {
+      command: "check",
+      options: { source: "origin/main", target: "HEAD" }
+    }
+  );
+});
 
 test("check ignores channel-specific paths and detects shared drift", async () => {
   const { repoRoot, config } = await fixture();

@@ -25,12 +25,13 @@ function git(args, options = {}) {
   }
 }
 
-function parseArguments(argv) {
+export function parseArguments(argv) {
   const [command = "check", ...rest] = argv;
   if (command !== "check") throw new Error(`Unknown command: ${command}`);
   const options = {};
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index];
+    if (token === "--") continue;
     if (token === "--staged" || token === "--all" || token === "--json") {
       options[token.slice(2)] = true;
       continue;

@@ -24,11 +24,12 @@ function git(args, options = {}) {
   }
 }
 
-function parseArguments(argv) {
+export function parseArguments(argv) {
   const [command = "check", ...rest] = argv;
   const options = {};
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index];
+    if (token === "--") continue;
     if (!token.startsWith("--")) throw new Error(`Unknown argument: ${token}`);
     const name = token.slice(2);
     if (name === "json") {
