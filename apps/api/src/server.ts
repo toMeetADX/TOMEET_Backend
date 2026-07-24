@@ -41,6 +41,7 @@ for (const rawOrigin of (frontendOrigin ?? "http://localhost:3000").split(",")) 
 let store: DataStore;
 let verifyAccessToken: AccessTokenVerifier | undefined;
 let wechatRapidQrAccessTokenMatches: EmailAccessTokenMatcher | undefined;
+let adventurexTestPoolAccessTokenMatches: EmailAccessTokenMatcher | undefined;
 let supabaseStore: SupabaseStore | undefined;
 
 if (demoMode) {
@@ -57,6 +58,15 @@ if (demoMode) {
     key,
     process.env.WECHAT_RAPID_QR_EMAIL ?? "andy4fe0119@gmail.com"
   );
+  if (process.env.ADVENTUREX_TEST_POOL_ENABLED === "true") {
+    adventurexTestPoolAccessTokenMatches = createSupabaseEmailAccessTokenMatcher(
+      url,
+      key,
+      process.env.ADVENTUREX_TEST_POOL_EMAIL
+        ?? process.env.WECHAT_RAPID_QR_EMAIL
+        ?? "andy4fe0119@gmail.com"
+    );
+  }
 }
 
 const wechatEncryptionKey = process.env.WECHAT_CREDENTIAL_ENCRYPTION_KEY;
@@ -92,7 +102,9 @@ if (demoMode) {
     webSearchProvider,
     onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event }))
   });
-  inlineProcessor = new JobProcessor(store, hosted, hosted);
+  inlineProcessor = new JobProcessor(store, hosted, hosted, {
+    adventurexMatchingV1: process.env.ADVENTUREX_MATCHING_V1 === "true"
+  });
 }
 
 const app = await buildApp({
@@ -113,7 +125,9 @@ const app = await buildApp({
     "WECHAT_PUBLIC_QR_RATE_LIMIT_MAX"
   ),
   wechatRapidQrAccessTokenMatches,
-  exposeInternalErrors: !isProduction
+  adventurexTestPoolAccessTokenMatches,
+  exposeInternalErrors: !isProduction,
+  adventurexMatchingV1: process.env.ADVENTUREX_MATCHING_V1 === "true"
 });
 
 console.info(JSON.stringify({

@@ -100,6 +100,15 @@ export interface WechatConnection {
   updatedAt: string;
 }
 
+export interface WechatOutboundDelivery {
+  id: string;
+  messageId: string;
+  userId: string;
+  content: string;
+  attempts: number;
+  connection: WechatConnection;
+}
+
 export interface ActivateWechatSessionInput {
   sessionId: string;
   newUserId: string;

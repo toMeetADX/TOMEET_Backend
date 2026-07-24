@@ -9,7 +9,11 @@ import {
 } from "@tomeet/wechat-ilink";
 import { config as loadDotEnv } from "dotenv";
 import { TomeetClient } from "./tomeet-client.js";
-import { fingerprint, monitorWechatConnection } from "./runtime.js";
+import {
+  deliverWechatOutboundMessage,
+  fingerprint,
+  monitorWechatConnection
+} from "./runtime.js";
 
 loadDotEnv({ path: resolve(process.cwd(), ".env") });
 loadDotEnv({ path: resolve(process.cwd(), "../../.env"), override: false });
@@ -42,6 +46,8 @@ const tomeetApiUrl = requiredEnvironment("TOMEET_API_URL");
 const internalApiToken = requiredEnvironment("TOMEET_INTERNAL_API_TOKEN");
 const workerId = `${process.env.RAILWAY_REPLICA_ID ?? "local"}:${randomUUID().slice(0, 8)}`;
 const concurrency = integerEnvironment("WECHAT_WORKER_CONCURRENCY", 8, 1, 32);
+const outboundConcurrency = integerEnvironment("WECHAT_OUTBOUND_CONCURRENCY", 20, 1, 100);
+const bubbleDelayMs = integerEnvironment("WECHAT_BUBBLE_DELAY_MS", 200, 0, 5_000);
 const claimIntervalMs = integerEnvironment(
   "WECHAT_WORKER_CLAIM_INTERVAL_MS",
   1000,
@@ -60,6 +66,7 @@ const tomeet = new TomeetClient({
   internalApiToken
 });
 const active = new Map<string, Promise<void>>();
+const activeOutbound = new Map<string, Promise<void>>();
 let ready = false;
 
 async function withTimeout<T>(
@@ -89,7 +96,8 @@ async function monitorConnection(connection: WechatConnection): Promise<void> {
     store,
     cipher,
     ilink,
-    tomeet
+    tomeet,
+    bubbleDelayMs
   });
 }
 
@@ -143,7 +151,9 @@ async function run(): Promise<void> {
     level: "info",
     event: "wechat_ilink_worker_started",
     worker: fingerprint(workerId),
-    concurrency
+    concurrency,
+    outboundConcurrency,
+    bubbleDelayMs
   }));
   while (!abortController.signal.aborted) {
     const capacity = concurrency - active.size;
@@ -157,6 +167,22 @@ async function run(): Promise<void> {
         if (active.has(connection.id)) continue;
         const task = monitorConnection(connection).finally(() => active.delete(connection.id));
         active.set(connection.id, task);
+      }
+    }
+    const outboundCapacity = outboundConcurrency - activeOutbound.size;
+    if (outboundCapacity > 0) {
+      const claimed = await store.claimWechatOutboundMessages({
+        workerId,
+        limit: outboundCapacity
+      });
+      for (const delivery of claimed) {
+        if (activeOutbound.has(delivery.id)) continue;
+        const task = deliverWechatOutboundMessage(
+          { store, cipher, ilink, bubbleDelayMs },
+          delivery,
+          workerId
+        ).finally(() => activeOutbound.delete(delivery.id));
+        activeOutbound.set(delivery.id, task);
       }
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, claimIntervalMs));
@@ -174,6 +200,6 @@ try {
   await run();
 } finally {
   ready = false;
-  await Promise.allSettled(active.values());
+  await Promise.allSettled([...active.values(), ...activeOutbound.values()]);
   await new Promise<void>((resolveClose) => healthServer.close(() => resolveClose()));
 }

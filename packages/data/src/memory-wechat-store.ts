@@ -4,6 +4,7 @@ import type {
   CreateWechatSessionInput,
   WechatConnection,
   WechatConnectionSession,
+  WechatOutboundDelivery,
   WechatSessionUpdate
 } from "@tomeet/wechat-ilink";
 import type { DataStore } from "./store.js";
@@ -259,4 +260,17 @@ export class MemoryWechatStore implements WechatConnectionStore {
       error ? "failed" : "completed"
     );
   }
+
+  async claimWechatOutboundMessages(_input: {
+    workerId: string;
+    limit: number;
+  }): Promise<WechatOutboundDelivery[]> {
+    return [];
+  }
+
+  async completeWechatOutboundMessage(
+    _outboundId: string,
+    _workerId: string,
+    _error?: string
+  ): Promise<void> {}
 }

@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { MockAgentIntelligence } from "@tomeet/agent-core";
+import { adventurexWelcomeContent } from "@tomeet/contracts";
 import { MemoryStore, MemoryWechatStore } from "@tomeet/data";
 import { JobProcessor } from "@tomeet/intelligence";
 import { MockMatchmakingIntelligence } from "@tomeet/matchmaking";
@@ -139,6 +140,7 @@ describe("WeChat one-time QR onboarding", () => {
       confirmed,
       { ...confirmed, ilink_bot_id: "bot-2", bot_token: "rotated-secret" }
     ]);
+    const enqueueWelcome = vi.spyOn(store, "enqueueWechatOutboundMessage");
 
     const firstCreate = await app.inject({
       method: "POST",
@@ -173,6 +175,11 @@ describe("WeChat one-time QR onboarding", () => {
     expect(firstIdentity).not.toBeNull();
     const firstUserId = firstIdentity!.userId;
     expect((await store.getUserModel(firstUserId)).userId).toBe(firstUserId);
+    expect(enqueueWelcome).toHaveBeenCalledWith(expect.objectContaining({
+      userId: firstUserId,
+      content: adventurexWelcomeContent("zh")
+    }));
+    expect((await store.ensureAdventurexOnboardingState(firstUserId)).preferredLanguage).toBe("zh");
 
     const secondCreate = await app.inject({
       method: "POST",
@@ -323,7 +330,7 @@ describe("WeChat one-time QR onboarding", () => {
       });
       expect(history.statusCode).toBe(200);
       expect(history.json().messages.some(
-        (message: { content: string }) => message.content.includes("匹配完成了")
+        (message: { content: string }) => message.content.includes("匹配已经完成")
       )).toBe(true);
     }
 
@@ -334,7 +341,7 @@ describe("WeChat one-time QR onboarding", () => {
     });
     expect(wechatHistory.statusCode).toBe(200);
     expect(wechatHistory.json().messages.some(
-      (message: { content: string }) => message.content.includes("匹配完成了")
+      (message: { content: string }) => message.content.includes("匹配已经完成")
     )).toBe(true);
   });
 

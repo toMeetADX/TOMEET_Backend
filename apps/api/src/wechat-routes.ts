@@ -36,6 +36,7 @@ interface RegisterWechatRoutesOptions {
   internalTokenMatches(candidate: unknown): boolean;
   publicSessionRateLimitMax?: number;
   rapidQrAccessTokenMatches?(accessToken: string): Promise<boolean>;
+  onActivated?(userId: string): Promise<void>;
 }
 
 function publicSession(session: WechatConnectionSession) {
@@ -115,9 +116,13 @@ async function pollSession(
   runtime: WechatApiRuntime,
   session: WechatConnectionSession,
   verifyCode?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onActivated?: (userId: string) => Promise<void>
 ): Promise<WechatConnectionSession> {
   if (isTerminalSession(session)) {
+    if (session.status === "active" && session.userId && onActivated) {
+      await onActivated(session.userId);
+    }
     return session;
   }
   if (new Date(session.expiresAt).getTime() <= Date.now()) {
@@ -243,6 +248,9 @@ async function pollSession(
         ),
         baseUrl
       });
+      if (activation.session.userId && onActivated) {
+        await onActivated(activation.session.userId);
+      }
       return activation.session;
     }
   }
@@ -389,7 +397,7 @@ export function registerWechatRoutes(
     }
     const session = await requireSession(runtime, request, reply);
     if (!session) return;
-    const current = await pollSession(runtime, session);
+    const current = await pollSession(runtime, session, undefined, undefined, options.onActivated);
     reply.header("Cache-Control", "no-store");
     return publicSession(current);
   });
@@ -448,7 +456,7 @@ export function registerWechatRoutes(
           await waitForSignal(500, controller.signal);
           current = (await runtime.store.getWechatSession(current.id)) ?? current;
         } else {
-          current = await pollSession(runtime, current, undefined, controller.signal);
+          current = await pollSession(runtime, current, undefined, controller.signal, options.onActivated);
         }
         pushSession();
       }
@@ -481,7 +489,7 @@ export function registerWechatRoutes(
     const session = await requireSession(runtime, request, reply);
     if (!session) return;
     const { code } = verifyCodeSchema.parse(request.body);
-    const current = await pollSession(runtime, session, code);
+    const current = await pollSession(runtime, session, code, undefined, options.onActivated);
     reply.header("Cache-Control", "no-store");
     return publicSession(current);
   });

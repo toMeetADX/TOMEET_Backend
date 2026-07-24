@@ -91,4 +91,41 @@ describe("TomeetClient", () => {
     })).resolves.toBe("稍后回复");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("submits unsupported channel content as a structured Agent event", async () => {
+    let requestedUrl = "";
+    let postedBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requestedUrl = String(input);
+      postedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        job: { ...completedJob("请换成文字告诉我"), type: "agent_event_reply" }
+      }), { headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TomeetClient({
+      baseUrl: "https://api.example.com",
+      internalApiToken: "internal-test-token"
+    });
+
+    await expect(client.sendEvent({
+      connectionId: "connection-3",
+      messageId: "message-3",
+      userId: "25000000-0000-4000-8000-000000000001",
+      event: {
+        kind: "unsupported_channel_message",
+        facts: { channel: "wechat", supportedInputs: ["text"] }
+      }
+    })).resolves.toBe("请换成文字告诉我");
+
+    expect(requestedUrl).toBe("https://api.example.com/internal/agent/events");
+    expect(postedBody).toMatchObject({
+      userId: "25000000-0000-4000-8000-000000000001",
+      event: {
+        kind: "unsupported_channel_message",
+        facts: { channel: "wechat", supportedInputs: ["text"] }
+      }
+    });
+    expect(String(postedBody?.idempotencyKey)).toMatch(/^wechat:[a-f0-9]{64}$/);
+  });
 });

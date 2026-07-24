@@ -3,6 +3,7 @@ import type {
   CreateWechatSessionInput,
   WechatConnection,
   WechatConnectionSession,
+  WechatOutboundDelivery,
   WechatSessionUpdate
 } from "@tomeet/wechat-ilink";
 
@@ -47,6 +48,15 @@ export interface WechatConnectionStore {
   completeWechatMessage(
     connectionId: string,
     messageId: string,
+    error?: string
+  ): Promise<void>;
+  claimWechatOutboundMessages(input: {
+    workerId: string;
+    limit: number;
+  }): Promise<WechatOutboundDelivery[]>;
+  completeWechatOutboundMessage(
+    outboundId: string,
+    workerId: string,
     error?: string
   ): Promise<void>;
 }

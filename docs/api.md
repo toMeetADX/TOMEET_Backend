@@ -84,18 +84,27 @@ export async function tomeetApi<T>(path: string, init: RequestInit = {}): Promis
 | POST | `/uploads/sign` | 获取 Supabase 私有 Bucket 一次性上传凭据 | 200 |
 | POST | `/uploads` | Base64 图片上传兼容接口 | 200 |
 | POST | `/agent/multimodal-inputs` | 登记已上传的图片/录音并创建理解任务 | 200 / 202 |
+| POST | `/users/:userId/adventurex-onboarding/start` | 按语言幂等发送 AdventureX 四气泡欢迎语 | 200 |
 | GET | `/users/:userId/model` | 获取可公开给用户的模型状态 | 200 |
 | GET | `/offline-games` | 获取启用的线下游戏 | 200 |
 | POST | `/match-requests` | 创建匹配请求 | 201 / 202 |
 | GET | `/match-requests/:id` | 查询匹配请求 | 200 |
+| GET | `/match-requests/:id/options` | 查询当前 1–3 个候选，不暴露 hook/member ID | 200 |
+| POST | `/match-requests/:id/choices` | 提交一个或多个可接受候选 | 200 |
+| POST | `/match-requests/:id/options/refresh` | 放弃本批候选并进入下一轮 | 200 |
 | POST | `/match-requests/:id/cancel` | 取消等待中的匹配 | 200 |
+| POST | `/match-requests/:id/rematch` | 从已取消或已超时请求创建全新匹配请求 | 200 |
+| POST | `/match-requests/:id/open-room/:roomId/join` | 使用 offer/version 加入开放局 | 200 |
 | GET | `/jobs/:id` | 查询异步任务 | 200 |
 | GET | `/rooms/:id` | 查询当前用户所在房间 | 200 |
 | POST | `/rooms/:id/confirm` | 当前用户确认参加 | 200 |
+| POST | `/rooms/:id/leave` | 退出已确认房间并通知剩余成员 | 200 |
 | POST | `/rooms/:id/complete` | 房间成员标记活动完成 | 200 |
 | POST | `/rooms/:id/feedback` | 当前用户提交活动反馈 | 200 / 202 |
 
 ## 5. Agent 与消息
+
+生产回复由 Hosted Agent 生成。业务代码对候选、成局、超时和状态变化只提供结构化事实，发布前会再次校验事实边界和候选编号；首次 AdventureX 欢迎语是唯一明确保留的固定产品话术。
 
 ### `POST /agent/messages`
 
@@ -136,6 +145,8 @@ export async function tomeetApi<T>(path: string, init: RequestInit = {}): Promis
 ```
 
 完成后的 `job.result` 可能包含 `message`、`userModel`、`socialIntentDetected`、`webSearch`、`actions`、`matchRequest` 和 `room`。产品主流程可以只发送自然语言：Agent 会根据对话执行发起匹配、确认房间、完成活动和提交反馈等结构化动作。
+
+AdventureX V1 中还支持自然语言选择候选、换一批、取消、重新匹配和退出房间。用户看到的正文不包含 `hookId`、候选成员 ID 或 `sourceUserId`。
 
 ### `GET /agent/messages/:userId`
 
@@ -200,6 +211,23 @@ await supabase.storage
 
 ## 7. 用户模型与游戏
 
+### `POST /users/:userId/adventurex-onboarding/start`
+
+请求体可选：`{ "language": "zh" | "en" }`，默认 `zh`。首次调用会返回对应语言的四段欢迎语；微信发送端会按空行拆成四个气泡。相同语言重复调用返回同一条消息。用户已经开始正常对话且此前没有欢迎消息时不会插入历史，`message` 为 `null`、`messages` 为空数组。用户在对话中明确要求切换语言时，Agent 会保存语言偏好并重新播放对应语言欢迎语。响应：
+
+```json
+{
+  "state": {
+    "stage": "awaiting_image_or_text",
+    "imageDeclined": false,
+    "preferredLanguage": "zh",
+    "boundaryPromptedAt": null
+  },
+  "message": { "role": "assistant", "content": "你好呀👋\n\n我是一个社交智能体\n\n……" },
+  "messages": [{ "role": "assistant", "content": "你好呀👋\n\n我是一个社交智能体\n\n……" }]
+}
+```
+
 ### `GET /users/:userId/model`
 
 返回 `{ "userModel": UserModel }`。只暴露兼容业务字段；Agent Memory V2 的详细记忆和隐藏 profile 不通过此接口返回。
@@ -221,15 +249,59 @@ await supabase.storage
 }
 ```
 
-也可显式传入 `intent` 对象。没有明确社交意图、存在未结束房间时返回 `409`。响应为 `{ "matchRequest": MatchRequest, "job": LlmJob }`；已在本次请求内完成匹配时为 `201`，否则为 `202`。
+也可显式传入 `intent` 对象。没有明确社交意图、存在未结束房间时返回 `409`。启用 `ADVENTUREX_MATCHING_V1=true` 后，请求进入下一个 30 秒后台清算 tick；该 tick 不是用户等待倒计时。只有真实候选发送成功后才开始 90 秒选择窗口。
 
 ### `GET /match-requests/:id`
 
-返回 `{ "matchRequest": MatchRequest }`。`status` 为 `matching | matched | cancelled`；匹配成功时 `roomId` 非空。
+返回 `{ "matchRequest": MatchRequest }`。`status` 为 `matching | matched | cancelled | expired`；其中 `expired` 表示候选窗口结束后本次请求未成局且没有保留主动推送授权。活跃请求另有 `phase=waiting | offered | selected | settling | push_consent | watching`，并通过 `proactivePushEnabled` 表示是否允许微信主动推送。匹配成功时 `roomId` 非空。
+
+### `GET /match-requests/:id/options`
+
+返回当前候选的公开视图：
+
+```json
+{
+  "requestId": "UUID",
+  "roundId": "UUID",
+  "expiresAt": "2026-07-24T12:00:00.000Z",
+  "options": [{
+    "optionNumber": 1,
+    "activity": { "id": "game-story-table", "name": "故事交换桌" },
+    "previewText": "**1｜故事交换桌**\n你可能遇见……"
+  }]
+}
+```
+
+### `POST /match-requests/:id/choices`
+
+```json
+{
+  "preferredOptionNumber": 3,
+  "acceptedOptionNumbers": [3, 1],
+  "requiredHookIds": [],
+  "rawText": "3 优先，1 也行"
+}
+```
+
+`requiredHookIds` 主要供 Agent/结构化测试使用，必须来自当前已接受 offer。普通产品入口应继续通过 `/agent/messages` 发送自然语言。首选为开放局时会立即尝试原子加入；版本变化或满员返回 `409`，不会静默改派。
+
+### 刷新、取消与重新匹配
+
+- `POST /match-requests/:id/options/refresh`：当前 offers 过期，请求进入下一轮。
+- `POST /match-requests/:id/cancel`：响应额外包含 `canRematch=true`。
+- `POST /match-requests/:id/rematch`：只接受已取消或已超时请求，并创建新的 request ID，不复活旧记录。候选窗口超时后不会自动重新匹配，必须由用户明确发起。
+- `POST /match-requests/:id/open-room/:roomId/join`：请求体为 `{ "offerId": "UUID", "sourceVersion": 2 }`。
+
+### AdventureX 虚拟测试池开关
+
+- `GET /adventurex/test-pool`：读取当前登录账号的测试池状态。
+- `POST /adventurex/test-pool`：请求体 `{ "enabled": true, "desiredUserCount": 5 }`，数量范围 3–12。
+
+该接口同时要求正常 Supabase Bearer 登录和 `ADVENTUREX_TEST_POOL_EMAIL` 邮箱白名单。未配置 `ADVENTUREX_TEST_POOL_ENABLED=true` 时返回 `503`，非白名单账号返回 `403`。测试用户只会进入所有者的 `adventurex-test:<owner>:<tick>` 隔离轮次。
 
 ### `POST /match-requests/:id/cancel`
 
-无请求体。只能取消 `matching` 状态，响应为 `{ "matchRequest": MatchRequest }`。
+无请求体。只能取消 `matching` 状态，响应为 `{ "matchRequest": MatchRequest, "canRematch": true }`。
 
 ## 9. 房间与反馈
 
@@ -244,6 +316,18 @@ await supabase.storage
 ```
 
 当前登录用户确认参加；所有成员确认后房间变为 `confirmed`。
+
+AdventureX 新流程中，用户对候选的选择已构成参加意愿，最终房间创建时成员直接为 `confirmed`；本接口仅为旧流程兼容保留。
+
+### `POST /rooms/:id/leave`
+
+```json
+{ "userId": "UUID", "reason": "临时有事" }
+```
+
+正式成局确认函发出后，`reason` 必须是去除首尾空白后的非空字符串，最长 500 字；系统只要求用户给出一个简单理由，不判断其充分性。理由仅用于内部记录，不会出现在其他成员收到的变化通知中。
+
+成员行保留并标记为 `withdrawn`，房间 `version` 增加；有空位时重新开放招募。退出用户不会再次收到同一个开放局。剩余确认成员通过 Agent 消息收到一次幂等变化通知。响应包含 `canRematch=false`、最新 `matchRequest` 与 `interestState`：此前已授权主动推送时请求变为 `matching/watching`，否则变为 `cancelled`，且不会自动询问或启动重新匹配。
 
 ### `POST /rooms/:id/complete`
 

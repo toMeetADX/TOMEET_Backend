@@ -1,14 +1,29 @@
 import type {
+  AdventurexLanguage,
+  AdventurexTestPoolStatus,
+  AdventurexOnboardingStage,
+  AdventurexOnboardingState,
   ChannelIdentity,
   ChannelProvider,
+  FinalRoomDecision,
   LlmJob,
   LlmJobType,
+  MatchChoice,
   MatchDecision,
+  MatchDraft,
+  MatchOptionContext,
+  MatchOptionHook,
+  MatchOptionOffer,
   MatchRequest,
+  MatchRound,
+  MatchRoundProposal,
   MatchRoom,
   Message,
   OfflineGame,
   PostEventFeedback,
+  SaveMatchChoicesInput,
+  SocialHook,
+  SocialHookDraft,
   UserMemory,
   UserMemoryCandidate,
   UserMemoryExplicitness,
@@ -24,6 +39,52 @@ export interface EnqueueJobInput {
   idempotencyKey: string;
   maxAttempts?: number;
   partitionKey?: string;
+  runAt?: string;
+}
+
+export interface PreparedMatchOffer {
+  requestId: string;
+  sourceType: "draft" | "open_room";
+  tempDraftId?: string;
+  roomId?: string;
+  sourceVersion: number;
+  optionNumber: 1 | 2 | 3;
+  offlineGameId: string;
+  previewText: string;
+  hooks: MatchOptionHook[];
+}
+
+export interface SaveRoundPlanInput {
+  roundId: string;
+  proposal: MatchRoundProposal | null;
+  offers: PreparedMatchOffer[];
+  offerExpiresAt: string;
+}
+
+export interface RoundSettlementState {
+  round: MatchRound;
+  drafts: MatchDraft[];
+  choices: MatchChoice[];
+  requests: MatchRequest[];
+  hooks: SocialHook[];
+}
+
+export interface RoomChangeNotification {
+  eventId: string;
+  roomId: string;
+  userId: string;
+  changeType: string;
+  payload: Record<string, unknown>;
+  idempotencyKey: string;
+}
+
+export interface DraftChangeNotification {
+  eventId: string;
+  draftId: string;
+  userId: string;
+  changeType: string;
+  payload: Record<string, unknown>;
+  idempotencyKey: string;
 }
 
 export interface MultimodalRecordInput {
@@ -64,6 +125,17 @@ export interface ApplyMemoryChangesResult {
 
 export interface DataStore {
   ensureUser(userId: string, displayName?: string): Promise<void>;
+  ensureAdventurexOnboardingState(userId: string): Promise<AdventurexOnboardingState>;
+  startAdventurexOnboarding(userId: string, language?: AdventurexLanguage): Promise<Message | null>;
+  updateAdventurexOnboardingState(
+    userId: string,
+    patch: {
+      stage?: AdventurexOnboardingStage;
+      imageDeclined?: boolean;
+      preferredLanguage?: AdventurexLanguage;
+      boundaryPrompted?: boolean;
+    }
+  ): Promise<AdventurexOnboardingState>;
   resolveChannelIdentity(
     provider: ChannelProvider,
     externalUserId: string
@@ -102,18 +174,56 @@ export interface DataStore {
   resolveStorageUrl(storagePath: string): Promise<string>;
   updateMultimodalInput(inputId: string, understanding: Record<string, unknown>): Promise<void>;
 
+  listActiveSocialHooks(userId: string, limit?: number): Promise<SocialHook[]>;
+  saveSocialHooks(userId: string, hooks: SocialHookDraft[]): Promise<SocialHook[]>;
+  forgetSocialHook(userId: string, hookId: string): Promise<void>;
+
   createMatchRequest(userId: string, intentSnapshot: Record<string, unknown>): Promise<MatchRequest>;
   getMatchRequest(requestId: string): Promise<MatchRequest | null>;
   getLatestMatchRequestForUser(userId: string): Promise<MatchRequest | null>;
   cancelMatchRequest(requestId: string): Promise<MatchRequest>;
+  restartMatch(endedRequestId: string): Promise<MatchRequest>;
+  setMatchRequestInterest(
+    requestId: string,
+    input: {
+      phase: "waiting" | "push_consent" | "watching";
+      proactivePushEnabled: boolean;
+      clearRound?: boolean;
+    }
+  ): Promise<MatchRequest>;
+  getAdventurexTestPoolStatus(ownerUserId: string): Promise<AdventurexTestPoolStatus>;
+  configureAdventurexTestPool(
+    ownerUserId: string,
+    input: { enabled: boolean; desiredUserCount: number }
+  ): Promise<AdventurexTestPoolStatus>;
+  prepareAdventurexTestPool(ownerUserId: string): Promise<MatchRequest[]>;
+  createOrGetMatchRound(bucketKey: string, scheduledAt: string): Promise<MatchRound>;
+  addRequestToRound(roundId: string, requestId: string): Promise<void>;
+  listRoundCandidates(roundId: string): Promise<MatchCandidate[]>;
+  saveRoundProposals(input: SaveRoundPlanInput): Promise<MatchOptionOffer[]>;
+  listCurrentMatchOptions(userId: string): Promise<MatchOptionContext | null>;
+  saveMatchChoices(requestId: string, input: SaveMatchChoicesInput): Promise<MatchChoice[]>;
+  expireMatchOptions(requestId: string): Promise<void>;
+  getRoundSettlementState(roundId: string): Promise<RoundSettlementState>;
+  settleMatchRound(roundId: string, decisions: FinalRoomDecision[]): Promise<string[]>;
+  listSuitableOpenRooms(userId: string, limit?: number): Promise<MatchRoom[]>;
+  joinOpenRoom(requestId: string, offerId: string, sourceVersion: number): Promise<MatchRoom>;
   listMatchCandidates(limit?: number): Promise<MatchCandidate[]>;
   listOfflineGames(): Promise<OfflineGame[]>;
   createRoomFromDecision(decision: MatchDecision, sourceJobId?: string): Promise<string>;
   getRoom(roomId: string): Promise<MatchRoom | null>;
   getLatestRoomForUser(userId: string): Promise<MatchRoom | null>;
   confirmRoom(roomId: string, userId: string): Promise<MatchRoom>;
+  leaveRoom(roomId: string, userId: string, reason?: string): Promise<MatchRoom>;
+  getRoomIntro(roomId: string, userId: string): Promise<string | null>;
+  saveRoomIntro(roomId: string, userId: string, introText: string, hookIds: string[]): Promise<void>;
+  listPendingRoomChangeNotifications(limit?: number): Promise<RoomChangeNotification[]>;
+  markRoomChangeNotificationDelivered(eventId: string, userId: string): Promise<void>;
+  listPendingDraftChangeNotifications(limit?: number): Promise<DraftChangeNotification[]>;
+  markDraftChangeNotificationDelivered(eventId: string, userId: string): Promise<void>;
   completeRoom(roomId: string): Promise<MatchRoom>;
   saveFeedback(feedback: PostEventFeedback): Promise<string>;
+  enqueueWechatOutboundMessage(message: Message): Promise<void>;
 
   enqueueJob(input: EnqueueJobInput): Promise<LlmJob>;
   getJob(jobId: string): Promise<LlmJob | null>;

@@ -4,6 +4,7 @@ import type {
   CreateWechatSessionInput,
   WechatConnection,
   WechatConnectionSession,
+  WechatOutboundDelivery,
   WechatSessionUpdate
 } from "@tomeet/wechat-ilink";
 import { StoreConflictError, StoreNotFoundError } from "./store.js";
@@ -52,6 +53,17 @@ function mapConnection(row: JsonRow): WechatConnection {
     failureCount: Number(row.failure_count ?? row.failureCount ?? 0),
     createdAt: String(row.created_at ?? row.createdAt),
     updatedAt: String(row.updated_at ?? row.updatedAt)
+  };
+}
+
+function mapOutboundDelivery(row: JsonRow): WechatOutboundDelivery {
+  return {
+    id: String(row.id),
+    messageId: String(row.messageId ?? row.message_id),
+    userId: String(row.userId ?? row.user_id),
+    content: String(row.content),
+    attempts: Number(row.attempts ?? 0),
+    connection: mapConnection(row.connection as JsonRow)
   };
 }
 
@@ -256,5 +268,30 @@ export class SupabaseWechatStore implements WechatConnectionStore {
       .eq("connection_id", connectionId)
       .eq("message_id", messageId);
     if (error) this.throwError("Complete WeChat message", error);
+  }
+
+  async claimWechatOutboundMessages(input: {
+    workerId: string;
+    limit: number;
+  }): Promise<WechatOutboundDelivery[]> {
+    const { data, error } = await this.client.rpc("claim_wechat_outbound_messages", {
+      p_worker_id: input.workerId,
+      p_limit: input.limit
+    });
+    if (error) this.throwError("Claim WeChat outbound messages", error);
+    return (data ?? []).map((row: unknown) => mapOutboundDelivery(row as JsonRow));
+  }
+
+  async completeWechatOutboundMessage(
+    outboundId: string,
+    workerId: string,
+    errorMessage?: string
+  ): Promise<void> {
+    const { error } = await this.client.rpc("complete_wechat_outbound_message", {
+      p_outbound_id: outboundId,
+      p_worker_id: workerId,
+      p_error: errorMessage ?? null
+    });
+    if (error) this.throwError("Complete WeChat outbound message", error);
   }
 }

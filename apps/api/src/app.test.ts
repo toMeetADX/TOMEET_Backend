@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { MockAgentIntelligence } from "@tomeet/agent-core";
+import { adventurexWelcomeContent } from "@tomeet/contracts";
 import { MemoryStore } from "@tomeet/data";
 import { JobProcessor } from "@tomeet/intelligence";
 import { MockMatchmakingIntelligence } from "@tomeet/matchmaking";
@@ -65,6 +66,52 @@ describe("TOMEET core flow", () => {
       headers: { authorization: "Bearer valid" }
     });
     expect(valid.statusCode).toBe(200);
+  });
+
+  it("restricts the virtual AdventureX pool switch to the configured owner account", async () => {
+    const ownerUserId = randomUUID();
+    const otherUserId = randomUUID();
+    const store = new MemoryStore();
+    const app = await buildApp({
+      store,
+      verifyAccessToken: async (token) => {
+        if (token === "owner-token") return ownerUserId;
+        if (token === "other-token") return otherUserId;
+        throw new AuthenticationError("登录状态无效或已过期");
+      },
+      adventurexTestPoolAccessTokenMatches: async (token) => token === "owner-token"
+    });
+    apps.push(app);
+
+    const forbidden = await app.inject({
+      method: "POST",
+      url: "/adventurex/test-pool",
+      headers: { authorization: "Bearer other-token" },
+      payload: { enabled: true, desiredUserCount: 5 }
+    });
+    expect(forbidden.statusCode).toBe(403);
+
+    const enabled = await app.inject({
+      method: "POST",
+      url: "/adventurex/test-pool",
+      headers: { authorization: "Bearer owner-token" },
+      payload: { enabled: true, desiredUserCount: 5 }
+    });
+    expect(enabled.statusCode).toBe(200);
+    expect(enabled.json().testPool).toMatchObject({
+      ownerUserId,
+      enabled: true,
+      desiredUserCount: 5,
+      provisionedUserCount: 5
+    });
+
+    const status = await app.inject({
+      method: "GET",
+      url: "/adventurex/test-pool",
+      headers: { authorization: "Bearer owner-token" }
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json().testPool.ownerUserId).toBe(ownerUserId);
   });
 
   it("fails readiness without failing liveness when the database stalls", async () => {
@@ -199,6 +246,44 @@ describe("TOMEET core flow", () => {
     expect(resolved.json().identity.userId).toBe(userId);
   });
 
+  it("protects internal product events and lets the Agent compose the channel reply", async () => {
+    const store = new MemoryStore();
+    const processor = new JobProcessor(store, new MockAgentIntelligence(), new MockMatchmakingIntelligence());
+    const internalApiToken = "test-internal-token-that-is-at-least-32-characters";
+    const app = await buildApp({ store, inlineProcessor: processor, internalApiToken });
+    apps.push(app);
+    const userId = randomUUID();
+    const payload = {
+      userId,
+      event: {
+        kind: "unsupported_channel_message",
+        facts: { channel: "wechat", supportedInputs: ["text"] }
+      },
+      idempotencyKey: randomUUID()
+    };
+
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: "/internal/agent/events",
+      payload
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/internal/agent/events",
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().job.type).toBe("agent_event_reply");
+    expect(response.json().job.result.message).toMatchObject({
+      userId,
+      role: "assistant",
+      content: "这条消息目前无法读取，你可以换一种方式告诉我。"
+    });
+  });
+
   it("auto-provisions deterministic channel users only when explicitly enabled", async () => {
     const store = new MemoryStore();
     const processor = new JobProcessor(store, new MockAgentIntelligence(), new MockMatchmakingIntelligence());
@@ -251,7 +336,7 @@ describe("TOMEET core flow", () => {
     expect(duplicateRoomMatch.statusCode).toBe(409);
 
     const historyResponse = await app.inject({ method: "GET", url: `/agent/messages/${userId}` });
-    expect(historyResponse.json().messages.some((message: { content: string }) => message.content.includes("匹配完成了"))).toBe(true);
+    expect(historyResponse.json().messages.some((message: { content: string }) => message.content.includes("匹配已经完成"))).toBe(true);
 
     const confirmResponse = await send("确认参加，没问题");
     expect(confirmResponse.json().job.result.actions[0].room.status).toBe("confirmed");
@@ -390,6 +475,98 @@ describe("TOMEET core flow", () => {
     const request = await store.createMatchRequest(userId, { rawText: "想认识新朋友" });
     await store.cancelMatchRequest(request.requestId);
     await expect(store.cancelMatchRequest(request.requestId)).rejects.toThrow("只能取消仍在匹配中的请求");
+  });
+
+  it("exposes idempotent AdventureX onboarding and creates a fresh scheduled rematch", async () => {
+    const store = new MemoryStore();
+    const processor = new JobProcessor(
+      store,
+      new MockAgentIntelligence(),
+      new MockMatchmakingIntelligence(),
+      { adventurexMatchingV1: true }
+    );
+    const app = await buildApp({ store, inlineProcessor: processor, adventurexMatchingV1: true });
+    apps.push(app);
+    const userId = randomUUID();
+    const firstWelcome = await app.inject({ method: "POST", url: `/users/${userId}/adventurex-onboarding/start` });
+    const secondWelcome = await app.inject({ method: "POST", url: `/users/${userId}/adventurex-onboarding/start` });
+    expect(firstWelcome.statusCode).toBe(200);
+    expect(secondWelcome.json().message.id).toBe(firstWelcome.json().message.id);
+    expect(firstWelcome.json()).toMatchObject({
+      state: { preferredLanguage: "zh", stage: "awaiting_image_or_text" },
+      message: { content: adventurexWelcomeContent("zh") },
+      messages: [{ content: adventurexWelcomeContent("zh") }]
+    });
+    const switchedToEnglish = await app.inject({
+      method: "POST",
+      url: "/agent/messages",
+      payload: {
+        userId,
+        displayName: "现场用户",
+        content: "Please use English",
+        idempotencyKey: randomUUID()
+      }
+    });
+    expect(switchedToEnglish.json().job.result.message.content).toBe(adventurexWelcomeContent("en"));
+    expect((await store.ensureAdventurexOnboardingState(userId)).preferredLanguage).toBe("en");
+
+    const englishUserId = randomUUID();
+    const englishWelcome = await app.inject({
+      method: "POST",
+      url: `/users/${englishUserId}/adventurex-onboarding/start`,
+      payload: { language: "en" }
+    });
+    expect(englishWelcome.json()).toMatchObject({
+      state: { preferredLanguage: "en" },
+      message: { content: adventurexWelcomeContent("en") },
+      messages: [{ content: adventurexWelcomeContent("en") }]
+    });
+
+    const existingUserId = randomUUID();
+    await store.appendMessage({ userId: existingUserId, role: "user", content: "已经聊过" });
+    const noInjectedWelcome = await app.inject({
+      method: "POST",
+      url: `/users/${existingUserId}/adventurex-onboarding/start`,
+      payload: { language: "zh" }
+    });
+    expect(noInjectedWelcome.json()).toMatchObject({ message: null, messages: [] });
+
+    await app.inject({
+      method: "POST",
+      url: "/agent/messages",
+      payload: { userId, displayName: "现场用户", content: "我想参加现场活动认识一些人", idempotencyKey: randomUUID() }
+    });
+    const firstRequest = await store.getLatestMatchRequestForUser(userId);
+    expect(firstRequest).toMatchObject({ status: "matching", phase: "waiting" });
+    expect(firstRequest?.activeRoundId).toBeTruthy();
+    const cancelled = await app.inject({ method: "POST", url: `/match-requests/${firstRequest!.requestId}/cancel` });
+    expect(cancelled.json().canRematch).toBe(true);
+    const rematched = await app.inject({ method: "POST", url: `/match-requests/${firstRequest!.requestId}/rematch` });
+    expect(rematched.statusCode).toBe(200);
+    expect(rematched.json().matchRequest.requestId).not.toBe(firstRequest!.requestId);
+  });
+
+  it("records the relaxed boundary question so it is not repeated", async () => {
+    const { app, store } = await setup();
+    const userId = randomUUID();
+    await app.inject({ method: "POST", url: `/users/${userId}/adventurex-onboarding/start` });
+    const send = (content: string) => app.inject({
+      method: "POST",
+      url: "/agent/messages",
+      payload: { userId, displayName: "边界测试用户", content, idempotencyKey: randomUUID() }
+    });
+
+    await send("最近在做一款小工具");
+    await send("周末也会去看展");
+    const boundaryReply = await send("最近还开始学摄影");
+    expect(boundaryReply.json().job.result.message.content).toContain("雷点");
+    const state = await store.ensureAdventurexOnboardingState(userId);
+    expect(state.boundaryPromptedAt).not.toBeNull();
+
+    const nextReply = await send("我平时也喜欢散步");
+    expect(nextReply.json().job.result.message.content).not.toContain("最后再确认一下");
+    expect((await store.ensureAdventurexOnboardingState(userId)).boundaryPromptedAt)
+      .toBe(state.boundaryPromptedAt);
   });
 
   it("claims each queued job at most once across concurrent worker slots", async () => {

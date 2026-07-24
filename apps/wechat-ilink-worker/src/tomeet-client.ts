@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  agentProductEventSchema,
   agentMessageInputSchema,
   llmJobSchema,
   messageSchema,
@@ -94,6 +95,32 @@ export class TomeetClient {
       "assistant_reply_missing",
       "Agent completed without an assistant message"
     );
+  }
+
+  async sendEvent(input: {
+    connectionId: string;
+    messageId: string;
+    userId: string;
+    event: unknown;
+  }): Promise<string> {
+    const event = agentProductEventSchema.parse(input.event);
+    const messageKey = idempotencyKey(input.connectionId, `event:${input.messageId}`);
+    const response = await this.request<{ job: unknown }>("/internal/agent/events", {
+      method: "POST",
+      body: JSON.stringify({
+        userId: input.userId,
+        event,
+        idempotencyKey: messageKey
+      })
+    });
+    let job = llmJobSchema.parse(response.job);
+    if (job.status !== "completed" && job.status !== "failed") job = await this.waitForJob(job);
+    if (job.status === "failed") {
+      throw new TomeetClientError(502, "agent_event_job_failed", job.error || "Agent event job failed");
+    }
+    const directReply = messageSchema.safeParse(job.result?.message);
+    if (directReply.success && directReply.data.role === "assistant") return directReply.data.content;
+    throw new TomeetClientError(502, "assistant_reply_missing", "Agent event completed without an assistant message");
   }
 
   private async waitForJob(initial: LlmJob): Promise<LlmJob> {
