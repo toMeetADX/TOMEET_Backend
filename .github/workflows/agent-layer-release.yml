@@ -1,0 +1,410 @@
+name: Agent Layer Release
+
+on:
+  push:
+    branches:
+      - feat/wechat-channel
+    paths:
+      - ".agent-sync/**"
+      - ".github/workflows/**"
+      - "apps/api/**"
+      - "apps/intelligence-worker/**"
+      - "packages/agent-core/**"
+      - "packages/intelligence/**"
+      - "packages/user-model/**"
+      - "packages/matchmaking/**"
+      - "packages/feedback/**"
+      - "packages/contracts/**"
+      - "packages/data/**"
+      - "packages/game-catalog/**"
+      - "supabase/migrations/**"
+      - "scripts/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "tsconfig.base.json"
+      - "eslint.config.mjs"
+      - "railway.api.toml"
+      - "railway.worker.toml"
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: WeChat target ref to validate
+        required: false
+        default: feat/wechat-channel
+        type: string
+      dry_run:
+        description: Stop after Staging validation
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: agent-layer-production-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  staging:
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      source_commit: ${{ steps.verify.outputs.source_commit }}
+      target_commit: ${{ steps.verify.outputs.target_commit }}
+      migration_hash: ${{ steps.verify.outputs.migration_hash }}
+    env:
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+      RAILWAY_INTELLIGENCE_SERVICE: ${{ vars.RAILWAY_INTELLIGENCE_SERVICE }}
+      RAILWAY_WEB_API_SERVICE: ${{ vars.RAILWAY_WEB_API_SERVICE }}
+      RAILWAY_WECHAT_API_SERVICE: ${{ vars.RAILWAY_WECHAT_API_SERVICE }}
+      RAILWAY_WECHAT_WORKER_SERVICE: ${{ vars.RAILWAY_WECHAT_WORKER_SERVICE }}
+      WEB_API_READY_URL: ${{ vars.WEB_API_READY_URL }}
+      WECHAT_API_READY_URL: ${{ vars.WECHAT_API_READY_URL }}
+      SMOKE_WEB_API_URL: ${{ vars.WEB_API_URL }}
+      SMOKE_WECHAT_API_URL: ${{ vars.WECHAT_API_URL }}
+      STAGING_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      SMOKE_SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+      SMOKE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+      SMOKE_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SMOKE_INTERNAL_API_TOKEN: ${{ secrets.TOMEET_INTERNAL_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref || github.sha }}
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.109.1
+      - name: Install pinned Railway CLI
+        run: npm install --global @railway/cli@5.28.1
+      - name: Validate Staging configuration
+        shell: bash
+        run: |
+          required=(
+            RAILWAY_PROJECT_ID RAILWAY_ENVIRONMENT_ID
+            RAILWAY_INTELLIGENCE_SERVICE RAILWAY_WEB_API_SERVICE
+            RAILWAY_WECHAT_API_SERVICE RAILWAY_WECHAT_WORKER_SERVICE
+            WEB_API_READY_URL WECHAT_API_READY_URL
+            SMOKE_WEB_API_URL SMOKE_WECHAT_API_URL STAGING_DB_URL
+            RAILWAY_TOKEN SMOKE_SUPABASE_URL
+            SMOKE_SUPABASE_PUBLISHABLE_KEY
+            SMOKE_SUPABASE_SERVICE_ROLE_KEY SMOKE_INTERNAL_API_TOKEN
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing Staging environment value: $name"
+              exit 1
+            fi
+          done
+      - name: Fetch release refs
+        run: git fetch origin main feat/wechat-channel --tags
+      - name: Verify exact Agent release pair
+        id: verify
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile
+          node scripts/agent-layer-sync.mjs verify \
+            --source origin/main \
+            --target HEAD \
+            --json > "$RUNNER_TEMP/release.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync } from "node:fs";
+          const release = JSON.parse(readFileSync(process.env.RUNNER_TEMP + "/release.json", "utf8"));
+          appendFileSync(process.env.GITHUB_OUTPUT, `source_commit=${release.sourceCommit}\n`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `target_commit=${release.targetCommit}\n`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `migration_hash=${release.migrationHash}\n`);
+          NODE
+      - name: Re-run release gates
+        run: |
+          pnpm agent:migrations:check -- --all
+          pnpm check
+      - name: Validate and apply migrations to isolated Staging
+        run: |
+          supabase db push --dry-run --db-url "$STAGING_DB_URL"
+          supabase db push --db-url "$STAGING_DB_URL"
+          supabase migration list --db-url "$STAGING_DB_URL"
+          supabase db lint --db-url "$STAGING_DB_URL" --fail-on error
+      - name: Prepare immutable release worktrees
+        id: worktrees
+        env:
+          SOURCE_COMMIT: ${{ steps.verify.outputs.source_commit }}
+          TARGET_COMMIT: ${{ steps.verify.outputs.target_commit }}
+        shell: bash
+        run: |
+          source_dir="$RUNNER_TEMP/tomeet-source"
+          target_dir="$RUNNER_TEMP/tomeet-target"
+          git worktree add --detach "$source_dir" "$SOURCE_COMMIT"
+          git worktree add --detach "$target_dir" "$TARGET_COMMIT"
+          echo "source_dir=$source_dir" >> "$GITHUB_OUTPUT"
+          echo "target_dir=$target_dir" >> "$GITHUB_OUTPUT"
+      - name: Deploy Staging services in compatibility order
+        env:
+          SOURCE_DIR: ${{ steps.worktrees.outputs.source_dir }}
+          TARGET_DIR: ${{ steps.worktrees.outputs.target_dir }}
+          SOURCE_COMMIT: ${{ steps.verify.outputs.source_commit }}
+          TARGET_COMMIT: ${{ steps.verify.outputs.target_commit }}
+        shell: bash
+        run: |
+          node scripts/railway-release.mjs deploy \
+            --cwd "$SOURCE_DIR" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --service "$RAILWAY_INTELLIGENCE_SERVICE" \
+            --message "staging agent worker $SOURCE_COMMIT"
+          node scripts/railway-release.mjs deploy \
+            --cwd "$SOURCE_DIR" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --service "$RAILWAY_WEB_API_SERVICE" \
+            --health-url "$WEB_API_READY_URL" \
+            --message "staging web api $SOURCE_COMMIT"
+          node scripts/railway-release.mjs deploy \
+            --cwd "$TARGET_DIR" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --service "$RAILWAY_WECHAT_API_SERVICE" \
+            --health-url "$WECHAT_API_READY_URL" \
+            --message "staging wechat api $TARGET_COMMIT"
+          node scripts/railway-release.mjs deploy \
+            --cwd "$TARGET_DIR" \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --service "$RAILWAY_WECHAT_WORKER_SERVICE" \
+            --message "staging wechat worker $TARGET_COMMIT"
+      - name: Run real cross-channel Staging smoke
+        env:
+          SMOKE_WEB_API_URL: ${{ vars.WEB_API_URL }}
+          SMOKE_WECHAT_API_URL: ${{ vars.WECHAT_API_URL }}
+          SMOKE_RUN_ID: staging-${{ github.run_id }}-${{ github.run_attempt }}
+        run: pnpm agent:smoke:cross-channel
+      - name: Observe Staging for five minutes
+        run: |
+          node scripts/railway-release.mjs observe \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT_ID" \
+            --services "$RAILWAY_INTELLIGENCE_SERVICE,$RAILWAY_WEB_API_SERVICE,$RAILWAY_WECHAT_API_SERVICE,$RAILWAY_WECHAT_WORKER_SERVICE" \
+            --health-urls "$WEB_API_READY_URL,$WECHAT_API_READY_URL" \
+            --seconds 300
+
+  production:
+    needs: staging
+    if: ${{ needs.staging.result == 'success' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SOURCE_COMMIT: ${{ needs.staging.outputs.source_commit }}
+      TARGET_COMMIT: ${{ needs.staging.outputs.target_commit }}
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+      RAILWAY_INTELLIGENCE_SERVICE: ${{ vars.RAILWAY_INTELLIGENCE_SERVICE }}
+      RAILWAY_WEB_API_SERVICE: ${{ vars.RAILWAY_WEB_API_SERVICE }}
+      RAILWAY_WECHAT_API_SERVICE: ${{ vars.RAILWAY_WECHAT_API_SERVICE }}
+      RAILWAY_WECHAT_WORKER_SERVICE: ${{ vars.RAILWAY_WECHAT_WORKER_SERVICE }}
+      WEB_API_READY_URL: ${{ vars.WEB_API_READY_URL }}
+      WECHAT_API_READY_URL: ${{ vars.WECHAT_API_READY_URL }}
+      SMOKE_WEB_API_URL: ${{ vars.WEB_API_URL }}
+      SMOKE_WECHAT_API_URL: ${{ vars.WECHAT_API_URL }}
+      PRODUCTION_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      SMOKE_SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+      SMOKE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+      SMOKE_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SMOKE_INTERNAL_API_TOKEN: ${{ secrets.TOMEET_INTERNAL_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.staging.outputs.target_commit }}
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.109.1
+      - name: Install pinned Railway CLI
+        run: npm install --global @railway/cli@5.28.1
+      - name: Validate Production configuration and rollback refs
+        env:
+          AUTODEPLOY_DISABLED: ${{ vars.PRODUCTION_AUTODEPLOY_DISABLED }}
+          ZERO_DOWNTIME_CONFIGURED: ${{ vars.PRODUCTION_ZERO_DOWNTIME_CONFIGURED }}
+        shell: bash
+        run: |
+          required=(
+            SOURCE_COMMIT TARGET_COMMIT RAILWAY_PROJECT_ID
+            RAILWAY_ENVIRONMENT_ID RAILWAY_INTELLIGENCE_SERVICE
+            RAILWAY_WEB_API_SERVICE RAILWAY_WECHAT_API_SERVICE
+            RAILWAY_WECHAT_WORKER_SERVICE WEB_API_READY_URL
+            WECHAT_API_READY_URL SMOKE_WEB_API_URL
+            SMOKE_WECHAT_API_URL PRODUCTION_DB_URL RAILWAY_TOKEN
+            SMOKE_SUPABASE_URL SMOKE_SUPABASE_PUBLISHABLE_KEY
+            SMOKE_SUPABASE_SERVICE_ROLE_KEY SMOKE_INTERNAL_API_TOKEN
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing Production environment value: $name"
+              exit 1
+            fi
+          done
+          git fetch origin main feat/wechat-channel --tags
+          git rev-parse --verify "prod-web-stable^{commit}"
+          git rev-parse --verify "prod-wechat-stable^{commit}"
+          if [ "$AUTODEPLOY_DISABLED" != "true" ]; then
+            echo "::error::Set PRODUCTION_AUTODEPLOY_DISABLED=true only after disabling GitHub autodeploy on all Production Railway services."
+            exit 1
+          fi
+          if [ "$ZERO_DOWNTIME_CONFIGURED" != "true" ]; then
+            echo "::error::Set PRODUCTION_ZERO_DOWNTIME_CONFIGURED=true only after configuring overlap and draining variables."
+            exit 1
+          fi
+      - name: Re-verify release pair before Production
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm agent:release:verify -- --source "$SOURCE_COMMIT" --target "$TARGET_COMMIT"
+          pnpm agent:migrations:check -- --all
+      - name: Require Production backup for schema changes
+        env:
+          BACKUP_OR_PITR_ENABLED: ${{ vars.PRODUCTION_BACKUP_OR_PITR_ENABLED }}
+        shell: bash
+        run: |
+          if git diff --quiet prod-web-stable "$SOURCE_COMMIT" -- supabase/migrations; then
+            echo "No Production schema change in this release."
+          elif [ "$BACKUP_OR_PITR_ENABLED" != "true" ]; then
+            echo "::error::Production migrations require PRODUCTION_BACKUP_OR_PITR_ENABLED=true."
+            exit 1
+          fi
+      - name: Validate and apply tested forward-only Production migrations
+        run: |
+          supabase db push --dry-run --db-url "$PRODUCTION_DB_URL"
+          supabase db push --db-url "$PRODUCTION_DB_URL"
+          supabase migration list --db-url "$PRODUCTION_DB_URL"
+          supabase db lint --db-url "$PRODUCTION_DB_URL" --fail-on error
+      - name: Prepare current and rollback worktrees
+        id: worktrees
+        shell: bash
+        run: |
+          current_source="$RUNNER_TEMP/current-source"
+          current_target="$RUNNER_TEMP/current-target"
+          stable_source="$RUNNER_TEMP/stable-source"
+          stable_target="$RUNNER_TEMP/stable-target"
+          git worktree add --detach "$current_source" "$SOURCE_COMMIT"
+          git worktree add --detach "$current_target" "$TARGET_COMMIT"
+          git worktree add --detach "$stable_source" prod-web-stable
+          git worktree add --detach "$stable_target" prod-wechat-stable
+          echo "current_source=$current_source" >> "$GITHUB_OUTPUT"
+          echo "current_target=$current_target" >> "$GITHUB_OUTPUT"
+          echo "stable_source=$stable_source" >> "$GITHUB_OUTPUT"
+          echo "stable_target=$stable_target" >> "$GITHUB_OUTPUT"
+      - name: Deploy Production, smoke, observe, and rollback on failure
+        env:
+          CURRENT_SOURCE: ${{ steps.worktrees.outputs.current_source }}
+          CURRENT_TARGET: ${{ steps.worktrees.outputs.current_target }}
+          STABLE_SOURCE: ${{ steps.worktrees.outputs.stable_source }}
+          STABLE_TARGET: ${{ steps.worktrees.outputs.stable_target }}
+          SMOKE_RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          deploy_service() {
+            local source_dir="$1"
+            local service="$2"
+            local health_url="$3"
+            local message="$4"
+            local args=(
+              node scripts/railway-release.mjs deploy
+              --cwd "$source_dir"
+              --project "$RAILWAY_PROJECT_ID"
+              --environment "$RAILWAY_ENVIRONMENT_ID"
+              --service "$service"
+              --message "$message"
+            )
+            if [ -n "$health_url" ]; then
+              args+=(--health-url "$health_url")
+            fi
+            "${args[@]}"
+          }
+
+          rollback_all() {
+            set +e
+            echo "::warning::Release failed; redeploying all previously stable application refs."
+            deploy_service "$STABLE_SOURCE" "$RAILWAY_INTELLIGENCE_SERVICE" "" "rollback intelligence worker"
+            deploy_service "$STABLE_SOURCE" "$RAILWAY_WEB_API_SERVICE" "$WEB_API_READY_URL" "rollback web api"
+            deploy_service "$STABLE_TARGET" "$RAILWAY_WECHAT_API_SERVICE" "$WECHAT_API_READY_URL" "rollback wechat api"
+            deploy_service "$STABLE_TARGET" "$RAILWAY_WECHAT_WORKER_SERVICE" "" "rollback wechat worker"
+          }
+
+          release_failed=0
+          deploy_service "$CURRENT_SOURCE" "$RAILWAY_INTELLIGENCE_SERVICE" "" "production agent worker $SOURCE_COMMIT" || release_failed=1
+          if [ "$release_failed" -eq 0 ]; then
+            deploy_service "$CURRENT_SOURCE" "$RAILWAY_WEB_API_SERVICE" "$WEB_API_READY_URL" "production web api $SOURCE_COMMIT" || release_failed=1
+          fi
+          if [ "$release_failed" -eq 0 ]; then
+            deploy_service "$CURRENT_TARGET" "$RAILWAY_WECHAT_API_SERVICE" "$WECHAT_API_READY_URL" "production wechat api $TARGET_COMMIT" || release_failed=1
+          fi
+          if [ "$release_failed" -eq 0 ]; then
+            deploy_service "$CURRENT_TARGET" "$RAILWAY_WECHAT_WORKER_SERVICE" "" "production wechat worker $TARGET_COMMIT" || release_failed=1
+          fi
+          if [ "$release_failed" -eq 0 ]; then
+            pnpm agent:smoke:cross-channel || {
+              sleep 10
+              pnpm agent:smoke:cross-channel
+            } || release_failed=1
+          fi
+          if [ "$release_failed" -eq 0 ]; then
+            node scripts/railway-release.mjs observe \
+              --project "$RAILWAY_PROJECT_ID" \
+              --environment "$RAILWAY_ENVIRONMENT_ID" \
+              --services "$RAILWAY_INTELLIGENCE_SERVICE,$RAILWAY_WEB_API_SERVICE,$RAILWAY_WECHAT_API_SERVICE,$RAILWAY_WECHAT_WORKER_SERVICE" \
+              --health-urls "$WEB_API_READY_URL,$WECHAT_API_READY_URL" \
+              --seconds 600 || release_failed=1
+          fi
+          if [ "$release_failed" -ne 0 ]; then
+            rollback_all
+            exit 1
+          fi
+      - name: Advance stable and previous release tags
+        shell: bash
+        run: |
+          previous_web="$(git rev-parse prod-web-stable)"
+          previous_wechat="$(git rev-parse prod-wechat-stable)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --force prod-web-previous "$previous_web"
+          git tag --force prod-wechat-previous "$previous_wechat"
+          git tag --force prod-web-stable "$SOURCE_COMMIT"
+          git tag --force prod-wechat-stable "$TARGET_COMMIT"
+          git push --force origin \
+            refs/tags/prod-web-previous \
+            refs/tags/prod-wechat-previous \
+            refs/tags/prod-web-stable \
+            refs/tags/prod-wechat-stable
+
+  incident:
+    needs:
+      - staging
+      - production
+    if: ${{ always() && (needs.staging.result == 'failure' || needs.production.result == 'failure') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release incident
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "[release] Agent layer rollout failed in run $GITHUB_RUN_ID" \
+            --body "The Agent layer release failed closed. Production was not changed, or the workflow attempted application rollback. Review: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

@@ -1,0 +1,31 @@
+{
+  "sourceBranch": "main",
+  "targetBranch": "feat/wechat-channel",
+  "automationBranch": "automation/agent-sync-main-to-wechat",
+  "stateFile": ".agent-sync/agent-sync-state.json",
+  "sharedPaths": [
+    "apps/api",
+    "apps/intelligence-worker",
+    "packages/agent-core",
+    "packages/intelligence",
+    "packages/user-model",
+    "packages/matchmaking",
+    "packages/feedback",
+    "packages/contracts",
+    "packages/data",
+    "packages/game-catalog",
+    "supabase/migrations",
+    "scripts",
+    ".github/workflows",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "tsconfig.base.json",
+    "eslint.config.mjs",
+    "railway.api.toml",
+    "railway.worker.toml"
+  ],
+  "migrationPaths": [
+    "supabase/migrations"
+  ]
+}

@@ -44,6 +44,9 @@ describe("TOMEET core flow", () => {
 
     const health = await app.inject({ method: "GET", url: "/health" });
     expect(health.statusCode).toBe(200);
+    const ready = await app.inject({ method: "GET", url: "/ready" });
+    expect(ready.statusCode).toBe(200);
+    expect(ready.json().service).toBe("tomeet-api");
 
     const missing = await app.inject({ method: "GET", url: "/offline-games" });
     expect(missing.statusCode).toBe(401);
@@ -62,6 +65,24 @@ describe("TOMEET core flow", () => {
       headers: { authorization: "Bearer valid" }
     });
     expect(valid.statusCode).toBe(200);
+  });
+
+  it("fails readiness without failing liveness when the database stalls", async () => {
+    const store = new MemoryStore();
+    store.ping = async () =>
+      new Promise<void>(() => {
+        // Intentionally unresolved to exercise the readiness timeout.
+      });
+    const app = await buildApp({ store, readinessTimeoutMs: 10 });
+    apps.push(app);
+
+    const [health, ready] = await Promise.all([
+      app.inject({ method: "GET", url: "/health" }),
+      app.inject({ method: "GET", url: "/ready" })
+    ]);
+    expect(health.statusCode).toBe(200);
+    expect(ready.statusCode).toBe(503);
+    expect(ready.json().status).toBe("not_ready");
   });
 
   it("binds user-scoped requests and resources to the authenticated user", async () => {

@@ -1,0 +1,152 @@
+name: Agent Layer Sync
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+      - feat/wechat-channel
+  workflow_dispatch:
+
+concurrency:
+  group: agent-layer-sync-${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  validate-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: git fetch origin main feat/wechat-channel
+      - run: pnpm install --frozen-lockfile
+      - name: Validate forward-only migrations
+        run: pnpm agent:migrations:check -- --base "origin/${{ github.base_ref }}" --head HEAD
+      - name: Run repository checks
+        run: pnpm check
+      - name: Require Agent parity on WeChat PRs
+        if: github.base_ref == 'feat/wechat-channel'
+        run: pnpm agent:sync:check -- --source origin/main --target HEAD
+
+  sync-main-to-wechat:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      SOURCE_BRANCH: main
+      TARGET_BRANCH: feat/wechat-channel
+      SYNC_BRANCH: automation/agent-sync-main-to-wechat
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Fetch synchronization refs
+        run: |
+          git fetch origin "$SOURCE_BRANCH" "$TARGET_BRANCH"
+          git fetch origin "$SYNC_BRANCH:refs/remotes/origin/$SYNC_BRANCH" || true
+          cp scripts/agent-layer-sync.mjs "$RUNNER_TEMP/agent-layer-sync.mjs"
+          cp scripts/agent-layer-sync.config.json "$RUNNER_TEMP/agent-layer-sync.config.json"
+      - name: Detect Agent drift
+        id: drift
+        shell: bash
+        run: |
+          set +e
+          node "$RUNNER_TEMP/agent-layer-sync.mjs" check \
+            --config "$RUNNER_TEMP/agent-layer-sync.config.json" \
+            --source "origin/$SOURCE_BRANCH" \
+            --target "origin/$TARGET_BRANCH"
+          result=$?
+          set -e
+          if [ "$result" -eq 0 ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          elif [ "$result" -eq 2 ]; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          else
+            exit "$result"
+          fi
+      - name: Prepare deterministic sync branch
+        if: steps.drift.outputs.needed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$SYNC_BRANCH" "origin/$TARGET_BRANCH"
+      - name: Apply Agent dependency closure
+        if: steps.drift.outputs.needed == 'true'
+        run: |
+          node "$RUNNER_TEMP/agent-layer-sync.mjs" apply \
+            --config "$RUNNER_TEMP/agent-layer-sync.config.json" \
+            --source "origin/$SOURCE_BRANCH"
+      - name: Validate staged migrations
+        if: steps.drift.outputs.needed == 'true'
+        run: pnpm agent:migrations:check -- --staged
+      - name: Install synchronized dependencies
+        if: steps.drift.outputs.needed == 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Run synchronized repository checks
+        if: steps.drift.outputs.needed == 'true'
+        run: pnpm check
+      - name: Commit and push sync result
+        if: steps.drift.outputs.needed == 'true'
+        id: push
+        shell: bash
+        run: |
+          source_sha="$(git rev-parse "origin/$SOURCE_BRANCH")"
+          git commit -m "chore(agent): sync main to wechat channel (${source_sha:0:12})"
+          git push --force-with-lease origin "HEAD:$SYNC_BRANCH"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+      - name: Create or update synchronization PR
+        if: steps.drift.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.push.outputs.source_sha }}
+        shell: bash
+        run: |
+          title="chore(agent): sync main to wechat channel"
+          body_file="$RUNNER_TEMP/agent-sync-pr.md"
+          {
+            echo "Automated one-way Agent layer synchronization."
+            echo
+            echo "- Source: \`main@$SOURCE_SHA\`"
+            echo "- Target: \`$TARGET_BRANCH\`"
+            echo "- Safety: forward-only migrations, full \`pnpm check\`, and Agent tree parity"
+            echo
+            echo "Merging this PR does not deploy Production directly. The release workflow first validates the isolated Staging environment."
+          } > "$body_file"
+          number="$(gh pr list \
+            --head "$SYNC_BRANCH" \
+            --base "$TARGET_BRANCH" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --title "$title" --body-file "$body_file"
+          else
+            gh pr create \
+              --head "$SYNC_BRANCH" \
+              --base "$TARGET_BRANCH" \
+              --title "$title" \
+              --body-file "$body_file"
+          fi

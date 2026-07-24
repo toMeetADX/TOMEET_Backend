@@ -62,6 +62,24 @@ const tomeet = new TomeetClient({
 const active = new Map<string, Promise<void>>();
 let ready = false;
 
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number
+): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  return Promise.race([
+    operation,
+    new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(
+        () => reject(new Error("readiness dependency timed out")),
+        timeoutMs
+      );
+    })
+  ]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
+
 async function monitorConnection(connection: WechatConnection): Promise<void> {
   await monitorWechatConnection({
     connection,
@@ -76,19 +94,47 @@ async function monitorConnection(connection: WechatConnection): Promise<void> {
 }
 
 const healthServer = createServer((request, response) => {
-  if (request.url === "/health") {
-    response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ status: "ok", service: "wechat-ilink-worker" }));
-    return;
-  }
-  if (request.url === "/ready") {
-    response.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ status: ready ? "ready" : "starting" }));
-    return;
-  }
-  response.writeHead(404).end();
+  void (async () => {
+    const path = request.url?.split("?", 1)[0];
+    response.setHeader("Content-Type", "application/json");
+    response.setHeader("Cache-Control", "no-store");
+    if (path === "/health") {
+      response.writeHead(200);
+      response.end(JSON.stringify({ status: "ok", service: "wechat-ilink-worker" }));
+      return;
+    }
+    if (path === "/ready") {
+      if (!ready) {
+        response.writeHead(503);
+        response.end(JSON.stringify({ status: "not_ready", service: "wechat-ilink-worker" }));
+        return;
+      }
+      try {
+        await withTimeout(coreStore.ping(), 3000);
+        response.writeHead(200);
+        response.end(JSON.stringify({ status: "ready", service: "wechat-ilink-worker" }));
+      } catch {
+        response.writeHead(503);
+        response.end(JSON.stringify({ status: "not_ready", service: "wechat-ilink-worker" }));
+      }
+      return;
+    }
+    response.writeHead(404);
+    response.end(JSON.stringify({ status: "not_found" }));
+  })().catch(() => {
+    if (!response.headersSent) {
+      response.writeHead(500, { "Content-Type": "application/json" });
+    }
+    response.end(JSON.stringify({ status: "error" }));
+  });
 });
-healthServer.listen(healthPort, "0.0.0.0");
+await new Promise<void>((resolveListen, reject) => {
+  healthServer.once("error", reject);
+  healthServer.listen(healthPort, "0.0.0.0", () => {
+    healthServer.off("error", reject);
+    resolveListen();
+  });
+});
 
 async function run(): Promise<void> {
   await coreStore.ping();
@@ -118,7 +164,10 @@ async function run(): Promise<void> {
 }
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, () => abortController.abort());
+  process.once(signal, () => {
+    ready = false;
+    abortController.abort();
+  });
 }
 
 try {

@@ -42,6 +42,25 @@ export interface BuildAppOptions {
   rateLimitMax?: number;
   wechatQrRateLimitMax?: number;
   exposeInternalErrors?: boolean;
+  readinessTimeoutMs?: number;
+}
+
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number
+): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  return Promise.race([
+    operation,
+    new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(
+        () => reject(new Error("readiness dependency timed out")),
+        timeoutMs
+      );
+    })
+  ]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }
 
 function deterministicChannelUserId(provider: string, externalUserId: string): string {
@@ -158,8 +177,8 @@ export async function buildApp(options: BuildAppOptions) {
 
   app.get("/ready", { config: { rateLimit: false } }, async (_request, reply) => {
     try {
-      await options.store.ping();
-      return { status: "ready" };
+      await withTimeout(options.store.ping(), options.readinessTimeoutMs ?? 3000);
+      return { status: "ready", service: "tomeet-api" };
     } catch (error) {
       if (options.exposeInternalErrors) {
         return reply.code(503).send({
