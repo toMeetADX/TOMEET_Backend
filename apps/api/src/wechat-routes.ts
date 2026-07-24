@@ -28,6 +28,12 @@ export interface WechatApiRuntime {
   client: WechatILinkClient;
   cipher: CredentialCipher;
   sessionTtlMs?: number;
+  bubbleDelayMs?: number;
+}
+
+export interface WechatActivationContext {
+  userId: string;
+  deliverText?: (input: { text: string; runId: string }) => Promise<void>;
 }
 
 interface RegisterWechatRoutesOptions {
@@ -36,7 +42,7 @@ interface RegisterWechatRoutesOptions {
   internalTokenMatches(candidate: unknown): boolean;
   publicSessionRateLimitMax?: number;
   rapidQrAccessTokenMatches?(accessToken: string): Promise<boolean>;
-  onActivated?(userId: string): Promise<void>;
+  onActivated?(context: WechatActivationContext): Promise<void>;
 }
 
 function publicSession(session: WechatConnectionSession) {
@@ -117,14 +123,9 @@ async function pollSession(
   session: WechatConnectionSession,
   verifyCode?: string,
   signal?: AbortSignal,
-  onActivated?: (userId: string) => Promise<void>
+  onActivated?: (context: WechatActivationContext) => Promise<void>
 ): Promise<WechatConnectionSession> {
-  if (isTerminalSession(session)) {
-    if (session.status === "active" && session.userId && onActivated) {
-      await onActivated(session.userId);
-    }
-    return session;
-  }
+  if (isTerminalSession(session)) return session;
   if (new Date(session.expiresAt).getTime() <= Date.now()) {
     return runtime.store.updateWechatSession(session.id, {
       status: "expired",
@@ -249,7 +250,18 @@ async function pollSession(
         baseUrl
       });
       if (activation.session.userId && onActivated) {
-        await onActivated(activation.session.userId);
+        await onActivated({
+          userId: activation.session.userId,
+          deliverText: async ({ text, runId }) => {
+            await runtime.client.sendText({
+              baseUrl,
+              botToken: result.botToken!,
+              toUserId: result.ilinkUserId!,
+              text,
+              runId
+            });
+          }
+        });
       }
       return activation.session;
     }

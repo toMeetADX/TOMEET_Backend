@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import {
+  adventurexWelcomeBubbles,
   adventurexLanguageSchema,
   agentMessageInputSchema,
   agentProductEventSchema,
@@ -85,6 +86,11 @@ function deterministicChannelUserId(provider: string, externalUserId: string): s
     hex.slice(16, 20),
     hex.slice(20)
   ].join("-");
+}
+
+async function waitForDelay(delayMs: number): Promise<void> {
+  if (delayMs <= 0) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
 }
 
 export async function buildApp(options: BuildAppOptions) {
@@ -214,9 +220,45 @@ export async function buildApp(options: BuildAppOptions) {
     internalTokenMatches,
     publicSessionRateLimitMax: options.wechatQrRateLimitMax,
     rapidQrAccessTokenMatches: options.wechatRapidQrAccessTokenMatches,
-    onActivated: async (userId) => {
+    onActivated: async ({ userId, deliverText }) => {
+      const onboardingState = await options.store.ensureAdventurexOnboardingState(userId);
+      if (onboardingState.welcomeSentAt) return;
       const message = await options.store.startAdventurexOnboarding(userId, "zh");
-      if (message) await options.store.enqueueWechatOutboundMessage(message);
+      if (!message) return;
+      if (!deliverText) {
+        await options.store.enqueueWechatOutboundMessage(message);
+        return;
+      }
+      const bubbles = adventurexWelcomeBubbles.zh;
+      for (const [index, bubble] of bubbles.entries()) {
+        try {
+          await deliverText({
+            text: bubble,
+            runId: `activation-welcome-${message.id}-bubble-${index + 1}`
+          });
+        } catch (error) {
+          const remainingContent = bubbles.slice(index).join("\n\n");
+          await options.store.enqueueWechatOutboundMessage({
+            ...message,
+            content: remainingContent
+          }).catch((enqueueError: unknown) => {
+            app.log.error({
+              err: enqueueError,
+              userId,
+              event: "wechat_activation_welcome_fallback_failed"
+            });
+          });
+          app.log.error({
+            err: error,
+            userId,
+            event: "wechat_activation_welcome_direct_failed"
+          });
+          return;
+        }
+        if (index < bubbles.length - 1) {
+          await waitForDelay(options.wechat?.bubbleDelayMs ?? 0);
+        }
+      }
     }
   });
 

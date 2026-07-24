@@ -78,7 +78,12 @@ const wechat = wechatEncryptionKey
       client: new WechatILinkClient({
         qrBaseUrl: process.env.WECHAT_ILINK_QR_BASE_URL
       }),
-      cipher: new CredentialCipher(wechatEncryptionKey)
+      cipher: new CredentialCipher(wechatEncryptionKey),
+      bubbleDelayMs: parseNonNegativeInteger(
+        process.env.WECHAT_BUBBLE_DELAY_MS,
+        200,
+        "WECHAT_BUBBLE_DELAY_MS"
+      )
     }
   : undefined;
 
@@ -140,6 +145,13 @@ function parsePositiveInteger(value: string | undefined, fallback: number, name:
   if (value === undefined || value === "") return fallback;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} 必须是正整数`);
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} 必须是非负整数`);
   return parsed;
 }
 
