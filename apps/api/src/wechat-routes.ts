@@ -35,6 +35,7 @@ interface RegisterWechatRoutesOptions {
   internalApiEnabled: boolean;
   internalTokenMatches(candidate: unknown): boolean;
   publicSessionRateLimitMax?: number;
+  rapidQrAccessTokenMatches?(accessToken: string): Promise<boolean>;
 }
 
 function publicSession(session: WechatConnectionSession) {
@@ -289,6 +290,49 @@ export function registerWechatRoutes(
       }
     },
     async (_request, reply) => {
+      const created = await createSession();
+      if (!created) {
+        return reply.code(503).send({
+          error: "wechat_connect_disabled",
+          message: "微信扫码接入尚未配置"
+        });
+      }
+      reply.header("Cache-Control", "no-store");
+      return reply.code(201).send({
+        ...publicSession(created.session),
+        sessionToken: created.sessionToken,
+        qrCodeContent: created.qrCodeContent
+      });
+    }
+  );
+
+  app.post(
+    "/wechat/connect/sessions/demo",
+    { config: { rateLimit: false } },
+    async (request, reply) => {
+      if (!options.rapidQrAccessTokenMatches) {
+        return reply.code(503).send({
+          error: "wechat_rapid_qr_disabled",
+          message: "路演二维码模式尚未配置"
+        });
+      }
+      const authorization = request.headers.authorization;
+      if (!authorization?.startsWith("Bearer ")) {
+        return reply.code(401).send({
+          error: "wechat_rapid_qr_unauthenticated",
+          message: "路演二维码模式需要先登录"
+        });
+      }
+      const accessToken = authorization.slice("Bearer ".length).trim();
+      if (
+        !accessToken
+        || !(await options.rapidQrAccessTokenMatches(accessToken))
+      ) {
+        return reply.code(403).send({
+          error: "wechat_rapid_qr_forbidden",
+          message: "当前账户不能使用路演二维码模式"
+        });
+      }
       const created = await createSession();
       if (!created) {
         return reply.code(503).send({

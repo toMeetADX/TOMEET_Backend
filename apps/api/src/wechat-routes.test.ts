@@ -21,6 +21,7 @@ async function setup(
   integration?: {
     processJobsInline?: boolean;
     userByToken?: Record<string, string>;
+    rapidQrTokens?: string[];
   }
 ) {
   let qrIndex = 0;
@@ -55,6 +56,9 @@ async function setup(
     internalApiToken,
     wechatQrRateLimitMax,
     verifyAccessToken,
+    wechatRapidQrAccessTokenMatches: integration?.rapidQrTokens
+      ? async (accessToken) => integration.rapidQrTokens!.includes(accessToken)
+      : undefined,
     wechat: {
       store: wechatStore,
       client: new WechatILinkClient({
@@ -70,6 +74,59 @@ async function setup(
 }
 
 describe("WeChat one-time QR onboarding", () => {
+  it("allows only the roadshow account to bypass the public QR creation limit", async () => {
+    const { app } = await setup(
+      [],
+      undefined,
+      undefined,
+      1,
+      { rapidQrTokens: ["roadshow-token"] }
+    );
+
+    const publicCreate = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    expect(publicCreate.statusCode).toBe(201);
+    const publicLimited = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    expect(publicLimited.statusCode).toBe(429);
+
+    const missingLogin = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions/demo",
+      payload: {}
+    });
+    expect(missingLogin.statusCode).toBe(401);
+    const wrongAccount = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions/demo",
+      headers: { authorization: "Bearer other-token" },
+      payload: {}
+    });
+    expect(wrongAccount.statusCode).toBe(403);
+
+    const first = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions/demo",
+      headers: { authorization: "Bearer roadshow-token" },
+      payload: {}
+    });
+    const second = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions/demo",
+      headers: { authorization: "Bearer roadshow-token" },
+      payload: {}
+    });
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    expect(first.json().sessionId).not.toBe(second.json().sessionId);
+  });
+
   it("creates a profile and reuses it when the same WeChat identity reconnects", async () => {
     const confirmed = {
       status: "confirmed",

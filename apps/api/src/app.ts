@@ -9,6 +9,7 @@ import {
   multimodalInputSchema,
   postEventFeedbackSchema,
   resolveChannelIdentityInputSchema,
+  saveMatchChoicesInputSchema,
   uuidSchema
 } from "@tomeet/contracts";
 import type { DataStore } from "@tomeet/data";
@@ -19,7 +20,8 @@ import { z, ZodError } from "zod";
 import {
   AuthenticationError,
   AuthorizationError,
-  type AccessTokenVerifier
+  type AccessTokenVerifier,
+  type EmailAccessTokenMatcher
 } from "./auth.js";
 import { registerWechatRoutes, type WechatApiRuntime } from "./wechat-routes.js";
 
@@ -41,8 +43,10 @@ export interface BuildAppOptions {
   trustProxy?: boolean;
   rateLimitMax?: number;
   wechatQrRateLimitMax?: number;
+  wechatRapidQrAccessTokenMatches?: EmailAccessTokenMatcher;
   exposeInternalErrors?: boolean;
   readinessTimeoutMs?: number;
+  adventurexMatchingV1?: boolean;
 }
 
 async function withTimeout<T>(
@@ -169,6 +173,21 @@ export async function buildApp(options: BuildAppOptions) {
     return options.store.getJob(jobId);
   }
 
+  async function scheduleAdventurexRequest(matchRequest: import("@tomeet/contracts").MatchRequest) {
+    const bucketMs = 30_000;
+    const scheduledAt = new Date(Math.ceil((Date.now() + 1) / bucketMs) * bucketMs).toISOString();
+    const round = await options.store.createOrGetMatchRound(`adventurex:${scheduledAt}`, scheduledAt);
+    await options.store.addRequestToRound(round.roundId, matchRequest.requestId);
+    const job = await options.store.enqueueJob({
+      type: "match_round_generate",
+      payload: { roundId: round.roundId },
+      idempotencyKey: `match-round-generate:${round.roundId}`,
+      partitionKey: `match-round:${round.roundId}`,
+      runAt: scheduledAt
+    });
+    return { round, job };
+  }
+
   app.get("/health", { config: { rateLimit: false } }, async () => ({
     status: "ok",
     service: "tomeet-api",
@@ -201,7 +220,8 @@ export async function buildApp(options: BuildAppOptions) {
     runtime: options.wechat,
     internalApiEnabled: Boolean(options.internalApiToken),
     internalTokenMatches,
-    publicSessionRateLimitMax: options.wechatQrRateLimitMax
+    publicSessionRateLimitMax: options.wechatQrRateLimitMax,
+    rapidQrAccessTokenMatches: options.wechatRapidQrAccessTokenMatches
   });
 
   app.post("/internal/channel-identities/resolve", { config: { rateLimit: false } }, async (request, reply) => {
@@ -358,6 +378,14 @@ export async function buildApp(options: BuildAppOptions) {
     const storagePath = `${input.userId}/${randomUUID()}.${extension}`;
     await options.store.uploadFile(storagePath, input.mimeType, bytes);
     return { storagePath, mimeType: input.mimeType, sizeBytes: bytes.length };
+  });
+
+  app.post("/users/:userId/adventurex-onboarding/start", async (request) => {
+    const { userId } = z.object({ userId: uuidSchema }).parse(request.params);
+    assertCurrentUser(request, userId);
+    const message = await options.store.startAdventurexOnboarding(userId);
+    const state = await options.store.ensureAdventurexOnboardingState(userId);
+    return { state, message };
   });
 
   app.get("/users/:userId/model", async (request) => {

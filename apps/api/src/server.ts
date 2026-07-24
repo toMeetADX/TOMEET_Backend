@@ -9,7 +9,12 @@ import {
 import { HostedLlmIntelligence, JobProcessor, TavilyWebSearchProvider } from "@tomeet/intelligence";
 import { CredentialCipher, WechatILinkClient } from "@tomeet/wechat-ilink";
 import { buildApp } from "./app.js";
-import { createSupabaseAccessTokenVerifier, type AccessTokenVerifier } from "./auth.js";
+import {
+  createSupabaseAccessTokenVerifier,
+  createSupabaseEmailAccessTokenMatcher,
+  type AccessTokenVerifier,
+  type EmailAccessTokenMatcher
+} from "./auth.js";
 import { config } from "dotenv";
 
 config({ path: resolve(process.cwd(), ".env") });
@@ -35,6 +40,7 @@ for (const rawOrigin of (frontendOrigin ?? "http://localhost:3000").split(",")) 
 
 let store: DataStore;
 let verifyAccessToken: AccessTokenVerifier | undefined;
+let wechatRapidQrAccessTokenMatches: EmailAccessTokenMatcher | undefined;
 let supabaseStore: SupabaseStore | undefined;
 
 if (demoMode) {
@@ -46,6 +52,11 @@ if (demoMode) {
   supabaseStore = new SupabaseStore(url, key);
   store = supabaseStore;
   verifyAccessToken = createSupabaseAccessTokenVerifier(url, key);
+  wechatRapidQrAccessTokenMatches = createSupabaseEmailAccessTokenMatcher(
+    url,
+    key,
+    process.env.WECHAT_RAPID_QR_EMAIL ?? "andy4fe0119@gmail.com"
+  );
 }
 
 const wechatEncryptionKey = process.env.WECHAT_CREDENTIAL_ENCRYPTION_KEY;
@@ -81,7 +92,9 @@ if (demoMode) {
     webSearchProvider,
     onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event }))
   });
-  inlineProcessor = new JobProcessor(store, hosted, hosted);
+  inlineProcessor = new JobProcessor(store, hosted, hosted, {
+    adventurexMatchingV1: process.env.ADVENTUREX_MATCHING_V1 === "true"
+  });
 }
 
 const app = await buildApp({
@@ -101,6 +114,7 @@ const app = await buildApp({
     30,
     "WECHAT_PUBLIC_QR_RATE_LIMIT_MAX"
   ),
+  wechatRapidQrAccessTokenMatches,
   exposeInternalErrors: !isProduction
 });
 
