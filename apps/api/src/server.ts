@@ -96,6 +96,11 @@ const app = await buildApp({
   verifyAccessToken,
   trustProxy: isProduction,
   rateLimitMax: parsePositiveInteger(process.env.RATE_LIMIT_MAX, 120, "RATE_LIMIT_MAX"),
+  wechatQrRateLimitMax: parsePositiveInteger(
+    process.env.WECHAT_PUBLIC_QR_RATE_LIMIT_MAX,
+    5,
+    "WECHAT_PUBLIC_QR_RATE_LIMIT_MAX"
+  ),
   exposeInternalErrors: !isProduction
 });
 
