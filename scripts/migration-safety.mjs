@@ -144,8 +144,26 @@ async function loadConfig(path = defaultConfigPath) {
   ) {
     throw new Error("approvedLegacyMigrations must be an object");
   }
+  if (
+    config.approvedDestructiveMigrations !== undefined &&
+    (typeof config.approvedDestructiveMigrations !== "object" ||
+      config.approvedDestructiveMigrations === null)
+  ) {
+    throw new Error("approvedDestructiveMigrations must be an object");
+  }
   return config;
 }
+
+const explicitlyApprovableViolationCodes = new Set([
+  "drop-object",
+  "drop-column-or-constraint",
+  "alter-column-type",
+  "rename-schema-object",
+  "set-not-null",
+  "truncate",
+  "delete-data",
+  "revoke-access"
+]);
 
 function parseChangedMigrations(output) {
   if (!output.trim()) return [];
@@ -264,12 +282,45 @@ export async function checkMigrations({
       });
     }
 
-    const fileViolations = analyzeMigration(content).map((violation) => ({
+    let fileViolations = analyzeMigration(content).map((violation) => ({
       file: candidate.path,
       ...violation
     }));
+    const destructiveApproval = config.approvedDestructiveMigrations?.[name];
+    if (destructiveApproval !== undefined) {
+      if (
+        typeof destructiveApproval !== "object" ||
+        destructiveApproval === null ||
+        typeof destructiveApproval.sha256 !== "string" ||
+        typeof destructiveApproval.reason !== "string" ||
+        destructiveApproval.reason.trim().length < 20
+      ) {
+        violations.push({
+          file: candidate.path,
+          code: "invalid-destructive-approval",
+          excerpt: "Approval requires an exact sha256 and a concrete reason of at least 20 characters"
+        });
+      } else if (destructiveApproval.sha256 !== contentHash) {
+        violations.push({
+          file: candidate.path,
+          code: "destructive-approval-hash-mismatch",
+          excerpt: `Expected ${destructiveApproval.sha256}, received ${contentHash}`
+        });
+      } else {
+        fileViolations = fileViolations.filter(
+          ({ code }) => !explicitlyApprovableViolationCodes.has(code)
+        );
+      }
+    }
     violations.push(...fileViolations);
-    inspected.push({ file: candidate.path, legacyApproved: false, contentHash });
+    inspected.push({
+      file: candidate.path,
+      legacyApproved: false,
+      destructiveApproved: Boolean(
+        destructiveApproval && destructiveApproval.sha256 === contentHash
+      ),
+      contentHash
+    });
   }
 
   return {

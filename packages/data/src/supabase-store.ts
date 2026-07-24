@@ -76,6 +76,8 @@ function mapMessage(row: JsonRow): Message {
     userId: row.user_id ?? row.userId,
     role: row.role,
     content: row.content,
+    sourceChannel: row.source_channel ?? row.sourceChannel ?? "legacy",
+    replyToMessageId: row.reply_to_message_id ?? row.replyToMessageId ?? null,
     createdAt: normalizeDateTime(row.created_at ?? row.createdAt)
   });
 }
@@ -99,8 +101,10 @@ function mapUserModel(row: JsonRow): UserModel {
     socialHistory: row.social_history ?? row.socialHistory ?? [],
     feedbackMemory: row.feedback_memory ?? row.feedbackMemory ?? [],
     multimodalUnderstanding: row.multimodal_understanding ?? row.multimodalUnderstanding ?? {},
-    version: row.version ?? 0,
-    updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
+    version: row.user_model_version ?? row.version ?? 0,
+    updatedAt: normalizeDateTime(
+      row.user_model_updated_at ?? row.updated_at ?? row.updatedAt
+    )
   });
 }
 
@@ -153,14 +157,22 @@ function mapJob(row: JsonRow): LlmJob {
 
 function mapOnboardingState(row: JsonRow): AdventurexOnboardingState {
   return adventurexOnboardingStateSchema.parse({
-    userId: row.user_id ?? row.userId,
-    stage: row.stage,
-    imageDeclined: row.image_declined ?? row.imageDeclined ?? false,
-    preferredLanguage: row.preferred_language ?? row.preferredLanguage ?? "zh",
-    boundaryPromptedAt: normalizeDateTime(row.boundary_prompted_at ?? row.boundaryPromptedAt ?? null),
-    welcomeSentAt: normalizeDateTime(row.welcome_sent_at ?? row.welcomeSentAt ?? null),
-    createdAt: normalizeDateTime(row.created_at ?? row.createdAt),
-    updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
+    userId: row.user_id ?? row.userId ?? row.id,
+    stage: row.adventurex_stage ?? row.stage,
+    imageDeclined: row.adventurex_image_declined ?? row.image_declined ?? row.imageDeclined ?? false,
+    preferredLanguage: row.adventurex_preferred_language ?? row.preferred_language ?? row.preferredLanguage ?? "zh",
+    boundaryPromptedAt: normalizeDateTime(
+      row.adventurex_boundary_prompted_at ?? row.boundary_prompted_at ?? row.boundaryPromptedAt ?? null
+    ),
+    welcomeSentAt: normalizeDateTime(
+      row.adventurex_welcome_sent_at ?? row.welcome_sent_at ?? row.welcomeSentAt ?? null
+    ),
+    createdAt: normalizeDateTime(
+      row.adventurex_state_created_at ?? row.created_at ?? row.createdAt
+    ),
+    updatedAt: normalizeDateTime(
+      row.adventurex_state_updated_at ?? row.updated_at ?? row.updatedAt
+    )
   });
 }
 
@@ -300,9 +312,9 @@ export class SupabaseStore implements DataStore {
   async ensureAdventurexOnboardingState(userId: string): Promise<AdventurexOnboardingState> {
     await this.ensureUser(userId);
     const { data, error } = await this.client
-      .from("adventurex_onboarding_states")
+      .from("users")
       .select("*")
-      .eq("user_id", userId)
+      .eq("id", userId)
       .single();
     if (error) this.throwError("读取 AdventureX 引导状态", error);
     return mapOnboardingState(data);
@@ -378,12 +390,16 @@ export class SupabaseStore implements DataStore {
     role: "user" | "assistant";
     content: string;
     idempotencyKey?: string;
+    sourceChannel?: Message["sourceChannel"];
+    replyToMessageId?: string | null;
   }): Promise<Message> {
     const { data, error } = await this.client.rpc("append_agent_message", {
       p_user_id: input.userId,
       p_role: input.role,
       p_content: input.content,
-      p_idempotency_key: input.idempotencyKey ?? null
+      p_idempotency_key: input.idempotencyKey ?? null,
+      p_source_channel: input.sourceChannel ?? "legacy",
+      p_reply_to_message_id: input.replyToMessageId ?? null
     });
     if (error) this.throwError("写入消息", error);
     return mapMessage(unwrapRpcData(data) as JsonRow);
@@ -392,7 +408,7 @@ export class SupabaseStore implements DataStore {
   async listRecentMessages(userId: string, limit = 50): Promise<Message[]> {
     const { data, error } = await this.client
       .from("messages")
-      .select("id,user_id,role,content,created_at")
+      .select("id,user_id,role,content,source_channel,reply_to_message_id,created_at")
       .eq("user_id", userId)
       .order("created_at", { ascending: false })
       .limit(Math.min(limit, 100));
@@ -405,7 +421,7 @@ export class SupabaseStore implements DataStore {
     const safeLimit = Math.min(Math.max(limit, 1), 500);
     const { data, error } = await this.client
       .from("messages")
-      .select("id,user_id,role,content,created_at")
+      .select("id,user_id,role,content,source_channel,reply_to_message_id,created_at")
       .eq("user_id", userId)
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
@@ -460,14 +476,14 @@ export class SupabaseStore implements DataStore {
 
   async getUserModel(userId: string): Promise<UserModel> {
     await this.ensureUser(userId);
-    const { data, error } = await this.client.from("user_models").select("*").eq("user_id", userId).single();
+    const { data, error } = await this.client.from("users").select("*").eq("id", userId).single();
     if (error) this.throwError("读取用户模型", error);
     return mapUserModel(data);
   }
 
   async saveUserModel(model: UserModel, expectedVersion: number): Promise<UserModel> {
     const { data, error } = await this.client
-      .from("user_models")
+      .from("users")
       .update({
         vibe_narrative: model.vibeNarrative,
         long_term_profile: model.longTermProfile,
@@ -475,11 +491,11 @@ export class SupabaseStore implements DataStore {
         social_history: model.socialHistory,
         feedback_memory: model.feedbackMemory,
         multimodal_understanding: model.multimodalUnderstanding,
-        version: model.version,
-        updated_at: model.updatedAt
+        user_model_version: model.version,
+        user_model_updated_at: model.updatedAt
       })
-      .eq("user_id", model.userId)
-      .eq("version", expectedVersion)
+      .eq("id", model.userId)
+      .eq("user_model_version", expectedVersion)
       .select("*")
       .maybeSingle();
     if (error) this.throwError("更新用户模型", error);

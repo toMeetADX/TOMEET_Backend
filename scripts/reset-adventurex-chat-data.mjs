@@ -124,11 +124,11 @@ await requireResult(
 );
 await requireResult(
   "重置聊天派生的当前意图与旧 vibe",
-  client.from("user_models").update({
+  client.from("users").update({
     current_intent: {},
     vibe_narrative: "",
-    updated_at: new Date().toISOString()
-  }).neq("user_id", ZERO_UUID)
+    user_model_updated_at: new Date().toISOString()
+  }).neq("id", ZERO_UUID)
 );
 await requireResult(
   "结束旧的活动匹配请求",
@@ -143,12 +143,12 @@ await requireResult(
 );
 await requireResult(
   "重置 AdventureX 首次引导",
-  client.from("adventurex_onboarding_states").update({
-    stage: "new",
-    image_declined: false,
-    welcome_sent_at: null,
-    updated_at: new Date().toISOString()
-  }).neq("user_id", ZERO_UUID)
+  client.from("users").update({
+    adventurex_stage: "new",
+    adventurex_image_declined: false,
+    adventurex_welcome_sent_at: null,
+    adventurex_state_updated_at: new Date().toISOString()
+  }).neq("id", ZERO_UUID)
 );
 if (virtualUserIds.length > 0) {
   await requireResult("删除旧隔离虚拟用户", client.from("users").delete().in("id", virtualUserIds));

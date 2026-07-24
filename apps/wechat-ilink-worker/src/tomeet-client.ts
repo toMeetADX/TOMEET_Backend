@@ -82,18 +82,10 @@ export class TomeetClient {
     if (directReply.success && directReply.data.role === "assistant") {
       return directReply.data.content;
     }
-
-    const history = await this.request<{ messages: unknown[] }>(
-      `/internal/agent/messages/${encodeURIComponent(input.userId)}`
-    );
-    for (let index = history.messages.length - 1; index >= 0; index -= 1) {
-      const message = messageSchema.safeParse(history.messages[index]);
-      if (message.success && message.data.role === "assistant") return message.data.content;
-    }
     throw new TomeetClientError(
       502,
       "assistant_reply_missing",
-      "Agent completed without an assistant message"
+      "WeChat-originated Agent job completed without its assistant message"
     );
   }
 

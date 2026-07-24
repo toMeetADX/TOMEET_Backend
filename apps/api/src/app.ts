@@ -124,11 +124,16 @@ export async function buildApp(options: BuildAppOptions) {
   app.addHook("preValidation", async (request) => {
     if (!options.verifyAccessToken || request.method === "OPTIONS") return;
     const path = request.url.split("?", 1)[0];
+    const isWechatSessionCreation = request.method === "POST" && (
+      path === "/wechat/connect/sessions"
+      || path === "/wechat/connect/sessions/demo"
+    );
     if (
       path === "/health"
       || path === "/ready"
       || path?.startsWith("/internal/")
-      || path?.startsWith("/wechat/connect/sessions")
+      || (path?.startsWith("/wechat/connect/sessions") && !isWechatSessionCreation)
+      || (isWechatSessionCreation && !request.headers.authorization)
     ) {
       return;
     }
@@ -350,7 +355,11 @@ export async function buildApp(options: BuildAppOptions) {
     return reply.code(201).send({ identity });
   });
 
-  async function submitAgentMessage(request: FastifyRequest, reply: FastifyReply) {
+  async function submitAgentMessage(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    sourceChannel: "web" | "wechat"
+  ) {
     const input = agentMessageInputSchema.parse(request.body);
     assertCurrentUser(request, input.userId);
     await options.store.ensureUser(input.userId, input.displayName);
@@ -358,11 +367,17 @@ export async function buildApp(options: BuildAppOptions) {
       userId: input.userId,
       role: "user",
       content: input.content,
-      idempotencyKey: input.idempotencyKey
+      idempotencyKey: input.idempotencyKey,
+      sourceChannel
     });
     const job = await options.store.enqueueJob({
       type: "agent_reply",
-      payload: { userId: input.userId, content: input.content, userMessageId: userMessage.id },
+      payload: {
+        userId: input.userId,
+        content: input.content,
+        userMessageId: userMessage.id,
+        sourceChannel
+      },
       idempotencyKey: `agent:${userMessage.id}`,
       partitionKey: `user:${input.userId}`
     });
@@ -370,7 +385,9 @@ export async function buildApp(options: BuildAppOptions) {
     return reply.code(currentJob?.status === "completed" ? 200 : 202).send({ userMessage, job: currentJob });
   }
 
-  app.post("/agent/messages", submitAgentMessage);
+  app.post("/agent/messages", async (request, reply) =>
+    submitAgentMessage(request, reply, "web")
+  );
 
   app.post("/internal/agent/messages", { config: { rateLimit: false } }, async (request, reply) => {
     if (!options.internalApiToken) {
@@ -382,7 +399,7 @@ export async function buildApp(options: BuildAppOptions) {
     if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
       return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
     }
-    return submitAgentMessage(request, reply);
+    return submitAgentMessage(request, reply, "wechat");
   });
 
   app.post("/internal/agent/events", { config: { rateLimit: false } }, async (request, reply) => {
@@ -403,7 +420,8 @@ export async function buildApp(options: BuildAppOptions) {
       payload: {
         userId: input.userId,
         event: input.event,
-        messageIdempotencyKey: input.idempotencyKey
+        messageIdempotencyKey: input.idempotencyKey,
+        sourceChannel: "wechat"
       },
       idempotencyKey: `agent-event:${input.idempotencyKey}`,
       partitionKey: `user:${input.userId}`
@@ -440,11 +458,12 @@ export async function buildApp(options: BuildAppOptions) {
       content: input.kind === "image"
         ? `[发送了一张图片]${input.hint ? ` ${input.hint}` : ""}`
         : `[发送了一段录音]${input.hint ? ` ${input.hint}` : ""}`,
-      idempotencyKey: `multimodal-user:${inputId}`
+      idempotencyKey: `multimodal-user:${inputId}`,
+      sourceChannel: "web"
     });
     const job = await options.store.enqueueJob({
       type: "multimodal_understanding",
-      payload: { ...input, inputId },
+      payload: { ...input, inputId, sourceChannel: "web" },
       idempotencyKey: `multimodal:${inputId}`,
       partitionKey: `user:${input.userId}`
     });

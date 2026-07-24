@@ -146,6 +146,8 @@ export interface DataStore {
     role: "user" | "assistant";
     content: string;
     idempotencyKey?: string;
+    sourceChannel?: Message["sourceChannel"];
+    replyToMessageId?: string | null;
   }): Promise<Message>;
   listRecentMessages(userId: string, limit?: number): Promise<Message[]>;
   listMessagesRange(userId: string, offset: number, limit: number): Promise<Message[]>;

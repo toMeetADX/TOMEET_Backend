@@ -470,9 +470,16 @@ describe("hosted Agent proactive matching actions", () => {
     expect(insight.onboardingTransition).toBe("language_en");
     expect(requestBodies[0]).toContain("preferredLanguage");
     expect(requestBodies[0]).toContain("boundaryPromptedAt=null");
-    expect(requestBodies[0]).toContain("有没有雷点");
+    expect(requestBodies[0]).toContain("雷点");
     expect(requestBodies[0]).toContain("一句话一个段落");
     expect(requestBodies[0]).toContain("英文句点");
+    expect(requestBodies[0]).toContain("画像信息是否已经可用于匹配");
+    expect(requestBodies[0]).toContain("回答逐渐变短且含糊");
+    expect(requestBodies[0]).toContain("直接告诉用户现有信息已经可以进入匹配阶段");
+    expect(requestBodies[0]).toContain("直接询问是否愿意用当前信息开始匹配");
+    expect(requestBodies[0]).toContain("完全没有可用于区分候选人与活动的具体非敏感事实");
+    expect(requestBodies[0]).toContain("必须等用户明确同意");
+    expect(requestBodies[0]).toContain("按明确社交意图立即输出 start_match");
   });
 
   it("asks for a reason instead of executing a reasonless confirmed-room exit", async () => {

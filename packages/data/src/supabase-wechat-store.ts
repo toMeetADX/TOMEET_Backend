@@ -257,16 +257,11 @@ export class SupabaseWechatStore implements WechatConnectionStore {
     messageId: string,
     errorMessage?: string
   ): Promise<void> {
-    const { error } = await this.client
-      .from("wechat_message_receipts")
-      .update({
-        status: errorMessage ? "failed" : "completed",
-        error: errorMessage?.slice(0, 1000) ?? null,
-        completed_at: errorMessage ? null : new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      })
-      .eq("connection_id", connectionId)
-      .eq("message_id", messageId);
+    const { error } = await this.client.rpc("complete_wechat_message", {
+      p_connection_id: connectionId,
+      p_message_id: messageId,
+      p_error: errorMessage?.slice(0, 1000) ?? null
+    });
     if (error) this.throwError("Complete WeChat message", error);
   }
 

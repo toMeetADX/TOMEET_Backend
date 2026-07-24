@@ -92,6 +92,25 @@ describe("TomeetClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("never substitutes a shared Web history message for a missing WeChat reply", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      job: { ...completedJob("unused"), result: {} }
+    }), { headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TomeetClient({
+      baseUrl: "https://api.example.com",
+      internalApiToken: "internal-test-token"
+    });
+
+    await expect(client.sendText({
+      connectionId: "connection-2",
+      messageId: "message-without-reply",
+      userId: "25000000-0000-4000-8000-000000000001",
+      content: "不要拿网页回复兜底"
+    })).rejects.toMatchObject({ code: "assistant_reply_missing" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("submits unsupported channel content as a structured Agent event", async () => {
     let requestedUrl = "";
     let postedBody: Record<string, unknown> | undefined;

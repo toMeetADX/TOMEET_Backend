@@ -11,6 +11,7 @@ import {
 import {
   adventurexWelcomeContent,
   agentProductEventSchema,
+  messageSourceChannelSchema,
   postEventFeedbackSchema,
   userMemorySourceTypeSchema,
   type LlmJob,
@@ -46,6 +47,10 @@ function requireString(payload: Record<string, unknown>, key: string): string {
   const value = payload[key];
   if (typeof value !== "string" || !value) throw new Error(`任务缺少 ${key}`);
   return value;
+}
+
+function sourceChannelFromJob(job: LlmJob) {
+  return messageSourceChannelSchema.catch("legacy").parse(job.payload.sourceChannel);
 }
 
 export async function scheduleAdventurexMatchRequest(
@@ -166,7 +171,10 @@ export class JobProcessor {
     });
   }
 
-  private async composeProductMessage(userId: string, event: AgentProductEvent): Promise<AgentProductMessage> {
+  private async composeProductMessage(
+    userId: string,
+    event: AgentProductEvent
+  ): Promise<AgentProductMessage> {
     return this.agent.composeProductMessage(await this.buildProductContext(userId), event);
   }
 
@@ -179,7 +187,8 @@ export class JobProcessor {
       userId: input.userId,
       role: "assistant",
       content: input.content,
-      idempotencyKey: input.idempotencyKey
+      idempotencyKey: input.idempotencyKey,
+      sourceChannel: "system"
     });
     await this.store.enqueueWechatOutboundMessage(message);
     return message;
@@ -203,12 +212,14 @@ export class JobProcessor {
     const userId = requireString(job.payload, "userId");
     const event = agentProductEventSchema.parse(job.payload.event);
     const idempotencyKey = requireString(job.payload, "messageIdempotencyKey");
+    const sourceChannel = sourceChannelFromJob(job);
     const composed = await this.composeProductMessage(userId, event);
     const message = await this.store.appendMessage({
       userId,
       role: "assistant",
       content: composed.content,
-      idempotencyKey
+      idempotencyKey,
+      sourceChannel
     });
     return { message, eventKind: event.kind };
   }
@@ -234,6 +245,7 @@ export class JobProcessor {
     const userId = requireString(job.payload, "userId");
     const userContent = requireString(job.payload, "content");
     const userMessageId = requireString(job.payload, "userMessageId");
+    const sourceChannel = sourceChannelFromJob(job);
     const [model, initialMatchRequest, initialRoom, memoryProfile, matchOptions, onboardingState] = await Promise.all([
       this.store.getUserModel(userId),
       this.store.getLatestMatchRequestForUser(userId),
@@ -322,7 +334,9 @@ export class JobProcessor {
       userId,
       role: "assistant",
       content: replyContent,
-      idempotencyKey: `agent-reply:${job.id}`
+      idempotencyKey: `agent-reply:${job.id}`,
+      sourceChannel,
+      replyToMessageId: userMessageId
     });
     const memoryJob = await this.store.enqueueJob({
       type: "memory_extract",
@@ -605,7 +619,8 @@ export class JobProcessor {
       userId,
       role: "assistant",
       content: reply,
-      idempotencyKey: `multimodal-reply:${job.id}`
+      idempotencyKey: `multimodal-reply:${job.id}`,
+      sourceChannel: sourceChannelFromJob(job)
     });
     const memoryContent = typeof understanding.recentImpression === "string"
       ? understanding.recentImpression

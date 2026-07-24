@@ -105,14 +105,8 @@ async function main() {
   let completed = false;
 
   try {
-    const [webSession, wechatSession] = await Promise.all([
-      createAnonymousSession(supabaseUrl, publishableKey),
-      createAnonymousSession(supabaseUrl, publishableKey)
-    ]);
-    createdUserIds.push(webSession.userId, wechatSession.userId);
-    if (webSession.userId === wechatSession.userId) {
-      throw new Error("Web and WeChat smoke users unexpectedly share one user_id");
-    }
+    const sharedSession = await createAnonymousSession(supabaseUrl, publishableKey);
+    createdUserIds.push(sharedSession.userId);
 
     const runId = process.env.SMOKE_RUN_ID ?? randomUUID();
     const externalUserId = `smoke-wechat-${runId}`.slice(0, 255);
@@ -128,12 +122,12 @@ async function main() {
         body: JSON.stringify({
           provider: "wechat",
           externalUserId,
-          userId: wechatSession.userId,
+          userId: sharedSession.userId,
           displayName: "Release smoke WeChat"
         })
       }
     );
-    if (linked?.identity?.userId !== wechatSession.userId) {
+    if (linked?.identity?.userId !== sharedSession.userId) {
       throw new Error("WeChat identity was not linked to the expected user_id");
     }
 
@@ -145,22 +139,22 @@ async function main() {
         body: JSON.stringify({ provider: "wechat", externalUserId })
       }
     );
-    if (resolvedThroughWeb?.identity?.userId !== wechatSession.userId) {
+    if (resolvedThroughWeb?.identity?.userId !== sharedSession.userId) {
       throw new Error("Web API and WeChat API are not reading the same identity data");
     }
 
     const webSubmission = await requestJson(apiUrl(webApiUrl, "/agent/messages"), {
       method: "POST",
-      headers: { authorization: `Bearer ${webSession.accessToken}` },
+      headers: { authorization: `Bearer ${sharedSession.accessToken}` },
       body: JSON.stringify({
-        userId: webSession.userId,
+        userId: sharedSession.userId,
         displayName: "Release smoke Web",
         content: "发布健康检查：请简短回复“web smoke ok”。",
         idempotencyKey: `release-web-${runId}`.slice(0, 128)
       })
     });
     const wechatPayload = {
-      userId: wechatSession.userId,
+      userId: sharedSession.userId,
       displayName: "Release smoke WeChat",
       content: "发布健康检查：请简短回复“wechat smoke ok”。",
       idempotencyKey: `release-wechat-${runId}`.slice(0, 128)
@@ -212,18 +206,18 @@ async function main() {
 
     const [webHistory, wechatHistoryViaWeb, webModel, wechatModel] =
       await Promise.all([
-        requestJson(apiUrl(webApiUrl, `/agent/messages/${webSession.userId}`), {
-          headers: { authorization: `Bearer ${webSession.accessToken}` }
+        requestJson(apiUrl(webApiUrl, `/agent/messages/${sharedSession.userId}`), {
+          headers: { authorization: `Bearer ${sharedSession.accessToken}` }
         }),
         requestJson(
-          apiUrl(webApiUrl, `/internal/agent/messages/${wechatSession.userId}`),
+          apiUrl(webApiUrl, `/internal/agent/messages/${sharedSession.userId}`),
           { headers: internalHeaders }
         ),
-        requestJson(apiUrl(webApiUrl, `/users/${webSession.userId}/model`), {
-          headers: { authorization: `Bearer ${webSession.accessToken}` }
+        requestJson(apiUrl(webApiUrl, `/users/${sharedSession.userId}/model`), {
+          headers: { authorization: `Bearer ${sharedSession.accessToken}` }
         }),
-        requestJson(apiUrl(wechatApiUrl, `/users/${wechatSession.userId}/model`), {
-          headers: { authorization: `Bearer ${wechatSession.accessToken}` }
+        requestJson(apiUrl(wechatApiUrl, `/users/${sharedSession.userId}/model`), {
+          headers: { authorization: `Bearer ${sharedSession.accessToken}` }
         })
       ]);
 
@@ -236,22 +230,27 @@ async function main() {
       throw new Error("Cross-channel assistant messages were not persisted");
     }
     if (
-      webModel?.userModel?.userId !== webSession.userId ||
-      wechatModel?.userModel?.userId !== wechatSession.userId
+      webModel?.userModel?.userId !== sharedSession.userId ||
+      wechatModel?.userModel?.userId !== sharedSession.userId
     ) {
       throw new Error("Cross-channel user models are missing or incorrectly matched");
+    }
+    const sourceChannels = new Set(
+      webHistory.messages.map((message) => message.sourceChannel)
+    );
+    if (!sourceChannels.has("web") || !sourceChannels.has("wechat")) {
+      throw new Error("Shared conversation is missing Web or WeChat source messages");
     }
 
     completed = true;
     process.stdout.write(
       `${JSON.stringify({
         valid: true,
-        webUserId: webSession.userId,
-        wechatUserId: wechatSession.userId,
+        sharedUserId: sharedSession.userId,
         webJobId,
         wechatJobId,
         sharedDatabaseVerified: true,
-        identitiesRemainDistinct: true,
+        sharedConversationVerified: true,
         idempotencyVerified: true
       })}\n`
     );

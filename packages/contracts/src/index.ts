@@ -16,11 +16,16 @@ export const userModelSchema = z.object({
 });
 export type UserModel = z.infer<typeof userModelSchema>;
 
+export const messageSourceChannelSchema = z.enum(["web", "wechat", "system", "legacy"]);
+export type MessageSourceChannel = z.infer<typeof messageSourceChannelSchema>;
+
 export const messageSchema = z.object({
   id: idSchema,
   userId: idSchema,
   role: z.enum(["user", "assistant"]),
   content: z.string().min(1).max(20_000),
+  sourceChannel: messageSourceChannelSchema.optional(),
+  replyToMessageId: idSchema.nullable().optional(),
   createdAt: z.string().datetime()
 });
 export type Message = z.infer<typeof messageSchema>;
@@ -68,13 +73,13 @@ export type AdventurexLanguage = z.infer<typeof adventurexLanguageSchema>;
 export const adventurexWelcomeBubbles: Record<AdventurexLanguage, readonly string[]> = {
   zh: [
     "你好呀👋",
-    "我是一个社交智能体",
+    "很高兴认识你",
     "你可以告诉我任何你觉得可以代表你或与你有关的东西，例如朋友圈，小红书等社交媒体帖子的截图，或者最近一段时间记录的有趣的照片",
     "这样我可以在了解你后帮助你连接AdventureX现场有趣的人和活动"
   ],
   en: [
     "Hi there 👋",
-    "I'm a social AI agent",
+    "Nice to meet you",
     "You can share anything that feels representative of you or connected to you, such as screenshots of posts from WeChat Moments, Xiaohongshu, or other social media, or interesting photos you've taken recently",
     "Once I get to know you, I can help connect you with interesting people and activities at AdventureX"
   ]

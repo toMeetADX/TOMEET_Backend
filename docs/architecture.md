@@ -61,6 +61,20 @@ flowchart TB
 - `llm_jobs` 后台任务表。
 - 事务锁与并发控制。
 
+### Web 与微信渠道
+
+Web 与微信通过同一个 `users.id` 使用同一套对话、状态、基础数据和记忆。两端 Agent
+组装上下文时都读取该用户的完整 `messages` 历史；`source_channel` 只记录消息来源，
+不切分上下文。
+
+- Web 对话框读取并显示 Web、微信和系统消息。
+- 微信只发送当前微信请求通过 `reply_to_message_id` 关联的回复，不回放 Web 历史，
+  也不把普通 Web 回复加入微信投递队列。
+- 用户在 Web 明确授权主动推送后，共享的匹配状态会生效；系统产生的候选、成局、
+  超时或房间变化通知可通过已绑定的微信连接主动送达。
+- `channel_identities` 负责把微信身份绑定到共享用户，`wechat_ilink_connections`
+  只保存加密传输连接状态。
+
 ### Cloudflare
 
 只负责 DNS 解析：
@@ -130,11 +144,17 @@ Worker 使用 `FOR UPDATE SKIP LOCKED` 领取待执行任务，避免同一任�
 Agent Core
  └── conversations / messages
 
-User Model
- └── user_models / multimodal_inputs
+User / Operational State
+ └── users / multimodal_inputs
+     ├── user model fields
+     └── AdventureX onboarding fields
 
 Agent Memory
  └── user_memories / user_memory_profiles
+
+Channel Identity / Transport
+ ├── channel_identities / wechat_ilink_connections
+ └── channel_message_deliveries
 
 LLM Matchmaking
  └── match_requests / llm_jobs
@@ -148,6 +168,12 @@ Match Room
 Post-event Feedback
  └── post_event_feedback
 ```
+
+`messages` 保存逐条消息，`conversations` 保存滚动摘要 checkpoint，二者生命周期不同，
+因此保留为独立表。`user_memories` 是可追溯的记忆证据，`user_memory_profiles` 是派生
+画像，也不合并。旧的 `user_models`、`adventurex_onboarding_states`、
+`wechat_message_receipts` 和 `wechat_outbound_messages` 仅保留兼容视图，新的应用读写
+分别落到 `users` 与 `channel_message_deliveries`。
 
 ## 域名
 

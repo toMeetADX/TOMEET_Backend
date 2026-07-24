@@ -64,6 +64,122 @@ describe("Supabase migration", () => {
     expect(memoryTables.rows).toHaveLength(2);
   });
 
+  it("consolidates duplicate operational records while preserving compatibility views", async () => {
+    const relations = await db.query<{ relname: string; relkind: string }>(`
+      select relname, relkind
+      from pg_class
+      where oid in (
+        'public.users'::regclass,
+        'public.user_models'::regclass,
+        'public.adventurex_onboarding_states'::regclass,
+        'public.channel_message_deliveries'::regclass,
+        'public.wechat_message_receipts'::regclass,
+        'public.wechat_outbound_messages'::regclass
+      )
+      order by relname
+    `);
+    expect(Object.fromEntries(relations.rows.map((row) => [row.relname, row.relkind])))
+      .toEqual({
+        adventurex_onboarding_states: "v",
+        channel_message_deliveries: "r",
+        user_models: "v",
+        users: "r",
+        wechat_message_receipts: "v",
+        wechat_outbound_messages: "v"
+      });
+
+    const columns = await db.query<{ table_name: string; column_name: string }>(`
+      select table_name, column_name
+      from information_schema.columns
+      where table_schema = 'public'
+        and (
+          (table_name = 'users' and column_name in (
+            'vibe_narrative',
+            'user_model_version',
+            'adventurex_stage',
+            'adventurex_welcome_sent_at'
+          ))
+          or (table_name = 'messages' and column_name in (
+            'source_channel',
+            'reply_to_message_id'
+          ))
+        )
+    `);
+    expect(new Set(columns.rows.map((row) => `${row.table_name}.${row.column_name}`)))
+      .toEqual(new Set([
+        "users.vibe_narrative",
+        "users.user_model_version",
+        "users.adventurex_stage",
+        "users.adventurex_welcome_sent_at",
+        "messages.source_channel",
+        "messages.reply_to_message_id"
+      ]));
+  });
+
+  it("backfills existing iLink connections into the shared channel identity map", async () => {
+    const legacyDb = new PGlite();
+    try {
+      await legacyDb.exec(`
+        create role anon;
+        create role authenticated;
+        create role service_role bypassrls;
+        create schema auth;
+        create table auth.users (
+          id uuid primary key,
+          email text,
+          raw_user_meta_data jsonb
+        );
+        create schema storage;
+        create table storage.buckets (
+          id text primary key,
+          name text not null,
+          public boolean not null,
+          file_size_limit bigint,
+          allowed_mime_types text[]
+        );
+      `);
+      const migrationsDirectory = resolve(process.cwd(), "../../supabase/migrations");
+      const migrationFiles = (await readdir(migrationsDirectory))
+        .filter((fileName) => fileName.endsWith(".sql"))
+        .sort();
+      const consolidationMigration = "20260725220000_shared_channel_data_model.sql";
+      for (const fileName of migrationFiles.filter((name) => name < consolidationMigration)) {
+        const migration = (await readFile(resolve(migrationsDirectory, fileName), "utf8"))
+          .replace("create extension if not exists pgcrypto;", "");
+        await legacyDb.exec(migration);
+      }
+
+      const userId = "26000000-0000-4000-8000-000000000001";
+      await legacyDb.query("select ensure_tomeet_user($1::uuid, 'Existing iLink User')", [userId]);
+      await legacyDb.query(`
+        insert into wechat_ilink_connections (
+          user_id, ilink_bot_id, owner_ilink_user_id, bot_token_ciphertext, base_url
+        ) values (
+          $1::uuid, 'existing-ilink-bot', 'existing-ilink-owner', repeat('z',32),
+          'https://ilink.example.com'
+        )
+      `, [userId]);
+
+      const migration = (await readFile(
+        resolve(migrationsDirectory, consolidationMigration),
+        "utf8"
+      )).replace("create extension if not exists pgcrypto;", "");
+      await legacyDb.exec(migration);
+      const identity = await legacyDb.query<{ provider: string; external_user_id: string; user_id: string }>(`
+        select provider, external_user_id, user_id
+        from channel_identities
+        where provider = 'wechat' and external_user_id = 'existing-ilink-owner'
+      `);
+      expect(identity.rows).toEqual([{
+        provider: "wechat",
+        external_user_id: "existing-ilink-owner",
+        user_id: userId
+      }]);
+    } finally {
+      await legacyDb.close();
+    }
+  }, 30_000);
+
   it("keeps WeChat identities server-managed and one-to-one", async () => {
     const table = await db.query<{ relrowsecurity: boolean }>(`
       select relrowsecurity
@@ -127,7 +243,7 @@ describe("Supabase migration", () => {
       where oid in (
         'public.wechat_connection_sessions'::regclass,
         'public.wechat_ilink_connections'::regclass,
-        'public.wechat_message_receipts'::regclass
+        'public.channel_message_deliveries'::regclass
       )
       order by relname
     `);
@@ -149,7 +265,7 @@ describe("Supabase migration", () => {
         and table_name in (
           'wechat_connection_sessions',
           'wechat_ilink_connections',
-          'wechat_message_receipts'
+          'channel_message_deliveries'
         )
         and grantee in ('PUBLIC', 'anon', 'authenticated')
     `);
@@ -950,7 +1066,7 @@ describe("Supabase migration", () => {
       ) values ($1::uuid,'bot-outbound-migration','owner-outbound-migration',repeat('x',32),'https://ilink.example.com')
     `, [realUserId]);
     const message = await db.query<{ append_agent_message: { id: string } }>(
-      "select append_agent_message($1::uuid,'assistant','主动候选提醒','outbound-migration-message')",
+      "select append_agent_message($1::uuid,'assistant','主动候选提醒','outbound-migration-message','system',null::uuid)",
       [realUserId]
     );
     await db.query("select enqueue_wechat_outbound_message($1::uuid,$2::uuid,'主动候选提醒')", [
@@ -976,6 +1092,15 @@ describe("Supabase migration", () => {
       attempts: 1,
       last_error: "temporary failure"
     });
+
+    const webMessage = await db.query<{ append_agent_message: { id: string } }>(
+      "select append_agent_message($1::uuid,'assistant','只在网页显示','web-only-message','web',null::uuid)",
+      [realUserId]
+    );
+    await expect(db.query(
+      "select enqueue_wechat_outbound_message($1::uuid,$2::uuid,'只在网页显示')",
+      [realUserId, webMessage.rows[0]!.append_agent_message.id]
+    )).rejects.toThrow("Web 对话消息不能投递到微信");
   });
 
   it("keeps memory tables and mutation RPCs unavailable to public roles", async () => {

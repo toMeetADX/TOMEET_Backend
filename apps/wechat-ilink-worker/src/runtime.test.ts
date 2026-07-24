@@ -80,6 +80,8 @@ function setup() {
 
 describe("WeChat worker runtime", () => {
   it("splits ordinary replies into short bubbles while preserving cards", () => {
+    expect(adventurexWelcomeBubbles.zh[1]).toBe("很高兴认识你");
+    expect(adventurexWelcomeBubbles.en[1]).toBe("Nice to meet you");
     expect(splitWechatBubbles(adventurexWelcomeContent("zh"))).toEqual(adventurexWelcomeBubbles.zh);
     expect(splitWechatBubbles("第一句话。第二句话！\n\nThird sentence.")).toEqual([
       "第一句话",

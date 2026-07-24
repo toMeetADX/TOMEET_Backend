@@ -15,9 +15,17 @@ token must be treated as temporary credentials and must not be stored in
 ```http
 POST /wechat/connect/sessions
 Content-Type: application/json
+Authorization: Bearer {supabaseAccessToken}
 
 {}
 ```
+
+Send the current Supabase access token when the QR is created from a signed-in
+Web session. The activated WeChat identity is then bound to the same
+`users.id`, so both channels share conversation context, state, and memory.
+The endpoint still accepts anonymous creation for compatibility, but that flow
+uses a separate WeChat profile and therefore does not expose the current Web
+history.
 
 Successful response: `201 Created`
 

@@ -309,8 +309,8 @@ export function registerWechatRoutes(
         }
       }
     },
-    async (_request, reply) => {
-      const created = await createSession();
+    async (request, reply) => {
+      const created = await createSession(request.authUserId);
       if (!created) {
         return reply.code(503).send({
           error: "wechat_connect_disabled",
@@ -353,7 +353,7 @@ export function registerWechatRoutes(
           message: "当前账户不能使用路演二维码模式"
         });
       }
-      const created = await createSession();
+      const created = await createSession(request.authUserId);
       if (!created) {
         return reply.code(503).send({
           error: "wechat_connect_disabled",

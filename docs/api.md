@@ -20,6 +20,18 @@
 Authorization: Bearer <supabase_access_token>
 ```
 
+## 跨渠道对话规则
+
+Web 与微信必须解析到同一个 `users.id`。该用户的 `messages`、对话摘要、业务状态、
+基础数据和结构化记忆完全共享：两端 Agent 都可以把 Web 与微信文本作为上下文，
+Web 历史接口也返回两端消息。
+
+消息展示和投递是单向的：微信 worker 只发送当前微信任务直接返回、且与本次微信
+用户消息关联的 Agent 回复，不从共享历史中寻找“最后一条回复”，普通 Web 消息及
+Web 回复也不能进入微信投递队列。系统主动通知是例外；用户即使在 Web 授权了主动
+推送，只要同一 `users.id` 已绑定有效微信连接，之后的候选、成局、超时或房间变化
+通知仍可发送到微信。
+
 首次使用可在前端调用 Supabase Anonymous Sign-In，也可以换成手机号、邮箱或 OAuth。必须先在 Supabase Dashboard 启用对应登录方式。
 
 ```ts
@@ -223,8 +235,8 @@ await supabase.storage
     "preferredLanguage": "zh",
     "boundaryPromptedAt": null
   },
-  "message": { "role": "assistant", "content": "你好呀👋\n\n我是一个社交智能体\n\n……" },
-  "messages": [{ "role": "assistant", "content": "你好呀👋\n\n我是一个社交智能体\n\n……" }]
+  "message": { "role": "assistant", "content": "你好呀👋\n\n很高兴认识你\n\n……" },
+  "messages": [{ "role": "assistant", "content": "你好呀👋\n\n很高兴认识你\n\n……" }]
 }
 ```
 

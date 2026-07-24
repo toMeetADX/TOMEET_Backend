@@ -3,9 +3,10 @@
 生产微信通道直接使用腾讯 `openclaw-weixin` 同源的 iLink HTTP 协议，不需要
 Photon Spectrum、桌面微信、VNC、Docker 微信容器或完整 OpenClaw runtime。
 
-用户访问 Web `/wechat` 页面后生成五分钟有效的一次性二维码。用户用微信扫码并
-确认授权，API 会创建或复用该微信身份对应的 Supabase profile，同时确保
-conversation、user model 和 memory profile 已存在。Railway 上独立的
+用户登录 Web 后在 `/wechat` 页面生成五分钟有效的一次性二维码。创建二维码时携带
+Supabase Bearer token，API 会把微信身份绑定到当前 `users.id`，从而与 Web 共享
+conversation、消息、用户状态和 memory。未登录的匿名扫码仍兼容，但会创建或复用
+独立的微信 profile，不能显示当前 Web 用户的历史。Railway 上独立的
 `wechat-ilink-worker` 随后负责接收微信消息、调用 TOMEET Agent 并把文本回复
 发送回微信。
 
@@ -16,7 +17,7 @@ conversation、user model 和 memory profile 已存在。Railway 上独立的
 
 每位用户只需要：
 
-1. 打开 `https://<你的 Web 域名>/wechat`。
+1. 登录后打开 `https://<你的 Web 域名>/wechat`。
 2. 点击“生成一次性二维码”。
 3. 用自己的微信扫码并在手机中确认授权；若微信要求验证码，在 Web 页面输入。
 4. 页面显示连接成功后，回到微信向刚连接的 Agent 发送消息。
@@ -30,7 +31,8 @@ conversation、user model 和 memory profile 已存在。Railway 上独立的
 
 - `wechat_connection_sessions`：一次性二维码会话；
 - `wechat_ilink_connections`：每个 profile 的加密 iLink 凭证、游标与 lease；
-- `wechat_message_receipts`：消息幂等记录，不保存聊天正文。
+- `channel_message_deliveries`：统一保存微信入站幂等与主动出站投递状态，不保存
+  普通聊天正文；正文仍以 `messages` 为准。
 
 三张表均启用 RLS，明确撤销 `PUBLIC`、`anon`、`authenticated` 权限，只向
 `service_role` 授予所需表和 RPC 权限。应用后运行 Supabase Security Advisor，

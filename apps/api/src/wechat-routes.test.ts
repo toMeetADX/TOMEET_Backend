@@ -81,12 +81,20 @@ async function setup(
 
 describe("WeChat one-time QR onboarding", () => {
   it("allows only the roadshow account to bypass the public QR creation limit", async () => {
+    const roadshowUserId = randomUUID();
+    const otherUserId = randomUUID();
     const { app } = await setup(
       [],
       undefined,
       undefined,
       1,
-      { rapidQrTokens: ["roadshow-token"] }
+      {
+        rapidQrTokens: ["roadshow-token"],
+        userByToken: {
+          "roadshow-token": roadshowUserId,
+          "other-token": otherUserId
+        }
+      }
     );
 
     const publicCreate = await app.inject({
@@ -205,7 +213,7 @@ describe("WeChat one-time QR onboarding", () => {
     expect(verifyAccessToken).not.toHaveBeenCalled();
   });
 
-  it("associates a QR session with an existing profile only through the internal API", async () => {
+  it("supports server-side QR creation for an existing profile", async () => {
     const internalApiToken = "internal-test-token-with-at-least-32-characters";
     const owner = "existing-profile-wechat";
     const { app, store } = await setup([{
@@ -241,6 +249,40 @@ describe("WeChat one-time QR onboarding", () => {
     expect(confirmed.json()).toMatchObject({ status: "active" });
     expect(await store.resolveChannelIdentity("wechat", owner))
       .toMatchObject({ userId });
+  });
+
+  it("binds an authenticated Web QR session to the same shared profile", async () => {
+    const userId = randomUUID();
+    const accessToken = "shared-web-wechat-token";
+    const owner = "authenticated-web-wechat-owner";
+    const { app, store, verifyAccessToken } = await setup([{
+      status: "confirmed",
+      bot_token: "bot-secret",
+      ilink_bot_id: "bot-shared-profile",
+      baseurl: "https://ilink-api.example.com",
+      ilink_user_id: owner
+    }], undefined, undefined, undefined, {
+      userByToken: { [accessToken]: userId }
+    });
+    await store.ensureUser(userId, "Web 与微信共享用户");
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      headers: { authorization: `Bearer ${accessToken}` },
+      payload: {}
+    });
+    expect(created.statusCode).toBe(201);
+    const session = created.json();
+    const activated = await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${session.sessionId}`,
+      headers: { "x-wechat-session-token": session.sessionToken }
+    });
+    expect(activated.json()).toMatchObject({ status: "active" });
+    expect(await store.resolveChannelIdentity("wechat", owner))
+      .toMatchObject({ userId });
+    expect(verifyAccessToken).toHaveBeenCalledWith(accessToken);
   });
 
   it("automatically matches independent Web and WeChat users in one shared room", async () => {

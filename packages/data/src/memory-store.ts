@@ -281,6 +281,8 @@ export class MemoryStore implements DataStore {
     role: "user" | "assistant";
     content: string;
     idempotencyKey?: string;
+    sourceChannel?: Message["sourceChannel"];
+    replyToMessageId?: string | null;
   }): Promise<Message> {
     await this.ensureUser(input.userId);
     if (input.idempotencyKey) {
@@ -292,6 +294,8 @@ export class MemoryStore implements DataStore {
       userId: input.userId,
       role: input.role,
       content: input.content,
+      sourceChannel: input.sourceChannel ?? "legacy",
+      replyToMessageId: input.replyToMessageId ?? null,
       createdAt: new Date().toISOString()
     };
     this.messages.push(message);
@@ -1367,6 +1371,9 @@ export class MemoryStore implements DataStore {
   }
 
   async enqueueWechatOutboundMessage(message: Message): Promise<void> {
+    if (message.sourceChannel === "web") {
+      throw new StoreConflictError("Web 对话消息不能投递到微信");
+    }
     this.wechatOutboundMessages.set(message.id, structuredClone(message));
   }
 

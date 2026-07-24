@@ -209,7 +209,7 @@ export interface MatchRoom {
 | `POST` | `/rooms/:id/confirm` | Bearer | 200 | 确认参加 |
 | `POST` | `/rooms/:id/complete` | Bearer | 200 | 标记活动完成 |
 | `POST` | `/rooms/:id/feedback` | Bearer | 200/202 | 提交活动反馈 |
-| `POST` | `/wechat/connect/sessions` | 无 | 201 | 创建微信扫码会话 |
+| `POST` | `/wechat/connect/sessions` | Bearer 推荐；可匿名 | 201 | 创建微信扫码会话并优先绑定当前 Web 用户 |
 | `GET` | `/wechat/connect/sessions/:sessionId/events` | 微信会话 token | 200 SSE | 实时推送扫码状态 |
 | `GET` | `/wechat/connect/sessions/:sessionId` | 微信会话 token | 200 | 查询扫码状态（SSE 降级） |
 | `POST` | `/wechat/connect/sessions/:sessionId/verify` | 微信会话 token | 200 | 提交微信验证码 |
@@ -571,11 +571,19 @@ interface FeedbackResponse {
 
 ## 10. 微信扫码连接
 
-Web 端 `/wechat` 页面使用独立的一次性会话，不要求用户先登录 Supabase。
+Web 端 `/wechat` 页面使用独立的一次性会话。推荐在已登录状态下创建并携带 Supabase
+Bearer token，这样扫码确认后的微信身份会绑定到当前 `users.id`，与 Web 共享完整
+对话、状态和记忆。未携带 token 的匿名扫码仍可用，但会落到独立微信 profile。
 
 ### 10.1 创建扫码会话
 
 `POST /wechat/connect/sessions`
+
+已登录用户应携带：
+
+```http
+Authorization: Bearer <supabase_access_token>
+```
 
 请求体为 `{}`。响应：
 

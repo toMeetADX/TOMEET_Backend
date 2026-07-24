@@ -146,7 +146,7 @@ stateDiagram-v2
 
 > 你好呀👋
 >
-> 我是一个社交智能体
+> 很高兴认识你
 >
 > 你可以告诉我任何你觉得可以代表你或与你有关的东西，例如朋友圈，小红书等社交媒体帖子的截图，或者最近一段时间记录的有趣的照片
 >
@@ -156,7 +156,7 @@ stateDiagram-v2
 
 > Hi there 👋
 >
-> I'm a social AI agent
+> Nice to meet you
 >
 > You can share anything that feels representative of you or connected to you, such as screenshots of posts from WeChat Moments, Xiaohongshu, or other social media, or interesting photos you've taken recently
 >
@@ -213,6 +213,15 @@ Agent 可以进入匹配的软判断：
 - 最好已有至少一条具体社交钩子。
 
 第三项不是门槛。用户主动要求匹配时必须立即开始。
+
+当软判断已经满足时，Agent 直接说明现有信息已经可以进入匹配阶段，并询问用户是否现在开始。这个询问本身不创建匹配请求，只有用户明确同意后才执行 `start_match`。尚未问过雷点时，可以把雷点入口自然合并进同一个确认问题，避免再增加一轮采访。
+
+Agent 还要结合连续对话判断回答意愿。单次简短但具体的回答不代表不耐烦；回答逐渐变短且含糊、连续跳过问题，或明确表示不想继续回答、想先到这里，才视为退出了解过程的倾向：
+
+- 信息尚不完整，但已有至少一条具体、非敏感、能作为最低匹配依据的事实时，直接询问是否愿意用当前信息开始匹配；
+- 完全没有可用于区分候选人与活动的具体事实时，不提供虚假的匹配入口，只沿着用户已表现出的兴趣或最近经历补问一个最关键、最容易回答的问题；
+- 没有退出倾向且信息尚不完整时，信息完备性优先，继续问一个基于用户兴趣落点、容易回答且信息量高的问题；
+- Agent 主动提出开始匹配时始终等待用户明确同意，不得自行触发 `start_match`。
 
 ## 4. 领域模型
 

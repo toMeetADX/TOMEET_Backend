@@ -39,6 +39,89 @@ afterEach(async () => {
 });
 
 describe("TOMEET core flow", () => {
+  it("shares WeChat messages with Web while preserving each reply's origin", async () => {
+    const userId = randomUUID();
+    const internalApiToken = "shared-channel-test-token-at-least-32-characters";
+    const store = new MemoryStore();
+    const seenContexts: string[][] = [];
+    const agent = new class extends MockAgentIntelligence {
+      override async reply(...args: Parameters<MockAgentIntelligence["reply"]>) {
+        seenContexts.push(args[0].recentMessages.map((message) => message.content));
+        return super.reply(...args);
+      }
+    }();
+    const processor = new JobProcessor(
+      store,
+      agent,
+      new MockMatchmakingIntelligence()
+    );
+    const app = await buildApp({
+      store,
+      inlineProcessor: processor,
+      internalApiToken,
+      verifyAccessToken: async (token) => {
+        if (token === "web-token") return userId;
+        throw new AuthenticationError("登录状态无效或已过期");
+      }
+    });
+    apps.push(app);
+
+    const web = await app.inject({
+      method: "POST",
+      url: "/agent/messages",
+      headers: { authorization: "Bearer web-token" },
+      payload: {
+        userId,
+        displayName: "跨渠道用户",
+        content: "这是网页消息",
+        idempotencyKey: randomUUID()
+      }
+    });
+    expect(web.statusCode).toBe(200);
+    expect(web.json().userMessage.sourceChannel).toBe("web");
+    expect(web.json().job.result.message.sourceChannel).toBe("web");
+    await expect(store.enqueueWechatOutboundMessage(web.json().job.result.message))
+      .rejects.toThrow("Web 对话消息不能投递到微信");
+
+    const wechat = await app.inject({
+      method: "POST",
+      url: "/internal/agent/messages",
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload: {
+        userId,
+        displayName: "跨渠道用户",
+        content: "这是微信消息",
+        idempotencyKey: randomUUID()
+      }
+    });
+    expect(wechat.statusCode).toBe(200);
+    expect(wechat.json().userMessage.sourceChannel).toBe("wechat");
+    expect(wechat.json().job.result.message).toMatchObject({
+      sourceChannel: "wechat",
+      replyToMessageId: wechat.json().userMessage.id
+    });
+    expect(seenContexts.at(-1)).toContain("这是网页消息");
+
+    const history = await app.inject({
+      method: "GET",
+      url: `/agent/messages/${userId}`,
+      headers: { authorization: "Bearer web-token" }
+    });
+    expect(history.statusCode).toBe(200);
+    expect(new Set(history.json().messages.map(
+      (message: { sourceChannel?: string }) => message.sourceChannel
+    ))).toEqual(new Set(["web", "wechat"]));
+
+    const proactiveMessage = await store.appendMessage({
+      userId,
+      role: "assistant",
+      content: "Web 已授权后产生的微信主动通知",
+      idempotencyKey: "shared-channel-proactive",
+      sourceChannel: "system"
+    });
+    await expect(store.enqueueWechatOutboundMessage(proactiveMessage)).resolves.toBeUndefined();
+  });
+
   it("requires a valid bearer token while keeping health checks public", async () => {
     const userId = randomUUID();
     const { app } = await setupWithAuth({ valid: userId });
