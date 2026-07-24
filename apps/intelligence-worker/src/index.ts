@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { SupabaseStore } from "@tomeet/data";
 import { HostedLlmIntelligence, JobProcessor, TavilyWebSearchProvider } from "@tomeet/intelligence";
 import { config } from "dotenv";
+import { createWorkerHealthServer } from "./health-server.js";
 
 config({ path: resolve(process.cwd(), ".env") });
 config({ path: resolve(process.cwd(), "../../.env"), override: false });
@@ -58,7 +59,13 @@ const pollInterval = parseIntegerInRange(
   60_000,
   "WORKER_POLL_INTERVAL_MS"
 );
+const healthPort = parseIntegerInRange(process.env.PORT, 8080, 1, 65_535, "PORT");
 const abortController = new AbortController();
+const healthServer = createWorkerHealthServer({
+  service: "tomeet-intelligence-worker",
+  port: healthPort,
+  ping: () => store.ping()
+});
 
 const delay = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
@@ -122,18 +129,31 @@ async function runSlot(slot: number): Promise<void> {
   }
 }
 
-console.info(JSON.stringify({
-  level: "info",
-  event: "worker_started",
-  workerId,
-  concurrency,
-  model: textModel,
-  webSearchEnabled: Boolean(webSearchProvider)
-}));
-const slots = Array.from({ length: concurrency }, (_, index) => runSlot(index + 1));
-
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => abortController.abort());
+  process.once(signal, () => {
+    healthServer.setReady(false);
+    abortController.abort();
+  });
 }
 
-await Promise.all(slots);
+await healthServer.listen();
+try {
+  await store.ping();
+  healthServer.setReady(true);
+  console.info(JSON.stringify({
+    level: "info",
+    event: "worker_started",
+    workerId,
+    concurrency,
+    model: textModel,
+    webSearchEnabled: Boolean(webSearchProvider)
+  }));
+  const slots = Array.from(
+    { length: concurrency },
+    (_, index) => runSlot(index + 1)
+  );
+  await Promise.all(slots);
+} finally {
+  healthServer.setReady(false);
+  await healthServer.close();
+}

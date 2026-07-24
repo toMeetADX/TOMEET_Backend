@@ -1,0 +1,11 @@
+{
+  "approvedLegacyMigrations": {
+    "202607230001_initial_schema.sql": "1866908b565d5b78a879aafa61bc5608fa81b1191c92b40fd3c11ad38f9ae7ea",
+    "202607230002_align_implementation.sql": "8699d4bca0da3988bfcd06aad8dcd97bcade4e13b6c63bab81cfbdf240bd0912",
+    "202607230003_vibe_narrative.sql": "8a6c2dec98054ac5c4a669392462b060658823526d914280b273bd7338944340",
+    "202607230004_agent_memory_context_v2.sql": "fae1edf7333f1a169b98635fab1efa4157692cc29e17390e72dd78e0c8597c60",
+    "20260723131218_wechat_channel_identities.sql": "3504eb523de14bc831c3d230aeb0653b8d26c2f16cd0a6b840c29f58cee84a76",
+    "20260723160425_wechat_ilink_connections.sql": "3fcf38ed5b3fff5d17f657e2a391944fe5627bb7a7163d61f7915cbc254713a9",
+    "20260724090000_sync_auth_users.sql": "18e75b00d66e17bb55c9548e844fb072abb35f9069eb66e3a76e0196f63d6b20"
+  }
+}
