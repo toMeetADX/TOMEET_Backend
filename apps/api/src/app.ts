@@ -40,6 +40,7 @@ export interface BuildAppOptions {
   verifyAccessToken?: AccessTokenVerifier;
   trustProxy?: boolean;
   rateLimitMax?: number;
+  wechatQrRateLimitMax?: number;
   exposeInternalErrors?: boolean;
 }
 
@@ -180,7 +181,8 @@ export async function buildApp(options: BuildAppOptions) {
   registerWechatRoutes(app, {
     runtime: options.wechat,
     internalApiEnabled: Boolean(options.internalApiToken),
-    internalTokenMatches
+    internalTokenMatches,
+    publicSessionRateLimitMax: options.wechatQrRateLimitMax
   });
 
   app.post("/internal/channel-identities/resolve", { config: { rateLimit: false } }, async (request, reply) => {

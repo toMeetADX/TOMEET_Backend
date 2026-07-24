@@ -27,6 +27,7 @@ interface RegisterWechatRoutesOptions {
   runtime?: WechatApiRuntime;
   internalApiEnabled: boolean;
   internalTokenMatches(candidate: unknown): boolean;
+  publicSessionRateLimitMax?: number;
 }
 
 function publicSession(session: WechatConnectionSession) {
@@ -219,7 +220,14 @@ export function registerWechatRoutes(
 
   app.post(
     "/wechat/connect/sessions",
-    { config: { rateLimit: { max: 5, timeWindow: "10 minutes" } } },
+    {
+      config: {
+        rateLimit: {
+          max: options.publicSessionRateLimitMax ?? 5,
+          timeWindow: "10 minutes"
+        }
+      }
+    },
     async (_request, reply) => {
       const created = await createSession();
       if (!created) {

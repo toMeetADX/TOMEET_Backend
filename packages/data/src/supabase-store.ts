@@ -41,13 +41,19 @@ function unwrapRpcData(data: unknown): unknown {
   return data;
 }
 
+function normalizeDateTime(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+}
+
 function mapMessage(row: JsonRow): Message {
   return messageSchema.parse({
     id: row.id,
     userId: row.user_id ?? row.userId,
     role: row.role,
     content: row.content,
-    createdAt: row.created_at ?? row.createdAt
+    createdAt: normalizeDateTime(row.created_at ?? row.createdAt)
   });
 }
 
@@ -57,7 +63,7 @@ function mapChannelIdentity(row: JsonRow): ChannelIdentity {
     externalUserId: row.external_user_id ?? row.externalUserId,
     userId: row.user_id ?? row.userId,
     displayName: row.display_name ?? row.displayName ?? null,
-    linkedAt: row.linked_at ?? row.linkedAt
+    linkedAt: normalizeDateTime(row.linked_at ?? row.linkedAt)
   });
 }
 
@@ -71,7 +77,7 @@ function mapUserModel(row: JsonRow): UserModel {
     feedbackMemory: row.feedback_memory ?? row.feedbackMemory ?? [],
     multimodalUnderstanding: row.multimodal_understanding ?? row.multimodalUnderstanding ?? {},
     version: row.version ?? 0,
-    updatedAt: row.updated_at ?? row.updatedAt
+    updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
   });
 }
 
@@ -82,8 +88,8 @@ function mapMatchRequest(row: JsonRow): MatchRequest {
     intentSnapshot: row.intent_snapshot ?? row.intentSnapshot ?? {},
     status: row.status,
     roomId: row.room_id ?? row.roomId ?? null,
-    createdAt: row.created_at ?? row.createdAt,
-    updatedAt: row.updated_at ?? row.updatedAt
+    createdAt: normalizeDateTime(row.created_at ?? row.createdAt),
+    updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
   });
 }
 
@@ -112,8 +118,8 @@ function mapJob(row: JsonRow): LlmJob {
     attempts: row.attempts ?? 0,
     maxAttempts: row.max_attempts ?? row.maxAttempts ?? 3,
     partitionKey: row.partition_key ?? row.partitionKey ?? null,
-    createdAt: row.created_at ?? row.createdAt,
-    updatedAt: row.updated_at ?? row.updatedAt
+    createdAt: normalizeDateTime(row.created_at ?? row.createdAt),
+    updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
   });
 }
 
@@ -131,11 +137,11 @@ function mapMemory(row: JsonRow): UserMemory {
     supersededBy: row.superseded_by ?? row.supersededBy ?? null,
     confirmationCount: row.confirmation_count ?? row.confirmationCount ?? 1,
     usageCount: row.usage_count ?? row.usageCount ?? 0,
-    lastConfirmedAt: row.last_confirmed_at ?? row.lastConfirmedAt,
-    lastUsedAt: row.last_used_at ?? row.lastUsedAt ?? null,
-    expiresAt: row.expires_at ?? row.expiresAt ?? null,
-    createdAt: row.created_at ?? row.createdAt,
-    updatedAt: row.updated_at ?? row.updatedAt
+    lastConfirmedAt: normalizeDateTime(row.last_confirmed_at ?? row.lastConfirmedAt),
+    lastUsedAt: normalizeDateTime(row.last_used_at ?? row.lastUsedAt ?? null),
+    expiresAt: normalizeDateTime(row.expires_at ?? row.expiresAt ?? null),
+    createdAt: normalizeDateTime(row.created_at ?? row.createdAt),
+    updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
   });
 }
 
@@ -148,7 +154,7 @@ function mapMemoryProfile(row: JsonRow): UserMemoryProfile {
     sourceWatermark: row.source_watermark ?? row.sourceWatermark ?? null,
     version: row.version ?? 0,
     stale: row.stale ?? false,
-    updatedAt: row.updated_at ?? row.updatedAt
+    updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
   });
 }
 

@@ -13,7 +13,8 @@ afterEach(async () => {
 async function setup(
   statuses: Array<Record<string, unknown>>,
   internalApiToken?: string,
-  sessionTtlMs?: number
+  sessionTtlMs?: number,
+  wechatQrRateLimitMax?: number
 ) {
   let qrIndex = 0;
   const fetchMock = vi.fn(async (input: string | URL | Request) => {
@@ -35,6 +36,7 @@ async function setup(
   const app = await buildApp({
     store,
     internalApiToken,
+    wechatQrRateLimitMax,
     verifyAccessToken,
     wechat: {
       store: wechatStore,
@@ -343,6 +345,22 @@ describe("WeChat one-time QR onboarding", () => {
     expect(responses.slice(0, 5).every((response) => response.statusCode === 201))
       .toBe(true);
     expect(responses[5]?.statusCode).toBe(429);
+  });
+
+  it("supports a higher bounded QR limit for a managed kiosk", async () => {
+    const { app } = await setup([], undefined, undefined, 7);
+    const responses = [];
+    for (let index = 0; index < 8; index += 1) {
+      responses.push(await app.inject({
+        method: "POST",
+        url: "/wechat/connect/sessions",
+        payload: {}
+      }));
+    }
+
+    expect(responses.slice(0, 7).every((response) => response.statusCode === 201))
+      .toBe(true);
+    expect(responses[7]?.statusCode).toBe(429);
   });
 
   it("allows the browser session header in CORS preflight", async () => {
