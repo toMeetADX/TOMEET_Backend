@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "sourceBranch": "main",
+  "sourceCommit": "7a759c7f5a5ce354e9078963635f5536711b3830",
+  "sourceTreeHash": "36577fca42314d4d84beb95e233fcb317f6d7c54f251ad69c1f0dd9e464b5a7a",
+  "migrationHash": "5111dd3674b74f1a4cbe4ed7dbdbd5a822b9c08d8da9bd9e9d00fdbec48d9d99",
+  "targetBranch": "feat/wechat-channel",
+  "targetBaseCommit": "4cac7444e453c74997b672e7c6a2120f071e6c5c"
+}

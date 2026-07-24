@@ -1,0 +1,90 @@
+name: Production Watch
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: production-watch
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+      RAILWAY_INTELLIGENCE_SERVICE: ${{ vars.RAILWAY_INTELLIGENCE_SERVICE }}
+      RAILWAY_WEB_API_SERVICE: ${{ vars.RAILWAY_WEB_API_SERVICE }}
+      RAILWAY_WECHAT_API_SERVICE: ${{ vars.RAILWAY_WECHAT_API_SERVICE }}
+      RAILWAY_WECHAT_WORKER_SERVICE: ${{ vars.RAILWAY_WECHAT_WORKER_SERVICE }}
+      WEB_API_READY_URL: ${{ vars.WEB_API_READY_URL }}
+      WECHAT_API_READY_URL: ${{ vars.WECHAT_API_READY_URL }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install pinned Railway CLI
+        run: npm install --global @railway/cli@5.28.1
+      - name: Check Production services and readiness
+        id: health
+        continue-on-error: true
+        shell: bash
+        run: |
+          required=(
+            RAILWAY_PROJECT_ID RAILWAY_ENVIRONMENT_ID
+            RAILWAY_INTELLIGENCE_SERVICE RAILWAY_WEB_API_SERVICE
+            RAILWAY_WECHAT_API_SERVICE RAILWAY_WECHAT_WORKER_SERVICE
+            WEB_API_READY_URL WECHAT_API_READY_URL RAILWAY_TOKEN
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing Production environment value: $name"
+              exit 1
+            fi
+          done
+          for service in \
+            "$RAILWAY_INTELLIGENCE_SERVICE" \
+            "$RAILWAY_WEB_API_SERVICE" \
+            "$RAILWAY_WECHAT_API_SERVICE" \
+            "$RAILWAY_WECHAT_WORKER_SERVICE"; do
+            node scripts/railway-release.mjs status \
+              --project "$RAILWAY_PROJECT_ID" \
+              --environment "$RAILWAY_ENVIRONMENT_ID" \
+              --service "$service"
+          done
+          node scripts/railway-release.mjs probe \
+            --url "$WEB_API_READY_URL" \
+            --successes 3
+          node scripts/railway-release.mjs probe \
+            --url "$WECHAT_API_READY_URL" \
+            --successes 3
+      - name: Open or update Production incident
+        if: steps.health.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          title="[production-watch] Service health degraded"
+          body="Production Watch detected an unhealthy Railway deployment or readiness endpoint. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          number="$(gh issue list \
+            --state open \
+            --search "$title in:title" \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+      - name: Fail unhealthy watch
+        if: steps.health.outcome == 'failure'
+        run: exit 1
