@@ -82,6 +82,7 @@ function mapWebClaim(row: JsonRow): WechatWebClaim {
       row.refresh_token_ciphertext ?? row.refreshTokenCiphertext
     ),
     expiresAt: String(row.expires_at ?? row.expiresAt),
+    exposedAt: (row.exposed_at ?? row.exposedAt ?? null) as string | null,
     consumedAt: (row.consumed_at ?? row.consumedAt ?? null) as string | null,
     createdAt: String(row.created_at ?? row.createdAt)
   };
@@ -128,19 +129,50 @@ export class SupabaseWechatStore implements WechatConnectionStore {
     return data ? mapWebClaim(data as JsonRow) : null;
   }
 
-  async getLatestWechatWebClaimForUser(userId: string): Promise<WechatWebClaim | null> {
+  async exposeLatestWechatWebClaimForUser(
+    userId: string,
+    ttlMs: number
+  ): Promise<WechatWebClaim | null> {
+    const now = new Date();
     const { data, error } = await this.client
       .from("wechat_web_claims")
       .select("*")
       .eq("user_id", userId)
       .is("consumed_at", null)
       .not("token_ciphertext", "is", null)
-      .gt("expires_at", new Date().toISOString())
+      .gt("expires_at", now.toISOString())
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
     if (error) this.throwError("Read latest WeChat Web claim", error);
-    return data ? mapWebClaim(data as JsonRow) : null;
+    if (!data) return null;
+    const claim = mapWebClaim(data as JsonRow);
+    if (claim.exposedAt) return claim;
+    const expiresAt = new Date(Math.min(
+      new Date(claim.expiresAt).getTime(),
+      now.getTime() + ttlMs
+    )).toISOString();
+    const { data: exposed, error: exposeError } = await this.client
+      .from("wechat_web_claims")
+      .update({
+        exposed_at: now.toISOString(),
+        expires_at: expiresAt
+      })
+      .eq("id", claim.id)
+      .is("exposed_at", null)
+      .select("*")
+      .maybeSingle();
+    if (exposeError) this.throwError("Expose WeChat Web claim", exposeError);
+    if (exposed) return mapWebClaim(exposed as JsonRow);
+    const { data: concurrent, error: concurrentError } = await this.client
+      .from("wechat_web_claims")
+      .select("*")
+      .eq("id", claim.id)
+      .is("consumed_at", null)
+      .gt("expires_at", new Date().toISOString())
+      .maybeSingle();
+    if (concurrentError) this.throwError("Read exposed WeChat Web claim", concurrentError);
+    return concurrent ? mapWebClaim(concurrent as JsonRow) : null;
   }
 
   async consumeWechatWebClaim(tokenHash: string): Promise<WechatWebClaim | null> {

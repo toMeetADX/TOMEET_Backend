@@ -301,7 +301,10 @@ export async function buildApp(options: BuildAppOptions) {
       if (!message) return { message: null, bubbles: [] };
       const bubbles = message.content.split(/\n\s*\n+/u).filter(Boolean);
       if (options.wechat && options.wechatWebRegistration) {
-        const claim = await options.wechat.store.getLatestWechatWebClaimForUser(userId);
+        const claim = await options.wechat.store.exposeLatestWechatWebClaimForUser(
+          userId,
+          options.wechatWebRegistration.claimTtlMs ?? 15 * 60_000
+        );
         if (claim?.tokenCiphertext) {
           const token = options.wechat.cipher.decrypt(
             claim.tokenCiphertext,

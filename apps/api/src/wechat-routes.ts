@@ -150,10 +150,7 @@ async function createWebRegistrationClaim(
   registration: WechatWebRegistrationRuntime
 ): Promise<string> {
   const sessionExpiresAt = new Date(account.sessionExpiresAt).getTime();
-  const expiresAtMs = Math.min(
-    Date.now() + (registration.claimTtlMs ?? 15 * 60_000),
-    sessionExpiresAt - 5_000
-  );
+  const expiresAtMs = sessionExpiresAt - 5_000;
   if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
     throw new Error("Supabase 匿名会话有效期不足，无法创建注册链接");
   }
