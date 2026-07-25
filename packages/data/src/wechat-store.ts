@@ -21,6 +21,7 @@ export interface WechatConnectionStore {
     session: WechatConnectionSession;
     connection: WechatConnection;
   }>;
+  claimWechatActivationCallback(sessionId: string): Promise<boolean>;
   claimWechatConnections(input: {
     workerId: string;
     limit: number;

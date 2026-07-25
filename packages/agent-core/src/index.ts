@@ -116,8 +116,8 @@ export interface AgentIntelligence {
   summarizeConversation(previousCheckpoint: string, messages: import("@tomeet/contracts").Message[]): Promise<string>;
   understandMultimodal(input: {
     kind: "image" | "audio";
-    storagePath: string;
-    mimeType: string;
+    storagePaths: string[];
+    mimeTypes: string[];
     hint?: string;
     preferredLanguage?: AdventurexLanguage;
   }): Promise<Record<string, unknown>>;
@@ -231,10 +231,10 @@ export class MockAgentIntelligence implements AgentIntelligence {
 
     if (context.onboardingState && /(英文|英语|用 English|use English|speak English|in English)/iu.test(normalized)) {
       onboardingTransition = "language_en";
-      reply = adventurexWelcomeContent("en");
+      reply = "Okay, I'll continue in English. What part of what you just shared feels most representative of you?";
     } else if (context.onboardingState && /(切回中文|用中文|说中文)/u.test(normalized)) {
       onboardingTransition = "language_zh";
-      reply = adventurexWelcomeContent("zh");
+      reply = "好，我们继续用中文。你刚才分享的内容里，哪一部分最能代表你？";
     } else if (context.matchRequest?.status === "matching" && context.matchRequest.phase === "push_consent"
       && /(现在|马上|继续|重新|再).*(匹配|找|看看)/u.test(normalized)) {
       actions.push({ type: "activate_match" });
@@ -478,8 +478,8 @@ export class MockAgentIntelligence implements AgentIntelligence {
 
   async understandMultimodal(input: {
     kind: "image" | "audio";
-    storagePath: string;
-    mimeType: string;
+    storagePaths: string[];
+    mimeTypes: string[];
     hint?: string;
     preferredLanguage?: AdventurexLanguage;
   }): Promise<Record<string, unknown>> {
@@ -490,7 +490,7 @@ export class MockAgentIntelligence implements AgentIntelligence {
       recentImpression: input.hint
         ? `用户通过${input.kind === "image" ? "图片" : "录音"}传递的近期印象：${input.hint}`
         : `用户提供了一份${input.kind === "image" ? "视觉" : "声音"}材料。`,
-      source: input.storagePath,
+      sources: input.storagePaths,
       mock: true
     };
   }

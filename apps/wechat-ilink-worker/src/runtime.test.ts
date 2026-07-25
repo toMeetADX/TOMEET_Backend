@@ -60,7 +60,14 @@ function setup() {
     sendText: vi.fn<WechatTransport["sendText"]>(async () => "client-1")
   } satisfies WechatTransport;
   const tomeet = {
+    startOnboarding: vi.fn<AgentTextClient["startOnboarding"]>(async () => null),
+    setResponseGeneration: vi.fn(async () => undefined),
+    sendTextBatch: vi.fn(async () => ({ reply: "Agent reply", stale: false })),
     sendText: vi.fn(async () => "Agent reply"),
+    sendImages: vi.fn<AgentTextClient["sendImages"]>(async () => ({
+      reply: "Image batch reply",
+      stale: false
+    })),
     sendEvent: vi.fn(async () => "Agent event reply")
   } satisfies AgentTextClient;
   const logger = {
@@ -180,11 +187,12 @@ describe("WeChat worker runtime", () => {
       }
     )).resolves.toBe(true);
 
-    expect(runtime.tomeet.sendText).toHaveBeenCalledWith({
+    expect(runtime.tomeet.sendTextBatch).toHaveBeenCalledWith({
       connectionId: activeConnection.id,
-      messageId: "42",
+      generationToken: expect.any(String),
+      messageIds: ["42"],
       userId: activeConnection.userId,
-      content: "你好"
+      contents: ["你好"]
     });
     expect(runtime.ilink.sendText).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -201,9 +209,253 @@ describe("WeChat worker runtime", () => {
     expect(JSON.stringify(runtime.logger.info.mock.calls)).not.toContain("bot-secret");
   });
 
+  it("sends the onboarding welcome before the first Agent reply and only once", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    runtime.tomeet.startOnboarding.mockResolvedValue(adventurexWelcomeContent("zh"));
+
+    await handleWechatMessage(runtime.dependencies, activeConnection, "bot-secret", {
+      message_id: 45,
+      message_type: 1,
+      from_user_id: activeConnection.ownerIlinkUserId,
+      context_token: "context-first",
+      item_list: [{ type: 1, text_item: { text: "开始" } }]
+    });
+
+    expect(runtime.tomeet.startOnboarding).toHaveBeenCalledTimes(1);
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+      ...adventurexWelcomeBubbles.zh,
+      "Agent reply"
+    ]);
+    expect(runtime.ilink.sendText.mock.calls.slice(0, 4).map(([input]) => input.runId)).toEqual([
+      `first-inbound-welcome-${activeConnection.id}-45-bubble-1`,
+      `first-inbound-welcome-${activeConnection.id}-45-bubble-2`,
+      `first-inbound-welcome-${activeConnection.id}-45-bubble-3`,
+      `first-inbound-welcome-${activeConnection.id}-45-bubble-4`
+    ]);
+    expect(activeConnection.lastMessageAt).not.toBeNull();
+
+    runtime.tomeet.startOnboarding.mockClear();
+    runtime.ilink.sendText.mockClear();
+    await handleWechatMessage(runtime.dependencies, activeConnection, "bot-secret", {
+      message_id: 46,
+      message_type: 1,
+      from_user_id: activeConnection.ownerIlinkUserId,
+      context_token: "context-second",
+      item_list: [{ type: 1, text_item: { text: "第二条" } }]
+    });
+
+    expect(runtime.tomeet.startOnboarding).not.toHaveBeenCalled();
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+      "Agent reply"
+    ]);
+  });
+
+  it("groups multiple inbound image messages into one vision request and one reply", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    runtime.ilink.getUpdates.mockResolvedValueOnce({
+      ret: 0,
+      get_updates_buf: "cursor-1",
+      msgs: [
+        {
+          message_id: 51,
+          message_type: 1,
+          from_user_id: activeConnection.ownerIlinkUserId,
+          context_token: "context-51",
+          item_list: [{
+            type: 2,
+            image_item: { media: { encrypt_query_param: "image-1" } }
+          }]
+        },
+        {
+          message_id: 52,
+          message_type: 1,
+          from_user_id: activeConnection.ownerIlinkUserId,
+          context_token: "context-52",
+          item_list: [{
+            type: 2,
+            image_item: { media: { encrypt_query_param: "image-2" } }
+          }]
+        }
+      ]
+    });
+    runtime.dependencies.downloadImage = vi.fn(async (item) => ({
+      bytes: Uint8Array.from([Number(item.image_item?.media?.encrypt_query_param?.at(-1))]),
+      mimeType: "image/jpeg" as const
+    }));
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: new AbortController().signal,
+      turnBatchWindowMs: 10_000
+    });
+
+    expect(runtime.tomeet.sendImages).toHaveBeenCalledTimes(1);
+    expect(runtime.tomeet.sendImages).toHaveBeenCalledWith(expect.objectContaining({
+      connectionId: activeConnection.id,
+      generationToken: expect.any(String),
+      messageIds: ["51", "52"],
+      userId: activeConnection.userId,
+      images: [
+        { bytes: Uint8Array.from([1]), mimeType: "image/jpeg" },
+        { bytes: Uint8Array.from([2]), mimeType: "image/jpeg" }
+      ]
+    }));
+    expect(runtime.ilink.sendText).toHaveBeenCalledTimes(1);
+    expect(runtime.ilink.sendText).toHaveBeenCalledWith(expect.objectContaining({
+      text: "Image batch reply",
+      contextToken: "context-52"
+    }));
+    expect(runtime.store.completeWechatMessage).toHaveBeenCalledWith(activeConnection.id, "51");
+    expect(runtime.store.completeWechatMessage).toHaveBeenCalledWith(activeConnection.id, "52");
+  });
+
+  it("re-analyzes an active image batch together with all newer messages", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    let markImageStarted!: () => void;
+    const imageStarted = new Promise<void>((resolve) => {
+      markImageStarted = resolve;
+    });
+    let resolveFirstVision!: (result: { reply: string; stale: boolean }) => void;
+    const firstVision = new Promise<{ reply: string; stale: boolean }>((resolve) => {
+      resolveFirstVision = resolve;
+    });
+    let generationRegistrations = 0;
+    runtime.tomeet.setResponseGeneration.mockImplementation(async () => {
+      generationRegistrations += 1;
+      if (generationRegistrations === 2) {
+        resolveFirstVision({ reply: "Outdated image reply", stale: false });
+      }
+      if (generationRegistrations === 3) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    });
+    runtime.tomeet.sendImages
+      .mockImplementationOnce(async () => {
+        markImageStarted();
+        return firstVision;
+      })
+      .mockResolvedValueOnce({ reply: "Combined image and text reply", stale: false });
+    runtime.dependencies.downloadImage = vi.fn(async () => ({
+      bytes: Uint8Array.from([7]),
+      mimeType: "image/jpeg" as const
+    }));
+    let updatePoll = 0;
+    runtime.ilink.getUpdates.mockImplementation(async () => {
+      updatePoll += 1;
+      if (updatePoll === 1) {
+        return {
+          ret: 0,
+          get_updates_buf: "cursor-image",
+          msgs: [{
+            message_id: 71,
+            message_type: 1,
+            from_user_id: activeConnection.ownerIlinkUserId,
+            item_list: [{
+              type: 2,
+              image_item: { media: { encrypt_query_param: "image-7" } }
+            }]
+          }]
+        };
+      }
+      await imageStarted;
+      return {
+        ret: 0,
+        get_updates_buf: "cursor-text-after-image",
+        msgs: [
+          {
+            message_id: 72,
+            message_type: 1,
+            from_user_id: activeConnection.ownerIlinkUserId,
+            item_list: [{ type: 1, text_item: { text: "这张照片是我上周拍的" } }]
+          },
+          {
+            message_id: 73,
+            message_type: 1,
+            from_user_id: activeConnection.ownerIlinkUserId,
+            context_token: "context-73",
+            item_list: [{ type: 1, text_item: { text: "是在苏州河边" } }]
+          }
+        ]
+      };
+    });
+    runtime.store.updateWechatConnectionCursor
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: new AbortController().signal,
+      turnBatchWindowMs: 0
+    });
+
+    expect(runtime.tomeet.sendImages).toHaveBeenCalledTimes(2);
+    expect(runtime.tomeet.sendImages.mock.calls[1]?.[0]).toMatchObject({
+      messageIds: ["71", "72", "73"],
+      images: [{ bytes: Uint8Array.from([7]), mimeType: "image/jpeg" }],
+      hint: "这张照片是我上周拍的\n是在苏州河边"
+    });
+    expect(runtime.ilink.sendText).toHaveBeenCalledTimes(1);
+    expect(runtime.ilink.sendText).toHaveBeenCalledWith(expect.objectContaining({
+      text: "Combined image and text reply",
+      contextToken: "context-73"
+    }));
+  });
+
+  it("groups consecutive text bubbles into one Agent turn", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    runtime.ilink.getUpdates.mockResolvedValueOnce({
+      ret: 0,
+      get_updates_buf: "cursor-text",
+      msgs: [
+        {
+          message_id: 61,
+          message_type: 1,
+          from_user_id: activeConnection.ownerIlinkUserId,
+          item_list: [{ type: 1, text_item: { text: "我平时喜欢拍城市夜景" } }]
+        },
+        {
+          message_id: 62,
+          message_type: 1,
+          from_user_id: activeConnection.ownerIlinkUserId,
+          context_token: "context-62",
+          item_list: [{ type: 1, text_item: { text: "最近也在学胶片摄影" } }]
+        }
+      ]
+    });
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: new AbortController().signal,
+      turnBatchWindowMs: 10_000
+    });
+
+    expect(runtime.tomeet.sendTextBatch).toHaveBeenCalledTimes(1);
+    expect(runtime.tomeet.sendTextBatch).toHaveBeenCalledWith(expect.objectContaining({
+      messageIds: ["61", "62"],
+      contents: ["我平时喜欢拍城市夜景", "最近也在学胶片摄影"]
+    }));
+    expect(runtime.ilink.sendText).toHaveBeenCalledTimes(1);
+  });
+
   it("sends a multi-sentence Agent reply one bubble at a time", async () => {
     const runtime = setup();
-    runtime.tomeet.sendText.mockResolvedValue("先确认一下。你更想认识做产品的人吗？\n\n也可以继续说说你的雷点。");
+    runtime.tomeet.sendTextBatch.mockResolvedValue({
+      reply: "先确认一下。你更想认识做产品的人吗？\n\n也可以继续说说你的雷点。",
+      stale: false
+    });
     const activeConnection = connection(runtime.cipher);
 
     await handleWechatMessage(runtime.dependencies, activeConnection, "bot-secret", {
@@ -244,7 +496,7 @@ describe("WeChat worker runtime", () => {
       }
     )).resolves.toBe(false);
 
-    expect(runtime.tomeet.sendText).not.toHaveBeenCalled();
+    expect(runtime.tomeet.sendTextBatch).not.toHaveBeenCalled();
     expect(runtime.ilink.sendText).not.toHaveBeenCalled();
   });
 

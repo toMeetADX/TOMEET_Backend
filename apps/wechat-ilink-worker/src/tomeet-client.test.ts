@@ -31,6 +31,40 @@ function completedJob(reply: string) {
 }
 
 describe("TomeetClient", () => {
+  it("claims the persisted onboarding welcome for the first WeChat message", async () => {
+    const now = new Date().toISOString();
+    let requestedUrl = "";
+    let postedBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requestedUrl = String(input);
+      postedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        message: {
+          id: "welcome-1",
+          userId: "25000000-0000-4000-8000-000000000001",
+          role: "assistant",
+          content: "你好呀👋",
+          sourceChannel: "system",
+          replyToMessageId: null,
+          createdAt: now
+        }
+      }), { headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TomeetClient({
+      baseUrl: "https://api.example.com",
+      internalApiToken: "internal-test-token"
+    });
+
+    await expect(client.startOnboarding({
+      userId: "25000000-0000-4000-8000-000000000001"
+    })).resolves.toBe("你好呀👋");
+    expect(requestedUrl).toBe(
+      "https://api.example.com/internal/users/25000000-0000-4000-8000-000000000001/adventurex-onboarding/start"
+    );
+    expect(postedBody).toEqual({ language: "zh" });
+  });
+
   it("returns the assistant message directly from a completed job", async () => {
     let postedBody: Record<string, unknown> | undefined;
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -90,6 +124,48 @@ describe("TomeetClient", () => {
       content: "排队"
     })).resolves.toBe("稍后回复");
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("submits an image batch as one multimodal job", async () => {
+    let requestedUrl = "";
+    let postedBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requestedUrl = String(input);
+      postedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        job: { ...completedJob("两张图片放在一起看，最吸引你的是哪一处？"), type: "multimodal_understanding" }
+      }), { headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new TomeetClient({
+      baseUrl: "https://api.example.com",
+      internalApiToken: "internal-test-token"
+    });
+
+    await expect(client.sendImages({
+      connectionId: "connection-images",
+      generationToken: "generation-images",
+      messageIds: ["image-1", "image-2"],
+      userId: "25000000-0000-4000-8000-000000000001",
+      images: [
+        { bytes: Uint8Array.from([1, 2]), mimeType: "image/jpeg" },
+        { bytes: Uint8Array.from([3, 4]), mimeType: "image/png" }
+      ]
+    })).resolves.toEqual({
+      reply: "两张图片放在一起看，最吸引你的是哪一处？",
+      stale: false
+    });
+    expect(requestedUrl).toBe("https://api.example.com/internal/agent/multimodal-inputs");
+    expect(postedBody).toMatchObject({
+      userId: "25000000-0000-4000-8000-000000000001",
+      connectionId: "connection-images",
+      generationToken: "generation-images",
+      images: [
+        { dataBase64: "AQI=", mimeType: "image/jpeg" },
+        { dataBase64: "AwQ=", mimeType: "image/png" }
+      ]
+    });
+    expect(String(postedBody?.idempotencyKey)).toMatch(/^wechat:[a-f0-9]{64}$/);
   });
 
   it("never substitutes a shared Web history message for a missing WeChat reply", async () => {

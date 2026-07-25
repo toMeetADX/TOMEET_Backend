@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { MockAgentIntelligence } from "@tomeet/agent-core";
-import { adventurexWelcomeBubbles } from "@tomeet/contracts";
+import { adventurexWelcomeContent } from "@tomeet/contracts";
 import { MemoryStore, MemoryWechatStore } from "@tomeet/data";
 import { JobProcessor } from "@tomeet/intelligence";
 import { MockMatchmakingIntelligence } from "@tomeet/matchmaking";
@@ -189,10 +189,17 @@ describe("WeChat one-time QR onboarding", () => {
     const firstUserId = firstIdentity!.userId;
     expect((await store.getUserModel(firstUserId)).userId).toBe(firstUserId);
     expect(enqueueWelcome).not.toHaveBeenCalled();
-    expect(sentMessages.map((body) => (
-      body.msg as { item_list?: Array<{ text_item?: { text?: string } }> }
-    ).item_list?.[0]?.text_item?.text)).toEqual(adventurexWelcomeBubbles.zh);
-    expect((await store.ensureAdventurexOnboardingState(firstUserId)).preferredLanguage).toBe("zh");
+    expect(sentMessages).toEqual([]);
+    expect(await store.listRecentMessages(firstUserId)).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: adventurexWelcomeContent("zh")
+      })
+    ]);
+    expect(await store.ensureAdventurexOnboardingState(firstUserId)).toMatchObject({
+      preferredLanguage: "zh",
+      welcomeSentAt: expect.any(String)
+    });
 
     const secondCreate = await app.inject({
       method: "POST",
@@ -209,8 +216,121 @@ describe("WeChat one-time QR onboarding", () => {
     expect(secondConfirmed.json()).not.toHaveProperty("userId");
     expect(await store.resolveChannelIdentity("wechat", "wechat-owner-1"))
       .toMatchObject({ userId: firstUserId });
-    expect(sentMessages).toHaveLength(adventurexWelcomeBubbles.zh.length);
+    expect(sentMessages).toEqual([]);
+    expect(await store.listRecentMessages(firstUserId)).toHaveLength(1);
     expect(verifyAccessToken).not.toHaveBeenCalled();
+  });
+
+  it("claims activation once when concurrent QR polls both observe confirmation", async () => {
+    const confirmed = {
+      status: "confirmed",
+      bot_token: "bot-secret",
+      ilink_bot_id: "bot-concurrent",
+      baseurl: "https://ilink-api.example.com",
+      ilink_user_id: "wechat-owner-concurrent"
+    };
+    const { app, store, sentMessages } = await setup([confirmed, confirmed]);
+    const created = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    const session = created.json();
+
+    const responses = await Promise.all([1, 2].map(() => app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${session.sessionId}`,
+      headers: { "x-wechat-session-token": session.sessionToken }
+    })));
+
+    expect(responses.map((response) => ({ code: response.statusCode, body: response.json() })))
+      .toEqual([
+        { code: 200, body: expect.objectContaining({ status: "active" }) },
+        { code: 200, body: expect.objectContaining({ status: "active" }) }
+      ]);
+    expect(sentMessages).toEqual([]);
+    const identity = await store.resolveChannelIdentity("wechat", "wechat-owner-concurrent");
+    expect(identity).not.toBeNull();
+    expect(await store.listRecentMessages(identity!.userId)).toEqual([
+      expect.objectContaining({ content: adventurexWelcomeContent("zh") })
+    ]);
+  });
+
+  it("keeps polling a claimed QR after the frontend refreshes the displayed code", async () => {
+    const ownerIlinkUserId = "wechat-owner-background-confirmation";
+    const { app, store, wechatStore, sentMessages } = await setup([
+      { status: "scaned" },
+      {
+        status: "confirmed",
+        bot_token: "background-bot-secret",
+        ilink_bot_id: "background-bot",
+        baseurl: "https://ilink-api.example.com",
+        ilink_user_id: ownerIlinkUserId
+      }
+    ]);
+    const created = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    const claimedSession = created.json();
+
+    const scanned = await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${claimedSession.sessionId}`,
+      headers: { "x-wechat-session-token": claimedSession.sessionToken }
+    });
+    expect(scanned.json()).toMatchObject({ status: "scanned" });
+
+    const replacement = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    expect(replacement.json()).toMatchObject({
+      status: "pending",
+      qrCodeContent: "weixin://connect/2"
+    });
+
+    await vi.waitFor(async () => {
+      expect(await wechatStore.getWechatSession(claimedSession.sessionId))
+        .toMatchObject({ status: "active" });
+      expect(sentMessages).toEqual([]);
+    });
+    expect(await store.resolveChannelIdentity("wechat", ownerIlinkUserId)).not.toBeNull();
+  });
+
+  it("accepts scaned as the terminal handshake when it already carries credentials", async () => {
+    const { app, store, wechatStore, sentMessages } = await setup([{
+      status: "scaned",
+      bot_token: "scaned-bot-secret",
+      ilink_bot_id: "scaned-bot",
+      ilink_user_id: "wechat-owner-scaned-with-credentials"
+    }]);
+    const created = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    const session = created.json();
+    const scanned = await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${session.sessionId}`,
+      headers: { "x-wechat-session-token": session.sessionToken }
+    });
+
+    expect(scanned.json()).toMatchObject({ status: "scanned" });
+    await vi.waitFor(async () => {
+      expect(await wechatStore.getWechatSession(session.sessionId))
+        .toMatchObject({ status: "active" });
+      expect(sentMessages).toEqual([]);
+    });
+    const identity = await store.resolveChannelIdentity(
+      "wechat",
+      "wechat-owner-scaned-with-credentials"
+    );
+    expect(identity).not.toBeNull();
+    expect(await store.listRecentMessages(identity!.userId)).toHaveLength(1);
   });
 
   it("supports server-side QR creation for an existing profile", async () => {
@@ -249,6 +369,42 @@ describe("WeChat one-time QR onboarding", () => {
     expect(confirmed.json()).toMatchObject({ status: "active" });
     expect(await store.resolveChannelIdentity("wechat", owner))
       .toMatchObject({ userId });
+  });
+
+  it("protects and idempotently exposes the first-inbound onboarding welcome", async () => {
+    const internalApiToken = "internal-onboarding-token-at-least-32-characters";
+    const { app, store } = await setup([], internalApiToken);
+    const userId = randomUUID();
+
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: `/internal/users/${userId}/adventurex-onboarding/start`,
+      payload: { language: "zh" }
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const first = await app.inject({
+      method: "POST",
+      url: `/internal/users/${userId}/adventurex-onboarding/start`,
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload: { language: "zh" }
+    });
+    const second = await app.inject({
+      method: "POST",
+      url: `/internal/users/${userId}/adventurex-onboarding/start`,
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload: { language: "zh" }
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(first.json()).toMatchObject({
+      message: { content: adventurexWelcomeContent("zh") }
+    });
+    expect(second.json().message.id).toBe(first.json().message.id);
+    expect(await store.listRecentMessages(userId)).toEqual([
+      expect.objectContaining({ id: first.json().message.id })
+    ]);
   });
 
   it("binds an authenticated Web QR session to the same shared profile", async () => {

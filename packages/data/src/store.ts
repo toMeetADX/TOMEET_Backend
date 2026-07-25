@@ -149,6 +149,18 @@ export interface DataStore {
     sourceChannel?: Message["sourceChannel"];
     replyToMessageId?: string | null;
   }): Promise<Message>;
+  setWechatResponseGeneration(connectionId: string, generationToken: string): Promise<void>;
+  isWechatResponseGenerationCurrent(connectionId: string, generationToken: string): Promise<boolean>;
+  appendMessageIfWechatGenerationCurrent(input: {
+    connectionId: string;
+    generationToken: string;
+    userId: string;
+    role: "user" | "assistant";
+    content: string;
+    idempotencyKey?: string;
+    sourceChannel?: Message["sourceChannel"];
+    replyToMessageId?: string | null;
+  }): Promise<Message | null>;
   listRecentMessages(userId: string, limit?: number): Promise<Message[]>;
   listMessagesRange(userId: string, offset: number, limit: number): Promise<Message[]>;
   countMessages(userId: string): Promise<number>;

@@ -405,6 +405,54 @@ export class SupabaseStore implements DataStore {
     return mapMessage(unwrapRpcData(data) as JsonRow);
   }
 
+  async setWechatResponseGeneration(connectionId: string, generationToken: string): Promise<void> {
+    const { error } = await this.client.rpc("set_wechat_response_generation", {
+      p_connection_id: connectionId,
+      p_generation_token: generationToken
+    });
+    if (error) this.throwError("更新微信回复代次", error);
+  }
+
+  async isWechatResponseGenerationCurrent(
+    connectionId: string,
+    generationToken: string
+  ): Promise<boolean> {
+    const { data, error } = await this.client.rpc("is_wechat_response_generation_current", {
+      p_connection_id: connectionId,
+      p_generation_token: generationToken
+    });
+    if (error) this.throwError("检查微信回复代次", error);
+    return data === true;
+  }
+
+  async appendMessageIfWechatGenerationCurrent(input: {
+    connectionId: string;
+    generationToken: string;
+    userId: string;
+    role: "user" | "assistant";
+    content: string;
+    idempotencyKey?: string;
+    sourceChannel?: Message["sourceChannel"];
+    replyToMessageId?: string | null;
+  }): Promise<Message | null> {
+    const { data, error } = await this.client.rpc(
+      "append_agent_message_if_wechat_generation_current",
+      {
+        p_connection_id: input.connectionId,
+        p_generation_token: input.generationToken,
+        p_user_id: input.userId,
+        p_role: input.role,
+        p_content: input.content,
+        p_idempotency_key: input.idempotencyKey ?? null,
+        p_source_channel: input.sourceChannel ?? "wechat",
+        p_reply_to_message_id: input.replyToMessageId ?? null
+      }
+    );
+    if (error) this.throwError("按微信回复代次写入消息", error);
+    const result = unwrapRpcData(data);
+    return result ? mapMessage(result as JsonRow) : null;
+  }
+
   async listRecentMessages(userId: string, limit = 50): Promise<Message[]> {
     const { data, error } = await this.client
       .from("messages")

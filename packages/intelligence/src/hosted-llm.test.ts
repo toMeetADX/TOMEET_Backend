@@ -799,6 +799,32 @@ describe("hosted Agent product-event composition", () => {
 });
 
 describe("hosted vibe matchmaking", () => {
+  it("sends a group of images to one vision request and asks one combined question", async () => {
+    const requestBodies = stubChatResponses({
+      observableDetails: ["两张图里都出现了夜间城市光线"],
+      uncertainty: ["无法确定拍摄地点"],
+      suggestedQuestion: "这组夜景里你最想保留的是哪种感觉？",
+      reply: "这几张图放在一起有一种连续的夜间漫游感\n\n你最想保留的是哪种感觉？"
+    });
+
+    const result = await hostedWithSearch().understandMultimodal({
+      kind: "image",
+      storagePaths: ["https://storage.example/one.jpg", "https://storage.example/two.jpg"],
+      mimeTypes: ["image/jpeg", "image/jpeg"],
+      preferredLanguage: "zh"
+    });
+
+    expect(result.reply).toContain("哪种感觉");
+    const payload = JSON.parse(requestBodies[0]!) as {
+      messages: Array<{ content: string | Array<{ type: string; image_url?: { url: string } }> }>;
+    };
+    const content = payload.messages[1]!.content;
+    expect(Array.isArray(content)).toBe(true);
+    expect((content as Array<{ type: string }>).filter((item) => item.type === "image_url"))
+      .toHaveLength(2);
+    expect(requestBodies[0]).toContain("作为一个整体理解");
+  });
+
   it("sends continuous multimodal vibe context without any matching tags", async () => {
     let requestBody = "";
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {

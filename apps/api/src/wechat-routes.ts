@@ -8,7 +8,8 @@ import {
   sessionTokenMatches,
   type WechatConnectionSession,
   type WechatConnectionSessionStatus,
-  type WechatILinkClient
+  type WechatILinkClient,
+  type WechatQrStatus
 } from "@tomeet/wechat-ilink";
 import { uuidSchema } from "@tomeet/contracts";
 
@@ -36,12 +37,25 @@ export interface WechatActivationContext {
   deliverText?: (input: { text: string; runId: string }) => Promise<void>;
 }
 
+interface WechatActivationCredentials {
+  botToken: string;
+  ilinkBotId: string;
+  ilinkUserId: string;
+  baseUrl: string;
+}
+
+type ScannedSessionHandler = (
+  session: WechatConnectionSession,
+  credentials?: WechatActivationCredentials
+) => void;
+
 interface RegisterWechatRoutesOptions {
   runtime?: WechatApiRuntime;
   internalApiEnabled: boolean;
   internalTokenMatches(candidate: unknown): boolean;
   publicSessionRateLimitMax?: number;
   rapidQrAccessTokenMatches?(accessToken: string): Promise<boolean>;
+  isNewWechatIdentity?(externalUserId: string): Promise<boolean>;
   onActivated?(context: WechatActivationContext): Promise<void>;
 }
 
@@ -99,6 +113,25 @@ function ensureHttpsBaseUrl(value: string): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
+function activationCredentials(
+  result: WechatQrStatus,
+  fallbackBaseUrl: string
+): WechatActivationCredentials | null {
+  if (
+    !result.botToken
+    || !result.ilinkBotId
+    || !result.ilinkUserId
+  ) {
+    return null;
+  }
+  return {
+    botToken: result.botToken,
+    ilinkBotId: result.ilinkBotId,
+    ilinkUserId: result.ilinkUserId,
+    baseUrl: result.baseUrl ?? fallbackBaseUrl
+  };
+}
+
 async function requireSession(
   runtime: WechatApiRuntime,
   request: FastifyRequest,
@@ -118,12 +151,69 @@ async function requireSession(
   return session;
 }
 
+async function activateSession(
+  runtime: WechatApiRuntime,
+  session: WechatConnectionSession,
+  credentials: WechatActivationCredentials,
+  onActivated?: (context: WechatActivationContext) => Promise<void>,
+  isNewWechatIdentity?: (externalUserId: string) => Promise<boolean>
+): Promise<WechatConnectionSession> {
+  let baseUrl: string;
+  try {
+    baseUrl = ensureHttpsBaseUrl(credentials.baseUrl);
+  } catch {
+    return runtime.store.updateWechatSession(session.id, {
+      status: "failed",
+      errorCode: "invalid_confirmation_host",
+      errorMessage: "微信返回了无效的服务地址，请重新生成二维码"
+    }, {
+      ifStatusIn: NON_TERMINAL_SESSION_STATUSES
+    });
+  }
+  const shouldSendActivationWelcome = onActivated && isNewWechatIdentity
+    ? await isNewWechatIdentity(credentials.ilinkUserId)
+    : true;
+  const activation = await runtime.store.activateWechatSession({
+    sessionId: session.id,
+    newUserId: randomUUID(),
+    ownerIlinkUserId: credentials.ilinkUserId,
+    ilinkBotId: credentials.ilinkBotId,
+    botTokenCiphertext: runtime.cipher.encrypt(
+      credentials.botToken,
+      `wechat-connection:${credentials.ilinkUserId}`
+    ),
+    baseUrl
+  });
+  if (
+    activation.session.userId
+    && onActivated
+    && shouldSendActivationWelcome
+    && await runtime.store.claimWechatActivationCallback(session.id)
+  ) {
+    await onActivated({
+      userId: activation.session.userId,
+      deliverText: async ({ text, runId }) => {
+        await runtime.client.sendText({
+          baseUrl,
+          botToken: credentials.botToken,
+          toUserId: credentials.ilinkUserId,
+          text,
+          runId
+        });
+      }
+    });
+  }
+  return activation.session;
+}
+
 async function pollSession(
   runtime: WechatApiRuntime,
   session: WechatConnectionSession,
   verifyCode?: string,
   signal?: AbortSignal,
-  onActivated?: (context: WechatActivationContext) => Promise<void>
+  onActivated?: (context: WechatActivationContext) => Promise<void>,
+  isNewWechatIdentity?: (externalUserId: string) => Promise<boolean>,
+  onScanned?: ScannedSessionHandler
 ): Promise<WechatConnectionSession> {
   if (isTerminalSession(session)) return session;
   if (new Date(session.expiresAt).getTime() <= Date.now()) {
@@ -150,14 +240,23 @@ async function pollSession(
   switch (result.status) {
     case "wait":
       return (await runtime.store.getWechatSession(session.id)) ?? session;
-    case "scaned":
-      return runtime.store.updateWechatSession(session.id, {
+    case "scaned": {
+      const scanned = await runtime.store.updateWechatSession(session.id, {
         status: "scanned",
         errorCode: null,
         errorMessage: null
       }, {
         ifStatusIn: ["pending", "scanned"]
       });
+      const credentials = activationCredentials(result, session.pollBaseUrl);
+      if (onScanned) {
+        onScanned(scanned, credentials ?? undefined);
+        return scanned;
+      }
+      return credentials
+        ? activateSession(runtime, scanned, credentials, onActivated, isNewWechatIdentity)
+        : scanned;
+    }
     case "need_verifycode":
       return runtime.store.updateWechatSession(session.id, {
         status: "verification_required",
@@ -191,33 +290,38 @@ async function pollSession(
         ifStatusIn: NON_TERMINAL_SESSION_STATUSES
       });
     case "scaned_but_redirect": {
-      if (!result.redirectHost) return session;
-      let pollBaseUrl: string;
-      try {
-        pollBaseUrl = ensureHttpsBaseUrl(result.redirectHost);
-      } catch {
-        return runtime.store.updateWechatSession(session.id, {
-          status: "failed",
-          errorCode: "invalid_redirect_host",
-          errorMessage: "微信返回了无效的重定向地址，请重新生成二维码"
-        }, {
-          ifStatusIn: NON_TERMINAL_SESSION_STATUSES
-        });
+      let pollBaseUrl = session.pollBaseUrl;
+      if (result.redirectHost) {
+        try {
+          pollBaseUrl = ensureHttpsBaseUrl(result.redirectHost);
+        } catch {
+          return runtime.store.updateWechatSession(session.id, {
+            status: "failed",
+            errorCode: "invalid_redirect_host",
+            errorMessage: "微信返回了无效的重定向地址，请重新生成二维码"
+          }, {
+            ifStatusIn: NON_TERMINAL_SESSION_STATUSES
+          });
+        }
       }
-      return runtime.store.updateWechatSession(session.id, {
+      const scanned = await runtime.store.updateWechatSession(session.id, {
         status: "scanned",
         pollBaseUrl
       }, {
         ifStatusIn: ["pending", "scanned"]
       });
+      const credentials = activationCredentials(result, pollBaseUrl);
+      if (onScanned) {
+        onScanned(scanned, credentials ?? undefined);
+        return scanned;
+      }
+      return credentials
+        ? activateSession(runtime, scanned, credentials, onActivated, isNewWechatIdentity)
+        : scanned;
     }
     case "confirmed": {
-      if (
-        !result.botToken
-        || !result.ilinkBotId
-        || !result.ilinkUserId
-        || !result.baseUrl
-      ) {
+      const credentials = activationCredentials(result, session.pollBaseUrl);
+      if (!credentials) {
         return runtime.store.updateWechatSession(session.id, {
           status: "failed",
           errorCode: "invalid_confirmation",
@@ -226,44 +330,13 @@ async function pollSession(
           ifStatusIn: NON_TERMINAL_SESSION_STATUSES
         });
       }
-      let baseUrl: string;
-      try {
-        baseUrl = ensureHttpsBaseUrl(result.baseUrl);
-      } catch {
-        return runtime.store.updateWechatSession(session.id, {
-          status: "failed",
-          errorCode: "invalid_confirmation_host",
-          errorMessage: "微信返回了无效的服务地址，请重新生成二维码"
-        }, {
-          ifStatusIn: NON_TERMINAL_SESSION_STATUSES
-        });
-      }
-      const activation = await runtime.store.activateWechatSession({
-        sessionId: session.id,
-        newUserId: randomUUID(),
-        ownerIlinkUserId: result.ilinkUserId,
-        ilinkBotId: result.ilinkBotId,
-        botTokenCiphertext: runtime.cipher.encrypt(
-          result.botToken,
-          `wechat-connection:${result.ilinkUserId}`
-        ),
-        baseUrl
-      });
-      if (activation.session.userId && onActivated) {
-        await onActivated({
-          userId: activation.session.userId,
-          deliverText: async ({ text, runId }) => {
-            await runtime.client.sendText({
-              baseUrl,
-              botToken: result.botToken!,
-              toUserId: result.ilinkUserId!,
-              text,
-              runId
-            });
-          }
-        });
-      }
-      return activation.session;
+      return activateSession(
+        runtime,
+        session,
+        credentials,
+        onActivated,
+        isNewWechatIdentity
+      );
     }
   }
 }
@@ -272,6 +345,61 @@ export function registerWechatRoutes(
   app: FastifyInstance,
   options: RegisterWechatRoutesOptions
 ): void {
+  const claimedSessionMonitors = new Map<string, {
+    controller: AbortController;
+    task: Promise<void>;
+  }>();
+
+  const monitorScannedSession: ScannedSessionHandler = (session, credentials) => {
+    const runtime = options.runtime;
+    if (!runtime || claimedSessionMonitors.has(session.id)) return;
+    app.log.info({
+      sessionId: session.id,
+      hasActivationCredentials: Boolean(credentials),
+      event: "wechat_qr_scanned"
+    });
+    const controller = new AbortController();
+    const task = Promise.resolve().then(async () => {
+      let current = session;
+      if (credentials) {
+        current = await activateSession(
+          runtime,
+          current,
+          credentials,
+          options.onActivated,
+          options.isNewWechatIdentity
+        );
+      }
+      while (!controller.signal.aborted && current.status === "scanned") {
+        current = await pollSession(
+          runtime,
+          current,
+          undefined,
+          controller.signal,
+          options.onActivated,
+          options.isNewWechatIdentity
+        );
+      }
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) {
+        app.log.error({
+          err: error,
+          sessionId: session.id,
+          event: "wechat_claimed_session_monitor_failed"
+        });
+      }
+    }).finally(() => {
+      claimedSessionMonitors.delete(session.id);
+    });
+    claimedSessionMonitors.set(session.id, { controller, task });
+  };
+
+  app.addHook("onClose", async () => {
+    const monitors = [...claimedSessionMonitors.values()];
+    for (const monitor of monitors) monitor.controller.abort();
+    await Promise.allSettled(monitors.map((monitor) => monitor.task));
+  });
+
   async function createSession(requestedUserId?: string) {
     const runtime = options.runtime;
     if (!runtime) return null;
@@ -409,7 +537,20 @@ export function registerWechatRoutes(
     }
     const session = await requireSession(runtime, request, reply);
     if (!session) return;
-    const current = await pollSession(runtime, session, undefined, undefined, options.onActivated);
+    let current = session;
+    if (current.status === "scanned") {
+      monitorScannedSession(current);
+    } else if (current.status !== "verification_required") {
+      current = await pollSession(
+        runtime,
+        current,
+        undefined,
+        undefined,
+        options.onActivated,
+        options.isNewWechatIdentity,
+        monitorScannedSession
+      );
+    }
     reply.header("Cache-Control", "no-store");
     return publicSession(current);
   });
@@ -464,11 +605,23 @@ export function registerWechatRoutes(
     try {
       pushSession();
       while (!closed && !isTerminalSession(current)) {
-        if (current.status === "verification_required") {
+        if (current.status === "scanned") {
+          monitorScannedSession(current);
+          await waitForSignal(250, controller.signal);
+          current = (await runtime.store.getWechatSession(current.id)) ?? current;
+        } else if (current.status === "verification_required") {
           await waitForSignal(500, controller.signal);
           current = (await runtime.store.getWechatSession(current.id)) ?? current;
         } else {
-          current = await pollSession(runtime, current, undefined, controller.signal, options.onActivated);
+          current = await pollSession(
+            runtime,
+            current,
+            undefined,
+            controller.signal,
+            options.onActivated,
+            options.isNewWechatIdentity,
+            monitorScannedSession
+          );
         }
         pushSession();
       }
@@ -501,7 +654,15 @@ export function registerWechatRoutes(
     const session = await requireSession(runtime, request, reply);
     if (!session) return;
     const { code } = verifyCodeSchema.parse(request.body);
-    const current = await pollSession(runtime, session, code, undefined, options.onActivated);
+    const current = await pollSession(
+      runtime,
+      session,
+      code,
+      undefined,
+      options.onActivated,
+      options.isNewWechatIdentity,
+      monitorScannedSession
+    );
     reply.header("Cache-Control", "no-store");
     return publicSession(current);
   });

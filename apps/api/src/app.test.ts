@@ -367,6 +367,73 @@ describe("TOMEET core flow", () => {
     });
   });
 
+  it("analyzes a WeChat image batch once and suppresses superseded replies", async () => {
+    const store = new MemoryStore();
+    const processor = new JobProcessor(store, new MockAgentIntelligence(), new MockMatchmakingIntelligence());
+    const internalApiToken = "test-internal-token-that-is-at-least-32-characters";
+    const app = await buildApp({ store, inlineProcessor: processor, internalApiToken });
+    apps.push(app);
+    const userId = randomUUID();
+    const connectionId = randomUUID();
+    const currentGeneration = randomUUID();
+    const generationResponse = await app.inject({
+      method: "POST",
+      url: "/internal/agent/response-generations",
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload: { connectionId, generationToken: currentGeneration }
+    });
+    expect(generationResponse.statusCode).toBe(204);
+
+    const imagesResponse = await app.inject({
+      method: "POST",
+      url: "/internal/agent/multimodal-inputs",
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload: {
+        userId,
+        connectionId,
+        generationToken: currentGeneration,
+        idempotencyKey: randomUUID(),
+        images: [
+          {
+            mimeType: "image/jpeg",
+            dataBase64: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]).toString("base64")
+          },
+          {
+            mimeType: "image/png",
+            dataBase64: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 4]).toString("base64")
+          }
+        ]
+      }
+    });
+    expect(imagesResponse.statusCode).toBe(200);
+    expect(imagesResponse.json().inputIds).toHaveLength(2);
+    expect(imagesResponse.json().job.result.message).toMatchObject({
+      role: "assistant",
+      sourceChannel: "wechat"
+    });
+    expect((await store.ensureAdventurexOnboardingState(userId)).stage).toBe("exploring");
+    expect((await store.listRecentMessages(userId)).filter((message) => message.role === "assistant"))
+      .toHaveLength(1);
+
+    const staleResponse = await app.inject({
+      method: "POST",
+      url: "/internal/agent/messages",
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload: {
+        userId,
+        displayName: "微信用户",
+        content: "这条回复已经被后续输入取代",
+        idempotencyKey: randomUUID(),
+        connectionId,
+        generationToken: randomUUID()
+      }
+    });
+    expect(staleResponse.statusCode).toBe(200);
+    expect(staleResponse.json().job.result).toMatchObject({ stale: true });
+    expect((await store.listRecentMessages(userId)).filter((message) => message.role === "assistant"))
+      .toHaveLength(1);
+  });
+
   it("auto-provisions deterministic channel users only when explicitly enabled", async () => {
     const store = new MemoryStore();
     const processor = new JobProcessor(store, new MockAgentIntelligence(), new MockMatchmakingIntelligence());
@@ -590,7 +657,8 @@ describe("TOMEET core flow", () => {
         idempotencyKey: randomUUID()
       }
     });
-    expect(switchedToEnglish.json().job.result.message.content).toBe(adventurexWelcomeContent("en"));
+    expect(switchedToEnglish.json().job.result.message.content).toContain("continue in English");
+    expect(switchedToEnglish.json().job.result.message.content).not.toContain("Hi there");
     expect((await store.ensureAdventurexOnboardingState(userId)).preferredLanguage).toBe("en");
 
     const englishUserId = randomUUID();

@@ -20,6 +20,11 @@ interface ApiErrorBody {
   message?: string;
 }
 
+export interface AgentTurnResult {
+  reply: string | null;
+  stale: boolean;
+}
+
 export class TomeetClientError extends Error {
   constructor(
     readonly status: number,
@@ -49,6 +54,26 @@ export class TomeetClient {
     this.pollIntervalMs = options.pollIntervalMs ?? 1000;
     this.pollAttempts = options.pollAttempts ?? 180;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 180_000;
+  }
+
+  async startOnboarding(input: { userId: string }): Promise<string | null> {
+    const response = await this.request<{ message?: unknown | null }>(
+      `/internal/users/${input.userId}/adventurex-onboarding/start`,
+      {
+        method: "POST",
+        body: JSON.stringify({ language: "zh" })
+      }
+    );
+    if (response.message == null) return null;
+    const message = messageSchema.parse(response.message);
+    if (message.role !== "assistant") {
+      throw new TomeetClientError(
+        502,
+        "onboarding_message_invalid",
+        "Onboarding endpoint returned a non-assistant message"
+      );
+    }
+    return message.content;
   }
 
   async sendText(input: {
@@ -89,6 +114,72 @@ export class TomeetClient {
     );
   }
 
+  async setResponseGeneration(input: {
+    connectionId: string;
+    generationToken: string;
+  }): Promise<void> {
+    await this.request("/internal/agent/response-generations", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  async sendTextBatch(input: {
+    connectionId: string;
+    generationToken: string;
+    messageIds: string[];
+    userId: string;
+    contents: string[];
+  }): Promise<AgentTurnResult> {
+    const content = input.contents.length === 1
+      ? input.contents[0]!
+      : input.contents.map((item, index) => `${index + 1}. ${item}`).join("\n");
+    const payload = agentMessageInputSchema.parse({
+      userId: input.userId,
+      displayName: "微信用户",
+      content,
+      idempotencyKey: idempotencyKey(input.connectionId, `turn:${input.messageIds.join(":")}`)
+    });
+    const response = await this.request<{ job: unknown }>("/internal/agent/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        ...payload,
+        connectionId: input.connectionId,
+        generationToken: input.generationToken
+      })
+    });
+    return this.waitForTurnResult(llmJobSchema.parse(response.job));
+  }
+
+  async sendImages(input: {
+    connectionId: string;
+    generationToken: string;
+    messageIds: string[];
+    userId: string;
+    images: Array<{
+      bytes: Uint8Array;
+      mimeType: "image/jpeg" | "image/png" | "image/webp";
+    }>;
+    hint?: string;
+  }): Promise<AgentTurnResult> {
+    const messageKey = idempotencyKey(input.connectionId, `images:${input.messageIds.join(":")}`);
+    const response = await this.request<{ job: unknown }>("/internal/agent/multimodal-inputs", {
+      method: "POST",
+      body: JSON.stringify({
+        userId: input.userId,
+        images: input.images.map((image) => ({
+          mimeType: image.mimeType,
+          dataBase64: Buffer.from(image.bytes).toString("base64")
+        })),
+        hint: input.hint,
+        idempotencyKey: messageKey,
+        connectionId: input.connectionId,
+        generationToken: input.generationToken
+      })
+    });
+    return this.waitForTurnResult(llmJobSchema.parse(response.job));
+  }
+
   async sendEvent(input: {
     connectionId: string;
     messageId: string;
@@ -126,6 +217,21 @@ export class TomeetClient {
       if (current.status === "completed" || current.status === "failed") return current;
     }
     throw new TomeetClientError(504, "agent_job_timeout", "Agent job timed out");
+  }
+
+  private async waitForTurnResult(initial: LlmJob): Promise<AgentTurnResult> {
+    const job = initial.status === "completed" || initial.status === "failed"
+      ? initial
+      : await this.waitForJob(initial);
+    if (job.status === "failed") {
+      throw new TomeetClientError(502, "agent_job_failed", job.error || "Agent job failed");
+    }
+    if (job.result?.stale === true) return { reply: null, stale: true };
+    const directReply = messageSchema.safeParse(job.result?.message);
+    if (directReply.success && directReply.data.role === "assistant") {
+      return { reply: directReply.data.content, stale: false };
+    }
+    throw new TomeetClientError(502, "assistant_reply_missing", "Agent job completed without its assistant message");
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {

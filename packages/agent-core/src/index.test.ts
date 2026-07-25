@@ -121,7 +121,7 @@ describe("mock agent intelligence", () => {
     expect(insight.reply).not.toContain("为什么");
   });
 
-  it("switches to English and replays the exact welcome", async () => {
+  it("switches to English without replaying the onboarding welcome", async () => {
     const intelligence = new MockAgentIntelligence();
     const context = buildAgentContext([], createDefaultUserModel("u1"), {
       onboardingState: {
@@ -137,7 +137,8 @@ describe("mock agent intelligence", () => {
 
     const insight = await intelligence.reply(context, "Please use English");
     expect(insight.onboardingTransition).toBe("language_en");
-    expect(insight.reply).toBe(adventurexWelcomeContent("en"));
+    expect(insight.reply).toContain("continue in English");
+    expect(insight.reply).not.toContain("Hi there");
     expect(insight.actions).toEqual([]);
   });
 

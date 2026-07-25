@@ -18,6 +18,7 @@ export class MemoryWechatStore implements WechatConnectionStore {
   private readonly connections = new Map<string, WechatConnection>();
   private readonly connectionByUser = new Map<string, string>();
   private readonly receipts = new Map<string, ReceiptStatus>();
+  private readonly claimedActivationCallbacks = new Set<string>();
 
   constructor(private readonly userStore: DataStore) {}
 
@@ -96,15 +97,28 @@ export class MemoryWechatStore implements WechatConnectionStore {
     ) {
       throw new StoreConflictError("该微信已关联其他 TOMEET profile");
     }
-    const userId = identity?.userId ?? session.requestedUserId ?? input.newUserId;
+    let userId = identity?.userId ?? session.requestedUserId ?? input.newUserId;
     await this.userStore.ensureUser(userId, "微信用户");
     if (!identity) {
-      await this.userStore.linkChannelIdentity({
-        provider: "wechat",
-        externalUserId: input.ownerIlinkUserId,
-        userId,
-        displayName: "微信用户"
-      });
+      try {
+        await this.userStore.linkChannelIdentity({
+          provider: "wechat",
+          externalUserId: input.ownerIlinkUserId,
+          userId,
+          displayName: "微信用户"
+        });
+      } catch (error) {
+        if (!(error instanceof StoreConflictError)) throw error;
+        const concurrentIdentity = await this.userStore.resolveChannelIdentity(
+          "wechat",
+          input.ownerIlinkUserId
+        );
+        if (!concurrentIdentity) throw error;
+        if (session.requestedUserId && concurrentIdentity.userId !== session.requestedUserId) {
+          throw new StoreConflictError("该微信已关联其他 TOMEET profile");
+        }
+        userId = concurrentIdentity.userId;
+      }
     }
 
     const now = new Date().toISOString();
@@ -156,6 +170,15 @@ export class MemoryWechatStore implements WechatConnectionStore {
       session: structuredClone(session),
       connection: structuredClone(connection)
     };
+  }
+
+  async claimWechatActivationCallback(sessionId: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.status !== "active" || this.claimedActivationCallbacks.has(sessionId)) {
+      return false;
+    }
+    this.claimedActivationCallbacks.add(sessionId);
+    return true;
   }
 
   async claimWechatConnections(input: {

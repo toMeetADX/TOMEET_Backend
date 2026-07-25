@@ -159,6 +159,14 @@ export class SupabaseWechatStore implements WechatConnectionStore {
     };
   }
 
+  async claimWechatActivationCallback(sessionId: string): Promise<boolean> {
+    const { data, error } = await this.client.rpc("claim_wechat_activation_callback", {
+      p_session_id: sessionId
+    });
+    if (error) this.throwError("Claim WeChat activation callback", error);
+    return data === true;
+  }
+
   async claimWechatConnections(input: {
     workerId: string;
     limit: number;

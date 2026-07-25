@@ -115,7 +115,14 @@ TOMEET_INTERNAL_API_TOKEN=<与 API 完全相同>
 TOMEET_API_URL=http://${{api.RAILWAY_PRIVATE_DOMAIN}}:${{api.PORT}}
 WECHAT_WORKER_CONCURRENCY=8
 WECHAT_WORKER_CLAIM_INTERVAL_MS=1000
+WECHAT_TURN_BATCH_WINDOW_MS=1200
+WECHAT_ILINK_CDN_BASE_URL=https://novac2c.cdn.weixin.qq.com/c2c
 ```
+
+`WECHAT_TURN_BATCH_WINDOW_MS` 用于把用户连续发送的文字和图片合并为一个输入轮次。
+同一轮里的多张图片会一次性交给视觉模型综合分析，并只生成一组回复。新消息在首个
+回复气泡发出前到达时，会使正在生成的旧回复失效并重新计算。图片 CDN 地址通常保持
+腾讯默认值，仅在 iLink 上游明确调整时修改。
 
 上例假设 Railway API service 名称严格为 `api`；若实际名称不同，变量引用中的
 service 名称也必须按大小写替换。service-to-service 流量使用 Railway 私网，

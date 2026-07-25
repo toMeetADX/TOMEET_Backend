@@ -48,6 +48,15 @@ const workerId = `${process.env.RAILWAY_REPLICA_ID ?? "local"}:${randomUUID().sl
 const concurrency = integerEnvironment("WECHAT_WORKER_CONCURRENCY", 8, 1, 32);
 const outboundConcurrency = integerEnvironment("WECHAT_OUTBOUND_CONCURRENCY", 20, 1, 100);
 const bubbleDelayMs = integerEnvironment("WECHAT_BUBBLE_DELAY_MS", 200, 0, 5_000);
+const legacyImageBatchWindowMs = integerEnvironment(
+  "WECHAT_IMAGE_BATCH_WINDOW_MS", 1200, 100, 10_000
+);
+const turnBatchWindowMs = integerEnvironment(
+  "WECHAT_TURN_BATCH_WINDOW_MS",
+  legacyImageBatchWindowMs,
+  100,
+  10_000
+);
 const claimIntervalMs = integerEnvironment(
   "WECHAT_WORKER_CLAIM_INTERVAL_MS",
   1000,
@@ -97,7 +106,9 @@ async function monitorConnection(connection: WechatConnection): Promise<void> {
     cipher,
     ilink,
     tomeet,
-    bubbleDelayMs
+    bubbleDelayMs,
+    turnBatchWindowMs,
+    imageCdnBaseUrl: process.env.WECHAT_ILINK_CDN_BASE_URL
   });
 }
 
@@ -153,7 +164,8 @@ async function run(): Promise<void> {
     worker: fingerprint(workerId),
     concurrency,
     outboundConcurrency,
-    bubbleDelayMs
+    bubbleDelayMs,
+    turnBatchWindowMs
   }));
   while (!abortController.signal.aborted) {
     const capacity = concurrency - active.size;

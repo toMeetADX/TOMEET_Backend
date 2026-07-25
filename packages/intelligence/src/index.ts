@@ -9,7 +9,6 @@ import {
   type AgentIntelligence
 } from "@tomeet/agent-core";
 import {
-  adventurexWelcomeContent,
   agentProductEventSchema,
   messageSourceChannelSchema,
   postEventFeedbackSchema,
@@ -145,6 +144,45 @@ export class JobProcessor {
     return this.options.adventurexMatchingV1 ?? false;
   }
 
+  private wechatGeneration(job: LlmJob): { connectionId: string; generationToken: string } | null {
+    const connectionId = job.payload.connectionId;
+    const generationToken = job.payload.generationToken;
+    return typeof connectionId === "string" && connectionId
+      && typeof generationToken === "string" && generationToken
+      ? { connectionId, generationToken }
+      : null;
+  }
+
+  private async isReplyGenerationCurrent(job: LlmJob): Promise<boolean> {
+    const generation = this.wechatGeneration(job);
+    return generation
+      ? this.store.isWechatResponseGenerationCurrent(
+          generation.connectionId,
+          generation.generationToken
+        )
+      : true;
+  }
+
+  private async appendAssistantReply(
+    job: LlmJob,
+    input: {
+      userId: string;
+      content: string;
+      idempotencyKey: string;
+      sourceChannel: import("@tomeet/contracts").Message["sourceChannel"];
+      replyToMessageId?: string | null;
+    }
+  ) {
+    const generation = this.wechatGeneration(job);
+    return generation
+      ? this.store.appendMessageIfWechatGenerationCurrent({
+          ...generation,
+          ...input,
+          role: "assistant"
+        })
+      : this.store.appendMessage({ ...input, role: "assistant" });
+  }
+
   private async scheduleMatchRequest(request: MatchRequest): Promise<{ roundId: string; jobId: string }> {
     const scheduled = await scheduleAdventurexMatchRequest(this.store, request, {
       roundBucketSeconds: this.options.roundBucketSeconds
@@ -277,7 +315,9 @@ export class JobProcessor {
       ),
       userMessageId
     );
-    let onboardingReplyOverride: string | null = null;
+    if (!(await this.isReplyGenerationCurrent(job))) {
+      return { stale: true, supersededBeforeCommit: true };
+    }
     if (insight.onboardingTransition === "image_declined") {
       await this.store.updateAdventurexOnboardingState(userId, { stage: "exploring", imageDeclined: true });
     } else if (insight.onboardingTransition === "engaged") {
@@ -286,10 +326,8 @@ export class JobProcessor {
       await this.store.updateAdventurexOnboardingState(userId, { boundaryPrompted: true });
     } else if (insight.onboardingTransition === "language_en") {
       await this.store.updateAdventurexOnboardingState(userId, { preferredLanguage: "en" });
-      onboardingReplyOverride = adventurexWelcomeContent("en");
     } else if (insight.onboardingTransition === "language_zh") {
       await this.store.updateAdventurexOnboardingState(userId, { preferredLanguage: "zh" });
-      onboardingReplyOverride = adventurexWelcomeContent("zh");
     }
     const messageIds = new Set((await this.store.listRecentMessages(userId, 100))
       .filter((message) => message.role === "user")
@@ -327,17 +365,17 @@ export class JobProcessor {
     }
     const actionErrors = actionResults.filter((result) => result.ok === false).map((result) => result.error);
     const replyOverride = actionResults.find((result) => typeof result.replyOverride === "string")?.replyOverride;
-    const replyContent = onboardingReplyOverride ?? (actionErrors.length
+    const replyContent = actionErrors.length
       ? `${insight.reply}\n\n不过这次操作暂时没有完成：${actionErrors.join("；")}`
-      : typeof replyOverride === "string" ? replyOverride : insight.reply);
-    const message = await this.store.appendMessage({
+      : typeof replyOverride === "string" ? replyOverride : insight.reply;
+    const message = await this.appendAssistantReply(job, {
       userId,
-      role: "assistant",
       content: replyContent,
       idempotencyKey: `agent-reply:${job.id}`,
       sourceChannel,
       replyToMessageId: userMessageId
     });
+    if (!message) return { stale: true, supersededBeforeCommit: false };
     const memoryJob = await this.store.enqueueJob({
       type: "memory_extract",
       payload: {
@@ -594,34 +632,48 @@ export class JobProcessor {
 
   private async processMultimodal(job: LlmJob): Promise<Record<string, unknown>> {
     const userId = requireString(job.payload, "userId");
-    const inputId = requireString(job.payload, "inputId");
+    const inputIds = Array.isArray(job.payload.inputIds)
+      ? job.payload.inputIds.filter((value): value is string => typeof value === "string" && Boolean(value))
+      : [requireString(job.payload, "inputId")];
     const kind = requireString(job.payload, "kind");
     if (kind !== "image" && kind !== "audio") throw new Error("多模态类型无效");
-    const [storagePath, onboardingState] = await Promise.all([
-      this.store.resolveStorageUrl(requireString(job.payload, "storagePath")),
+    const storagePaths = Array.isArray(job.payload.storagePaths)
+      ? job.payload.storagePaths.filter((value): value is string => typeof value === "string" && Boolean(value))
+      : [requireString(job.payload, "storagePath")];
+    const mimeTypes = Array.isArray(job.payload.mimeTypes)
+      ? job.payload.mimeTypes.filter((value): value is string => typeof value === "string" && Boolean(value))
+      : [requireString(job.payload, "mimeType")];
+    if (inputIds.length === 0 || inputIds.length !== storagePaths.length || storagePaths.length !== mimeTypes.length) {
+      throw new Error("多模态批次数据不完整");
+    }
+    const [resolvedStoragePaths, onboardingState] = await Promise.all([
+      Promise.all(storagePaths.map((storagePath) => this.store.resolveStorageUrl(storagePath))),
       this.store.ensureAdventurexOnboardingState(userId)
     ]);
     const understanding = await this.agent.understandMultimodal({
       kind,
-      storagePath,
-      mimeType: requireString(job.payload, "mimeType"),
+      storagePaths: resolvedStoragePaths,
+      mimeTypes,
       hint: typeof job.payload.hint === "string" ? job.payload.hint : undefined,
       preferredLanguage: onboardingState.preferredLanguage
     });
-    await this.store.updateMultimodalInput(inputId, understanding);
+    if (!(await this.isReplyGenerationCurrent(job))) {
+      return { stale: true, supersededBeforeCommit: true, understanding };
+    }
+    await Promise.all(inputIds.map((inputId) => this.store.updateMultimodalInput(inputId, understanding)));
     await this.store.updateAdventurexOnboardingState(userId, { stage: "exploring" });
     const userModel = await this.saveModelWithRetry(userId, (current) =>
-      applyMultimodalInsight(current, inputId, understanding)
+      applyMultimodalInsight(current, inputIds[0]!, understanding)
     );
     const reply = typeof understanding.reply === "string" ? understanding.reply : null;
     if (!reply) throw new Error("多模态理解没有返回可发布回复");
-    const message = await this.store.appendMessage({
+    const message = await this.appendAssistantReply(job, {
       userId,
-      role: "assistant",
       content: reply,
       idempotencyKey: `multimodal-reply:${job.id}`,
       sourceChannel: sourceChannelFromJob(job)
     });
+    if (!message) return { stale: true, supersededBeforeCommit: false, understanding };
     const memoryContent = typeof understanding.recentImpression === "string"
       ? understanding.recentImpression
       : typeof understanding.summary === "string"
@@ -633,15 +685,15 @@ export class JobProcessor {
           payload: {
             userId,
             sourceType: "multimodal",
-            sourceId: inputId,
+            sourceId: inputIds[0]!,
             content: memoryContent,
             assistantReply: reply
           },
-          idempotencyKey: `memory:multimodal:${inputId}`,
+          idempotencyKey: `memory:multimodal:${inputIds[0]}`,
           partitionKey: `user:${userId}`
         })
       : null;
-    return { inputId, understanding, userModel, message, memoryJobId: memoryJob?.id ?? null };
+    return { inputId: inputIds[0], inputIds, understanding, userModel, message, memoryJobId: memoryJob?.id ?? null };
   }
 
   private async processMatchmaking(job: LlmJob): Promise<Record<string, unknown>> {

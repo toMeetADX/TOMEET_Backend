@@ -62,6 +62,14 @@ change as a `session` event. It sends heartbeat comments while the upstream
 WeChat long poll is waiting and closes the stream after `active`, `expired`, or
 `failed`.
 
+`scanned` is also the trigger for a kiosk or roadshow page to replace the
+displayed QR immediately. The API keeps the claimed session alive in a
+server-side monitor, so replacing the visible QR or closing its browser stream
+does not stop activation or the new-user welcome. Some iLink deployments return
+the final credentials together with upstream status `scaned`; the API accepts
+that response as activation-ready while still emitting public status `scanned`
+first.
+
 ```text
 event: session
 data: {"sessionId":"uuid","status":"scanned",...}
@@ -129,12 +137,13 @@ response.
 2. Render `qrCodeContent` and open the SSE stream.
 3. For an untouched `pending` session, create a replacement 30 seconds before
    `expiresAt`.
-4. When the displayed session becomes `scanned`, immediately mask that QR,
-   retain and monitor the claimed session, and create a fresh displayed QR for
-   the next visitor.
-5. Keep every claimed session in memory until it becomes `active`, `expired`,
-   or `failed`. A claimed session that fails must tell that visitor to scan the
-   fresh QR again.
+4. When the displayed session becomes `scanned`, immediately mask that QR and
+   create a fresh displayed QR for the next visitor. The backend continues the
+   claimed session independently.
+5. Retain every claimed session token in memory until it becomes `active`,
+   `expired`, or `failed`, so a possible verification step can still target the
+   original session. A claimed session that fails must tell that visitor to scan
+   the fresh QR again.
 6. If a claimed session enters `verification_required`, submit the code against
    that original session rather than the newly displayed session.
 7. Abort all SSE streams and discard all in-memory tokens when the component

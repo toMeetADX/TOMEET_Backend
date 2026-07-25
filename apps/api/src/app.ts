@@ -3,7 +3,6 @@ import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import {
-  adventurexWelcomeBubbles,
   adventurexLanguageSchema,
   agentMessageInputSchema,
   agentProductEventSchema,
@@ -88,9 +87,27 @@ function deterministicChannelUserId(provider: string, externalUserId: string): s
   ].join("-");
 }
 
-async function waitForDelay(delayMs: number): Promise<void> {
-  if (delayMs <= 0) return;
-  await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+function decodeInternalImage(input: {
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  dataBase64: string;
+}): Uint8Array {
+  if (!/^[a-zA-Z0-9+/]+={0,2}$/u.test(input.dataBase64)) {
+    throw new StoreConflictError("微信图片不是有效的 base64 数据");
+  }
+  const bytes = Buffer.from(input.dataBase64, "base64");
+  if (bytes.length === 0 || bytes.length > 10 * 1024 * 1024) {
+    throw new StoreConflictError("单张微信图片大小必须在 10MB 以内");
+  }
+  const detected = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+    ? "image/jpeg"
+    : bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+      ? "image/png"
+      : bytes.subarray(0, 4).toString("ascii") === "RIFF"
+        && bytes.subarray(8, 12).toString("ascii") === "WEBP"
+        ? "image/webp"
+        : null;
+  if (detected !== input.mimeType) throw new StoreConflictError("微信图片内容与 MIME 类型不一致");
+  return Uint8Array.from(bytes);
 }
 
 export async function buildApp(options: BuildAppOptions) {
@@ -219,51 +236,35 @@ export async function buildApp(options: BuildAppOptions) {
     return timingSafeEqual(expectedHash, candidateHash);
   }
 
+  app.post(
+    "/internal/users/:userId/adventurex-onboarding/start",
+    { config: { rateLimit: false } },
+    async (request, reply) => {
+      if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
+        return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
+      }
+      const { userId } = z.object({ userId: uuidSchema }).parse(request.params);
+      const { language } = z.object({
+        language: adventurexLanguageSchema.default("zh")
+      }).parse(request.body ?? {});
+      const message = await options.store.startAdventurexOnboarding(userId, language);
+      return { message };
+    }
+  );
+
   registerWechatRoutes(app, {
     runtime: options.wechat,
     internalApiEnabled: Boolean(options.internalApiToken),
     internalTokenMatches,
     publicSessionRateLimitMax: options.wechatQrRateLimitMax,
     rapidQrAccessTokenMatches: options.wechatRapidQrAccessTokenMatches,
-    onActivated: async ({ userId, deliverText }) => {
+    isNewWechatIdentity: async (externalUserId) => (
+      (await options.store.resolveChannelIdentity("wechat", externalUserId)) === null
+    ),
+    onActivated: async ({ userId }) => {
       const onboardingState = await options.store.ensureAdventurexOnboardingState(userId);
       if (onboardingState.welcomeSentAt) return;
-      const message = await options.store.startAdventurexOnboarding(userId, "zh");
-      if (!message) return;
-      if (!deliverText) {
-        await options.store.enqueueWechatOutboundMessage(message);
-        return;
-      }
-      const bubbles = adventurexWelcomeBubbles.zh;
-      for (const [index, bubble] of bubbles.entries()) {
-        try {
-          await deliverText({
-            text: bubble,
-            runId: `activation-welcome-${message.id}-bubble-${index + 1}`
-          });
-        } catch (error) {
-          const remainingContent = bubbles.slice(index).join("\n\n");
-          await options.store.enqueueWechatOutboundMessage({
-            ...message,
-            content: remainingContent
-          }).catch((enqueueError: unknown) => {
-            app.log.error({
-              err: enqueueError,
-              userId,
-              event: "wechat_activation_welcome_fallback_failed"
-            });
-          });
-          app.log.error({
-            err: error,
-            userId,
-            event: "wechat_activation_welcome_direct_failed"
-          });
-          return;
-        }
-        if (index < bubbles.length - 1) {
-          await waitForDelay(options.wechat?.bubbleDelayMs ?? 0);
-        }
-      }
+      await options.store.startAdventurexOnboarding(userId, "zh");
     }
   });
 
@@ -361,6 +362,15 @@ export async function buildApp(options: BuildAppOptions) {
     sourceChannel: "web" | "wechat"
   ) {
     const input = agentMessageInputSchema.parse(request.body);
+    const generation = sourceChannel === "wechat"
+      ? z.object({
+          connectionId: uuidSchema.optional(),
+          generationToken: z.string().min(8).max(128).optional()
+        }).refine(
+          (value) => Boolean(value.connectionId) === Boolean(value.generationToken),
+          "connectionId 与 generationToken 必须同时提供"
+        ).parse(request.body)
+      : {};
     assertCurrentUser(request, input.userId);
     await options.store.ensureUser(input.userId, input.displayName);
     const userMessage = await options.store.appendMessage({
@@ -376,7 +386,8 @@ export async function buildApp(options: BuildAppOptions) {
         userId: input.userId,
         content: input.content,
         userMessageId: userMessage.id,
-        sourceChannel
+        sourceChannel,
+        ...generation
       },
       idempotencyKey: `agent:${userMessage.id}`,
       partitionKey: `user:${input.userId}`
@@ -400,6 +411,21 @@ export async function buildApp(options: BuildAppOptions) {
       return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
     }
     return submitAgentMessage(request, reply, "wechat");
+  });
+
+  app.post("/internal/agent/response-generations", { config: { rateLimit: false } }, async (request, reply) => {
+    if (!options.internalApiToken) {
+      return reply.code(503).send({ error: "internal_api_disabled", message: "内部渠道 API 未配置" });
+    }
+    if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
+      return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
+    }
+    const input = z.object({
+      connectionId: uuidSchema,
+      generationToken: z.string().min(8).max(128)
+    }).parse(request.body);
+    await options.store.setWechatResponseGeneration(input.connectionId, input.generationToken);
+    return reply.code(204).send();
   });
 
   app.post("/internal/agent/events", { config: { rateLimit: false } }, async (request, reply) => {
@@ -469,6 +495,80 @@ export async function buildApp(options: BuildAppOptions) {
     });
     const currentJob = await runInline(job.id);
     return reply.code(currentJob?.status === "completed" ? 200 : 202).send({ inputId, job: currentJob });
+  });
+
+  app.post("/internal/agent/multimodal-inputs", { config: { rateLimit: false } }, async (request, reply) => {
+    if (!options.internalApiToken) {
+      return reply.code(503).send({ error: "internal_api_disabled", message: "内部渠道 API 未配置" });
+    }
+    if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
+      return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
+    }
+    const input = z.object({
+      userId: uuidSchema,
+      connectionId: uuidSchema.optional(),
+      generationToken: z.string().min(8).max(128).optional(),
+      images: z.array(z.object({
+        mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+        dataBase64: z.string().min(4).max(14 * 1024 * 1024)
+      })).min(1).max(9),
+      hint: z.string().trim().min(1).max(2_000).optional(),
+      idempotencyKey: z.string().min(8).max(128)
+    }).refine(
+      (value) => Boolean(value.connectionId) === Boolean(value.generationToken),
+      "connectionId 与 generationToken 必须同时提供"
+    ).parse(request.body);
+    const decoded = input.images.map((image) => ({
+      mimeType: image.mimeType,
+      bytes: decodeInternalImage(image)
+    }));
+    const totalBytes = decoded.reduce((sum, image) => sum + image.bytes.length, 0);
+    if (totalBytes > 30 * 1024 * 1024) {
+      throw new StoreConflictError("单批微信图片总大小必须在 30MB 以内");
+    }
+    await options.store.ensureUser(input.userId, "微信用户");
+    const records = await Promise.all(decoded.map(async (image, index) => {
+      const extension = image.mimeType === "image/jpeg" ? "jpg" : image.mimeType.split("/")[1]!;
+      const storagePath = `${input.userId}/${randomUUID()}.${extension}`;
+      await options.store.uploadFile(storagePath, image.mimeType, image.bytes);
+      const inputId = await options.store.saveMultimodalInput({
+        userId: input.userId,
+        kind: "image",
+        storagePath,
+        mimeType: image.mimeType,
+        sizeBytes: image.bytes.length,
+        hint: index === 0 ? input.hint : undefined
+      });
+      return { inputId, storagePath, mimeType: image.mimeType };
+    }));
+    await options.store.appendMessage({
+      userId: input.userId,
+      role: "user",
+      content: input.images.length === 1 ? "[发送了一张图片]" : `[一次发送了 ${input.images.length} 张图片]`,
+      idempotencyKey: `multimodal-user:${input.idempotencyKey}`,
+      sourceChannel: "wechat"
+    });
+    const job = await options.store.enqueueJob({
+      type: "multimodal_understanding",
+      payload: {
+        userId: input.userId,
+        inputIds: records.map((record) => record.inputId),
+        storagePaths: records.map((record) => record.storagePath),
+        mimeTypes: records.map((record) => record.mimeType),
+        kind: "image",
+        hint: input.hint,
+        sourceChannel: "wechat",
+        connectionId: input.connectionId,
+        generationToken: input.generationToken
+      },
+      idempotencyKey: `multimodal:${input.idempotencyKey}`,
+      partitionKey: `user:${input.userId}`
+    });
+    const currentJob = await runInline(job.id);
+    return reply.code(currentJob?.status === "completed" ? 200 : 202).send({
+      inputIds: records.map((record) => record.inputId),
+      job: currentJob
+    });
   });
 
   app.post("/uploads/sign", async (request) => {

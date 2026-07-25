@@ -59,6 +59,7 @@ interface MemoryUser {
 export class MemoryStore implements DataStore {
   private readonly users = new Map<string, MemoryUser>();
   private readonly messages: Message[] = [];
+  private readonly wechatResponseGenerations = new Map<string, string>();
   private readonly matchRequests = new Map<string, MatchRequest>();
   private readonly rooms = new Map<string, MatchRoom>();
   private readonly jobs = new Map<string, LlmJob>();
@@ -300,6 +301,33 @@ export class MemoryStore implements DataStore {
     };
     this.messages.push(message);
     return message;
+  }
+
+  async setWechatResponseGeneration(connectionId: string, generationToken: string): Promise<void> {
+    this.wechatResponseGenerations.set(connectionId, generationToken);
+  }
+
+  async isWechatResponseGenerationCurrent(
+    connectionId: string,
+    generationToken: string
+  ): Promise<boolean> {
+    return this.wechatResponseGenerations.get(connectionId) === generationToken;
+  }
+
+  async appendMessageIfWechatGenerationCurrent(input: {
+    connectionId: string;
+    generationToken: string;
+    userId: string;
+    role: "user" | "assistant";
+    content: string;
+    idempotencyKey?: string;
+    sourceChannel?: Message["sourceChannel"];
+    replyToMessageId?: string | null;
+  }): Promise<Message | null> {
+    if (!(await this.isWechatResponseGenerationCurrent(input.connectionId, input.generationToken))) {
+      return null;
+    }
+    return this.appendMessage(input);
   }
 
   async listRecentMessages(userId: string, limit = 50): Promise<Message[]> {

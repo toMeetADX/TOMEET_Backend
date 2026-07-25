@@ -664,23 +664,29 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
 
   async understandMultimodal(input: {
     kind: "image" | "audio";
-    storagePath: string;
-    mimeType: string;
+    storagePaths: string[];
+    mimeTypes: string[];
     hint?: string;
     preferredLanguage?: AdventurexLanguage;
   }): Promise<Record<string, unknown>> {
     if (input.kind === "image") {
+      if (input.storagePaths.length === 0) throw new Error("图片理解缺少输入");
       const result = await this.chatJson(
         [
-          "理解用户主动提供的图片，只记录画面中可以直接观察的低风险细节，并据此提出一个具体、容易回答的问题。",
+          `把用户这次主动提供的 ${input.storagePaths.length} 张图片作为一个整体理解，结合图片之间的共同点、差异或连续关系，只记录可以直接观察的低风险细节。`,
           `回复使用${input.preferredLanguage === "en" ? "英文" : "中文"}，写成简短自然的微信气泡，一句话一个段落并用空行分隔，每个普通段落结尾不要使用中文句号或英文句点。`,
-          "严格区分 observableDetails、uncertainty、suggestedQuestion 和最终 reply。reply 应有简短真实反应，并只问一个问题。",
+          "严格区分 observableDetails、uncertainty、suggestedQuestion 和最终 reply。reply 应先给出对整组图片的简短真实反应，然后只问一个综合问题；不得逐张图片分别回复或连续提出多个问题。",
           "禁止推断用户性格、职业、关系、健康、民族、政治、宗教、性取向等属性；禁止把图片内容说成用户的稳定事实或社交钩子。",
           "只输出 JSON：observableDetails, uncertainty, suggestedQuestion, reply。"
         ].join("\n"),
         [
-          { type: "text", text: input.hint || "请理解这张图片与用户偏好的关系" },
-          { type: "image_url", image_url: { url: input.storagePath } }
+          {
+            type: "text",
+            text: input.hint
+              ? `用户为这组图片补充了：${input.hint}`
+              : "请把这组图片放在一起理解，并找出最自然的一个追问方向"
+          },
+          ...input.storagePaths.map((url) => ({ type: "image_url", image_url: { url } }))
         ],
         this.options.visionModel ?? this.options.textModel
       );
@@ -698,11 +704,13 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       };
     }
 
-    const audioResponse = await fetch(input.storagePath, { signal: AbortSignal.timeout(30_000) });
+    const audioPath = input.storagePaths[0];
+    if (!audioPath) throw new Error("录音理解缺少输入");
+    const audioResponse = await fetch(audioPath, { signal: AbortSignal.timeout(30_000) });
     if (!audioResponse.ok) throw new Error("无法读取短录音");
     const form = new FormData();
     form.set("model", this.options.audioModel);
-    form.set("file", new File([await audioResponse.blob()], "voice.webm", { type: input.mimeType }));
+    form.set("file", new File([await audioResponse.blob()], "voice.webm", { type: input.mimeTypes[0] }));
     const transcriptResponse = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/audio/transcriptions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.options.apiKey}` },
