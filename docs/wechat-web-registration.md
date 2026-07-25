@@ -7,9 +7,11 @@ therefore belong to the same account without moving data after registration.
 
 The API creates one encrypted welcome outbox only when the activating WeChat
 identity did not already map to a database user. Existing users never create
-this task. The first inbound iLink handshake only unlocks that outbox and is
-consumed instead of entering the Agent. The outbox then sends four onboarding
-bubbles followed by these three registration bubbles:
+this task. A six-digit inbound iLink handshake only unlocks that outbox and is
+consumed instead of entering the Agent. Any other first text is treated as real
+user intent so a command sent immediately after reconnect cannot disappear.
+The outbox then sends four onboarding bubbles followed by these three
+registration bubbles:
 
 ```text
 想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！
@@ -30,9 +32,9 @@ After every bubble is accepted by iLink, the API records the welcome as
 delivered. User silence, worker restarts, and later QR scans never replay it.
 If a delivery attempt is interrupted, retries reuse the same provider client
 IDs for each bubble so already accepted bubbles remain idempotent.
-The inbound message that unlocked this first delivery is consumed as the
+The six-digit handshake that unlocked this first delivery is consumed as the
 conversation opener; it is not stored as user dialogue or submitted to the
-Agent. Normal conversation begins with the user's following message.
+Agent. A non-handshake first message is submitted normally.
 
 ## Registration page contract
 

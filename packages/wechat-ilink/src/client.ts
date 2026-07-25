@@ -29,6 +29,7 @@ export class WechatILinkError extends Error {
     readonly code?: number
   ) {
     super(message);
+    this.name = "WechatILinkError";
   }
 }
 

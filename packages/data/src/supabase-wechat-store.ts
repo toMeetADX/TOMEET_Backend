@@ -401,12 +401,14 @@ export class SupabaseWechatStore implements WechatConnectionStore {
   async completeWechatOutboundMessage(
     outboundId: string,
     workerId: string,
-    errorMessage?: string
+    errorMessage?: string,
+    reauthRequired = false
   ): Promise<void> {
     const { error } = await this.client.rpc("complete_wechat_outbound_message", {
       p_outbound_id: outboundId,
       p_worker_id: workerId,
-      p_error: errorMessage ?? null
+      p_error: errorMessage ?? null,
+      p_reauth_required: reauthRequired
     });
     if (error) this.throwError("Complete WeChat outbound message", error);
   }

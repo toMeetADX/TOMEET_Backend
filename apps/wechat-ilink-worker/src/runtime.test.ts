@@ -8,6 +8,7 @@ import {
 import type { WechatConnectionStore } from "@tomeet/data";
 import {
   CredentialCipher,
+  WechatILinkError,
   type WechatConnection,
   type WechatOutboundDelivery
 } from "@tomeet/wechat-ilink";
@@ -157,6 +158,82 @@ describe("WeChat worker runtime", () => {
     expect(completeWechatOutboundMessage).toHaveBeenCalledWith(delivery.id, "worker-1");
     expect(JSON.stringify(runtime.logger.info.mock.calls)).not.toContain(delivery.content);
     expect(JSON.stringify(runtime.logger.info.mock.calls)).not.toContain("bot-secret");
+  });
+
+  it("quarantines an outbound connection when its credential cannot be decrypted", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    const completeWechatOutboundMessage = vi.fn(async () => undefined);
+    const delivery: WechatOutboundDelivery = {
+      id: "27000000-0000-4000-8000-000000000021",
+      messageId: "27000000-0000-4000-8000-000000000022",
+      userId: activeConnection.userId,
+      content: "match options",
+      kind: "message",
+      claimId: null,
+      attempts: 5,
+      connection: activeConnection
+    };
+
+    await deliverWechatOutboundMessage({
+      store: { completeWechatOutboundMessage },
+      cipher: new CredentialCipher(randomBytes(32).toString("base64")),
+      ilink: runtime.ilink,
+      tomeet: runtime.tomeet,
+      logger: runtime.logger
+    }, delivery, "worker-1");
+
+    expect(runtime.ilink.sendText).not.toHaveBeenCalled();
+    expect(completeWechatOutboundMessage).toHaveBeenCalledWith(
+      delivery.id,
+      "worker-1",
+      "Stored credential could not be decrypted",
+      true
+    );
+    expect(JSON.parse(runtime.logger.error.mock.calls[0]![0])).toMatchObject({
+      errorCode: "credential_decryption_failed",
+      reauthRequired: true
+    });
+    expect(JSON.stringify(runtime.logger.error.mock.calls))
+      .not.toContain(activeConnection.botTokenCiphertext);
+  });
+
+  it("quarantines an outbound connection when iLink rejects the session", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    const completeWechatOutboundMessage = vi.fn(async () => undefined);
+    const delivery: WechatOutboundDelivery = {
+      id: "27000000-0000-4000-8000-000000000023",
+      messageId: "27000000-0000-4000-8000-000000000024",
+      userId: activeConnection.userId,
+      content: "match options",
+      kind: "message",
+      claimId: null,
+      attempts: 1,
+      connection: activeConnection
+    };
+    runtime.ilink.sendText.mockRejectedValue(
+      new WechatILinkError("iLink send failed: prepare failed", undefined, -1)
+    );
+
+    await deliverWechatOutboundMessage({
+      store: { completeWechatOutboundMessage },
+      cipher: runtime.cipher,
+      ilink: runtime.ilink,
+      tomeet: runtime.tomeet,
+      logger: runtime.logger
+    }, delivery, "worker-1");
+
+    expect(completeWechatOutboundMessage).toHaveBeenCalledWith(
+      delivery.id,
+      "worker-1",
+      "iLink send failed: prepare failed",
+      true
+    );
+    expect(JSON.parse(runtime.logger.error.mock.calls[0]![0])).toMatchObject({
+      errorCode: "ilink_prepare_failed",
+      reauthRequired: true
+    });
   });
 
   it("delivers the complete welcome and registration link from the first-inbound outbox", async () => {
@@ -407,6 +484,38 @@ describe("WeChat worker runtime", () => {
     expect(activeConnection.lastMessageAt).not.toBeNull();
   });
 
+  it("forwards the first real text after reconnect instead of consuming it as an opener", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = null;
+
+    await expect(handleWechatMessage(
+      runtime.dependencies,
+      activeConnection,
+      "bot-secret",
+      {
+        message_id: 47,
+        message_type: 1,
+        from_user_id: activeConnection.ownerIlinkUserId,
+        context_token: "context-first-real-text",
+        item_list: [{ type: 1, text_item: { text: "匹配" } }]
+      },
+      undefined,
+      true
+    )).resolves.toBe(true);
+
+    expect(runtime.tomeet.sendTextBatch).toHaveBeenCalledWith({
+      connectionId: activeConnection.id,
+      generationToken: expect.any(String),
+      userId: activeConnection.userId,
+      turns: [{ messageId: "47", content: "匹配" }]
+    });
+    expect(runtime.store.completeWechatMessage).toHaveBeenCalledWith(
+      activeConnection.id,
+      "47"
+    );
+  });
+
   it("never sends the queued welcome inline or forwards its handshake to the Agent", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
@@ -420,7 +529,8 @@ describe("WeChat worker runtime", () => {
         message_id: 45,
         message_type: 1,
         from_user_id: activeConnection.ownerIlinkUserId,
-        item_list: [{ type: 1, text_item: { text: "你好" } }]
+        context_token: "context-opening-trigger",
+        item_list: [{ type: 1, text_item: { text: "123456" } }]
       },
       undefined,
       true
@@ -455,7 +565,7 @@ describe("WeChat worker runtime", () => {
     ]);
   });
 
-  it("still claims onboarding after an empty poll cursor was persisted before first hello", async () => {
+  it("still claims onboarding after an empty poll cursor was persisted before its handshake", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
     activeConnection.lastMessageAt = null;
@@ -467,7 +577,8 @@ describe("WeChat worker runtime", () => {
         message_id: 49,
         message_type: 1,
         from_user_id: activeConnection.ownerIlinkUserId,
-        item_list: [{ type: 1, text_item: { text: "你好" } }]
+        context_token: "context-first-handshake",
+        item_list: [{ type: 1, text_item: { text: "123456" } }]
       }]
     });
 
@@ -1264,6 +1375,32 @@ describe("WeChat worker runtime", () => {
     });
     expect(runtime.store.releaseWechatConnection).toHaveBeenCalled();
     expect(JSON.stringify(runtime.logger.error.mock.calls)).not.toContain("bot-secret");
+  });
+
+  it("marks an undecryptable monitored connection as requiring fresh authorization", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      cipher: new CredentialCipher(randomBytes(32).toString("base64")),
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: new AbortController().signal
+    });
+
+    expect(runtime.ilink.getUpdates).not.toHaveBeenCalled();
+    expect(runtime.store.markWechatConnectionError).toHaveBeenCalledWith({
+      connectionId: activeConnection.id,
+      workerId: "worker-1",
+      message: "Stored credential could not be decrypted",
+      reauthRequired: true
+    });
+    expect(JSON.parse(runtime.logger.error.mock.calls[0]![0])).toMatchObject({
+      errorCode: "credential_decryption_failed",
+      reauthRequired: true
+    });
   });
 
   it("persists the cursor only while the worker still owns the lease", async () => {

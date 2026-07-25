@@ -8,6 +8,15 @@ import {
 
 const VERSION = "v1";
 
+export class CredentialDecryptionError extends Error {
+  readonly code = "credential_decryption_failed";
+
+  constructor(options?: { cause?: unknown }) {
+    super("Stored credential could not be decrypted", options);
+    this.name = "CredentialDecryptionError";
+  }
+}
+
 function decodeKey(raw: string): Buffer {
   const trimmed = raw.trim();
   const key = /^[a-fA-F0-9]{64}$/.test(trimmed)
@@ -47,27 +56,32 @@ export class CredentialCipher {
   }
 
   decrypt(payload: string, context: string): string {
-    const [version, ivValue, tagValue, encryptedValue, extra] = payload.split(".");
-    if (
-      version !== VERSION
-      || !ivValue
-      || !tagValue
-      || !encryptedValue
-      || extra !== undefined
-    ) {
-      throw new Error("Unsupported encrypted credential");
+    try {
+      const [version, ivValue, tagValue, encryptedValue, extra] = payload.split(".");
+      if (
+        version !== VERSION
+        || !ivValue
+        || !tagValue
+        || !encryptedValue
+        || extra !== undefined
+      ) {
+        throw new Error("Unsupported encrypted credential");
+      }
+      const decipher = createDecipheriv(
+        "aes-256-gcm",
+        this.key,
+        Buffer.from(ivValue, "base64url")
+      );
+      decipher.setAAD(Buffer.from(context, "utf8"));
+      decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
+      return Buffer.concat([
+        decipher.update(Buffer.from(encryptedValue, "base64url")),
+        decipher.final()
+      ]).toString("utf8");
+    } catch (error) {
+      if (error instanceof CredentialDecryptionError) throw error;
+      throw new CredentialDecryptionError({ cause: error });
     }
-    const decipher = createDecipheriv(
-      "aes-256-gcm",
-      this.key,
-      Buffer.from(ivValue, "base64url")
-    );
-    decipher.setAAD(Buffer.from(context, "utf8"));
-    decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
-    return Buffer.concat([
-      decipher.update(Buffer.from(encryptedValue, "base64url")),
-      decipher.final()
-    ]).toString("utf8");
   }
 }
 

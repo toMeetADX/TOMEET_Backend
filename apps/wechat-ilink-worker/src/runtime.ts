@@ -7,8 +7,10 @@ import {
 } from "@tomeet/contracts";
 import type { WechatConnectionStore } from "@tomeet/data";
 import {
+  CredentialDecryptionError,
   CredentialCipher,
   DEFAULT_WECHAT_CDN_BASE_URL,
+  WechatILinkError,
   WechatILinkClient,
   downloadWechatImage,
   type WechatConnection,
@@ -131,6 +133,80 @@ function errorMessage(error: unknown): string {
 
 function errorName(error: unknown): string {
   return error instanceof Error ? error.name : "UnknownError";
+}
+
+type WechatErrorCode =
+  | "credential_decryption_failed"
+  | "ilink_auth_failed"
+  | "ilink_prepare_failed"
+  | "ilink_session_expired"
+  | "ilink_transport_failed"
+  | "unknown_error";
+
+function classifyWechatError(error: unknown): {
+  code: WechatErrorCode;
+  reauthRequired: boolean;
+  providerCode?: number;
+  httpStatus?: number;
+} {
+  if (error instanceof CredentialDecryptionError) {
+    return {
+      code: "credential_decryption_failed",
+      reauthRequired: true
+    };
+  }
+  if (error instanceof WechatILinkError) {
+    if (error.code === -14 || /session\s*timeout/iu.test(error.message)) {
+      return {
+        code: "ilink_session_expired",
+        reauthRequired: true,
+        ...(error.code !== undefined ? { providerCode: error.code } : {}),
+        ...(error.status !== undefined ? { httpStatus: error.status } : {})
+      };
+    }
+    if (error.status === 401 || error.status === 403) {
+      return {
+        code: "ilink_auth_failed",
+        reauthRequired: true,
+        httpStatus: error.status,
+        ...(error.code !== undefined ? { providerCode: error.code } : {})
+      };
+    }
+    if (/prepare\s*failed/iu.test(error.message)) {
+      return {
+        code: "ilink_prepare_failed",
+        reauthRequired: true,
+        ...(error.code !== undefined ? { providerCode: error.code } : {}),
+        ...(error.status !== undefined ? { httpStatus: error.status } : {})
+      };
+    }
+    return {
+      code: "ilink_transport_failed",
+      reauthRequired: false,
+      ...(error.code !== undefined ? { providerCode: error.code } : {}),
+      ...(error.status !== undefined ? { httpStatus: error.status } : {})
+    };
+  }
+  return {
+    code: "unknown_error",
+    reauthRequired: false
+  };
+}
+
+function wechatErrorLogFields(error: unknown): Record<string, unknown> {
+  const classification = classifyWechatError(error);
+  return {
+    errorType: errorName(error),
+    errorCode: classification.code,
+    errorFingerprint: fingerprint(errorMessage(error)),
+    reauthRequired: classification.reauthRequired,
+    ...(classification.providerCode !== undefined
+      ? { providerCode: classification.providerCode }
+      : {}),
+    ...(classification.httpStatus !== undefined
+      ? { httpStatus: classification.httpStatus }
+      : {})
+  };
 }
 
 const WECHAT_BUBBLE_MAX_CHARS = 260;
@@ -633,17 +709,26 @@ export async function deliverWechatOutboundMessage(
       attempt: delivery.attempts
     }));
   } catch (error) {
-    await dependencies.store.completeWechatOutboundMessage(
-      delivery.id,
-      workerId,
-      errorMessage(error)
-    ).catch(() => undefined);
+    const classification = classifyWechatError(error);
+    const completion = classification.reauthRequired
+      ? dependencies.store.completeWechatOutboundMessage(
+          delivery.id,
+          workerId,
+          errorMessage(error),
+          true
+        )
+      : dependencies.store.completeWechatOutboundMessage(
+          delivery.id,
+          workerId,
+          errorMessage(error)
+        );
+    await completion.catch(() => undefined);
     logger.error(JSON.stringify({
       level: "error",
       event: "wechat_outbound_failed",
       outbound: fingerprint(delivery.id),
       connection: fingerprint(delivery.connection.id),
-      errorType: errorName(error),
+      ...wechatErrorLogFields(error),
       attempt: delivery.attempts
     }));
   }
@@ -674,17 +759,20 @@ export async function handleWechatMessage(
   if (!started) return false;
 
   try {
-    // The first inbound only opens the iLink transport. A welcome task was created at activation
-    // only when the WeChat identity did not already map to a database user.
-    const isOpeningTrigger = openingTrigger ?? (
+    const content = WechatILinkClient.extractText(message);
+    // A six-digit iLink opener unlocks a pending welcome without becoming Agent dialogue.
+    // Any other first text is real user intent and must never disappear after a reconnect.
+    const openingTriggerExpected = openingTrigger ?? (
       Boolean(message.context_token) && !connection.lastMessageAt
     );
+    const isOpeningTrigger = openingTriggerExpected
+      && Boolean(message.context_token)
+      && /^\d{6}$/u.test(content ?? "");
     if (isOpeningTrigger) {
       connection.lastMessageAt = new Date().toISOString();
       await dependencies.store.completeWechatMessage(connection.id, id);
       return true;
     }
-    const content = WechatILinkClient.extractText(message);
     // Any image item counts as "the user sent a picture", even when the payload turns out to
     // be undownloadable: the reply must never claim pictures are unsupported.
     const imageItems = (message.item_list ?? []).filter((item): item is WechatMessageItem => (
@@ -873,7 +961,9 @@ export async function monitorWechatConnection(
           level: "error",
           event: reauthRequired ? "wechat_reauth_required" : "wechat_updates_failed",
           connection: connectionFingerprint,
-          code
+          code,
+          errorCode: reauthRequired ? "ilink_session_expired" : "ilink_transport_failed",
+          reauthRequired
         }));
         return;
       }
@@ -899,7 +989,7 @@ export async function monitorWechatConnection(
             level: "error",
             event: "wechat_message_failed",
             connection: connectionFingerprint,
-            errorType: errorName(error)
+            ...wechatErrorLogFields(error)
           }));
         }
       }
@@ -913,17 +1003,18 @@ export async function monitorWechatConnection(
       if (!updated) return;
     }
   } catch (error) {
+    const classification = classifyWechatError(error);
     await dependencies.store.markWechatConnectionError({
       connectionId: connection.id,
       workerId,
       message: errorMessage(error),
-      reauthRequired: false
+      reauthRequired: classification.reauthRequired
     }).catch(() => undefined);
     logger.error(JSON.stringify({
       level: "error",
       event: "wechat_connection_monitor_failed",
       connection: connectionFingerprint,
-      errorType: errorName(error)
+      ...wechatErrorLogFields(error)
     }));
   } finally {
     await turnBatcher?.flush().catch(() => undefined);

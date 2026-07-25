@@ -1,6 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { CredentialCipher, hashSessionToken, sessionTokenMatches } from "./crypto.js";
+import {
+  CredentialCipher,
+  CredentialDecryptionError,
+  hashSessionToken,
+  sessionTokenMatches
+} from "./crypto.js";
 
 describe("CredentialCipher", () => {
   it("round trips a credential and authenticates its context", () => {
@@ -9,7 +14,8 @@ describe("CredentialCipher", () => {
 
     expect(encrypted).not.toContain("secret-token");
     expect(cipher.decrypt(encrypted, "wechat:one")).toBe("secret-token");
-    expect(() => cipher.decrypt(encrypted, "wechat:two")).toThrow();
+    expect(() => cipher.decrypt(encrypted, "wechat:two"))
+      .toThrow(CredentialDecryptionError);
   });
 
   it("compares opaque session tokens by hash", () => {
