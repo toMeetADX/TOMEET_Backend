@@ -52,6 +52,14 @@
     "20260726020000_event_plan_and_wechat_outbox.sql": {
       "sha256": "f2b544aa19a00904659b139a68026f950a68b82e3a6ae403dd05b63312ddfece",
       "reason": "Recreate matchmaking and WeChat completion RPC bodies to enforce founder-approved event-plan gating, extend delivery retries to eight attempts, and restrict all new plan tables and RPCs to service_role."
+    },
+    "20260726120000_wechat_web_registration_claims.sql": {
+      "sha256": "69abb306ff543c8360bec366104fffb827f99162ac0833db6d2106f1ce182604",
+      "reason": "Create a service-role-only table for short-lived encrypted Supabase sessions used by one-time WeChat-to-Web registration claims; REVOKE prevents browser roles from reading login credentials."
+    },
+    "20260726130000_interactive_job_latency_guards.sql": {
+      "sha256": "201f370263880efa2f33a8c1b1fb0aa633defea34c96ba60e599e64c66e1c592",
+      "reason": "Move pending background memory jobs to a dedicated partition and replace the claim RPC so future retries do not block ready interactive work; REVOKE preserves service-role-only job claiming."
     }
   }
 }

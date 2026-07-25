@@ -236,6 +236,43 @@ describe("Supabase migration", () => {
     `, [firstUserId])).rejects.toThrow();
   });
 
+  it("keeps one-time WeChat Web claims encrypted and service-role-only", async () => {
+    const table = await db.query<{ relrowsecurity: boolean }>(`
+      select relrowsecurity
+      from pg_class
+      where oid = 'public.wechat_web_claims'::regclass
+    `);
+    expect(table.rows[0]?.relrowsecurity).toBe(true);
+
+    const clientGrants = await db.query<{ grantee: string }>(`
+      select grantee
+      from information_schema.role_table_grants
+      where table_schema = 'public'
+        and table_name = 'wechat_web_claims'
+        and grantee in ('PUBLIC', 'anon', 'authenticated')
+    `);
+    expect(clientGrants.rows).toHaveLength(0);
+
+    const servicePrivileges = await db.query<{
+      can_select: boolean;
+      can_insert: boolean;
+      can_update: boolean;
+      can_delete: boolean;
+    }>(`
+      select
+        has_table_privilege('service_role', 'public.wechat_web_claims', 'select') as can_select,
+        has_table_privilege('service_role', 'public.wechat_web_claims', 'insert') as can_insert,
+        has_table_privilege('service_role', 'public.wechat_web_claims', 'update') as can_update,
+        has_table_privilege('service_role', 'public.wechat_web_claims', 'delete') as can_delete
+    `);
+    expect(servicePrivileges.rows[0]).toEqual({
+      can_select: true,
+      can_insert: true,
+      can_update: true,
+      can_delete: true
+    });
+  });
+
   it("atomically provisions encrypted iLink connections with server-only access", async () => {
     const tables = await db.query<{ relname: string; relrowsecurity: boolean }>(`
       select relname, relrowsecurity

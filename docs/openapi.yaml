@@ -20,6 +20,7 @@ tags:
   - name: AdventureX Testing
   - name: Rooms
   - name: Jobs
+  - name: Authentication
   - name: WeChat QR
 paths:
   /health:
@@ -805,6 +806,55 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
+  /auth/wechat/claim:
+    post:
+      tags: [Authentication]
+      summary: Redeem a one-time WeChat Web registration claim
+      description: |
+        The registration page reads the claim from the URL fragment and sends it
+        in the JSON body. A successful response returns the Supabase anonymous
+        session that already owns the WeChat profile. The client must call
+        supabase.auth.setSession before upgrading that same user with email and
+        password, phone and password, or a linked Google identity.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WechatWebClaimInput"
+      responses:
+        "200":
+          description: Claim consumed; continue registration with the returned session
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+            Referrer-Policy:
+              schema:
+                type: string
+                const: no-referrer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatWebClaimResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Claim is invalid, expired, or already consumed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          description: WeChat Web registration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
   /wechat/connect/sessions:
     post:
       tags: [WeChat QR]
@@ -1134,6 +1184,40 @@ components:
         code:
           type: string
           pattern: '^\d{4,12}$'
+    WechatWebClaimInput:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+    WechatWebClaimResponse:
+      type: object
+      additionalProperties: false
+      required: [userId, session, registrationMethods]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        session:
+          type: object
+          additionalProperties: false
+          required: [accessToken, refreshToken]
+          properties:
+            accessToken:
+              type: string
+              minLength: 1
+            refreshToken:
+              type: string
+              minLength: 1
+        registrationMethods:
+          type: array
+          prefixItems:
+            - const: email_password
+            - const: phone_password
+            - const: google
+          minItems: 3
+          maxItems: 3
     WechatSessionError:
       type: object
       required: [error, message]

@@ -12,6 +12,7 @@ import { buildApp } from "./app.js";
 import {
   createSupabaseAccessTokenVerifier,
   createSupabaseEmailAccessTokenMatcher,
+  createSupabaseWechatWebAccountProvisioner,
   type AccessTokenVerifier,
   type EmailAccessTokenMatcher
 } from "./auth.js";
@@ -87,6 +88,22 @@ const wechat = wechatEncryptionKey
     }
   : undefined;
 
+const wechatWebRegistration = wechat && !demoMode
+  ? {
+      registrationUrl:
+        process.env.WECHAT_WEB_REGISTRATION_URL ?? "https://tomeet.chat/register",
+      claimTtlMs: parsePositiveInteger(
+        process.env.WECHAT_WEB_CLAIM_TTL_SECONDS,
+        15 * 60,
+        "WECHAT_WEB_CLAIM_TTL_SECONDS"
+      ) * 1000,
+      accountProvisioner: createSupabaseWechatWebAccountProvisioner(
+        process.env.SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!
+      )
+    }
+  : undefined;
+
 let inlineProcessor: JobProcessor | undefined;
 if (demoMode) {
   const apiKey = process.env.LLM_API_KEY;
@@ -105,7 +122,10 @@ if (demoMode) {
     visionModel: process.env.LLM_VISION_MODEL ?? textModel,
     audioModel: process.env.LLM_AUDIO_MODEL ?? "whisper-1",
     webSearchProvider,
-    onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event }))
+    simpleReplyFastPath: process.env.LLM_SIMPLE_REPLY_FAST_PATH === "true",
+    singlePassEvidenceFinalizer: process.env.LLM_SINGLE_PASS_EVIDENCE_FINALIZER === "true",
+    onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event })),
+    onLlmRequestEvent: (event) => console.info(JSON.stringify({ level: "info", event: "llm_request", ...event }))
   });
   inlineProcessor = new JobProcessor(store, hosted, hosted, {
     adventurexMatchingV1: process.env.ADVENTUREX_MATCHING_V1 === "true"
@@ -120,6 +140,7 @@ const app = await buildApp({
   autoProvisionChannelUsers:
     demoMode && process.env.WECHAT_AUTO_PROVISION === "true",
   wechat,
+  wechatWebRegistration,
   logger: true,
   verifyAccessToken,
   trustProxy: isProduction,

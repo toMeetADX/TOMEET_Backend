@@ -274,6 +274,59 @@ describe("WeChat worker runtime", () => {
     expect(runtime.ilink.sendText).toHaveBeenCalledTimes(4);
   });
 
+  it("waits 30 seconds and spaces default progress bubbles 30 seconds apart", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = setup();
+      const activeConnection = connection(runtime.cipher);
+      activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
+      let resolveAgent!: (result: { reply: string; stale: boolean }) => void;
+      runtime.tomeet.sendTextBatch.mockImplementation(() => (
+        new Promise((resolve) => { resolveAgent = resolve; })
+      ));
+
+      const handling = handleWechatMessage(
+        runtime.dependencies,
+        activeConnection,
+        "bot-secret",
+        {
+          message_id: 451,
+          message_type: 1,
+          from_user_id: activeConnection.ownerIlinkUserId,
+          context_token: "context-default-progress",
+          item_list: [{ type: 1, text_item: { text: "帮我认真想想" } }]
+        }
+      );
+
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(runtime.ilink.sendText).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+        channelTurnProgressNotices.zh[0]
+      ]);
+
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(runtime.ilink.sendText).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+        channelTurnProgressNotices.zh[0],
+        channelTurnProgressNotices.zh[1]
+      ]);
+
+      resolveAgent({ reply: "想好了，这是我的回答。", stale: false });
+      await handling;
+      expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+        channelTurnProgressNotices.zh[0],
+        channelTurnProgressNotices.zh[1],
+        "想好了，这是我的回答"
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("still sends the final reply when a progress bubble fails", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);

@@ -49,7 +49,7 @@ const concurrency = integerEnvironment("WECHAT_WORKER_CONCURRENCY", 8, 1, 32);
 const outboundConcurrency = integerEnvironment("WECHAT_OUTBOUND_CONCURRENCY", 20, 1, 100);
 const bubbleDelayMs = integerEnvironment("WECHAT_BUBBLE_DELAY_MS", 200, 0, 5_000);
 const legacyImageBatchWindowMs = integerEnvironment(
-  "WECHAT_IMAGE_BATCH_WINDOW_MS", 1200, 100, 10_000
+  "WECHAT_IMAGE_BATCH_WINDOW_MS", 400, 100, 10_000
 );
 const turnBatchWindowMs = integerEnvironment(
   "WECHAT_TURN_BATCH_WINDOW_MS",
@@ -59,13 +59,13 @@ const turnBatchWindowMs = integerEnvironment(
 );
 const turnProgressDelayMs = integerEnvironment(
   "WECHAT_TURN_PROGRESS_DELAY_MS",
-  1500,
+  30_000,
   0,
   60_000
 );
 const turnProgressIntervalMs = integerEnvironment(
   "WECHAT_TURN_PROGRESS_INTERVAL_MS",
-  5000,
+  30_000,
   250,
   60_000
 );

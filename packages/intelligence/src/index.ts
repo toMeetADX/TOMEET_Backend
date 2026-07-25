@@ -466,16 +466,16 @@ export class JobProcessor {
       this.store.listActiveSocialHooks(userId, 16),
       this.store.listOfflineGames()
     ]);
-    const [messages, checkpoint] = await Promise.all([
+    const [messages, conversationState] = await Promise.all([
       this.store.listRecentMessages(userId, 32),
-      this.updateConversationCheckpoint(userId)
+      this.store.getConversationState(userId)
     ]);
     const context = buildAgentContext(messages, model, {
       matchRequest: initialMatchRequest,
       matchInvite: initialMatchInvite,
       room: initialRoom,
       availableGames,
-      checkpoint,
+      checkpoint: conversationState.rollingSummary,
       memoryProfile,
       matchOptions,
       onboardingState,
@@ -601,9 +601,10 @@ export class JobProcessor {
             memoryReviewSuggested: insight.memoryReviewSuggested
           },
           idempotencyKey: `memory:${memorySource.sourceType}:${memorySource.sourceId}`,
-          partitionKey: `user:${userId}`
+          partitionKey: `memory:${userId}`
         })
       : null;
+    this.deferConversationCheckpointUpdate(userId);
     return {
       message,
       userModel: updatedModel,
@@ -618,6 +619,16 @@ export class JobProcessor {
       usedMemoryCount: insight.usedMemoryIds.length,
       savedSocialHookCount: savedSocialHooks.length
     };
+  }
+
+  private deferConversationCheckpointUpdate(userId: string): void {
+    void this.updateConversationCheckpoint(userId).catch((error: unknown) => {
+      console.warn(JSON.stringify({
+        level: "warn",
+        event: "conversation_summary_deferred",
+        error: error instanceof Error ? error.message : String(error)
+      }));
+    });
   }
 
   private async updateConversationCheckpoint(userId: string): Promise<string> {
@@ -1033,7 +1044,7 @@ export class JobProcessor {
           type: "feedback_update",
           payload: { feedback, feedbackId },
           idempotencyKey: `feedback:${feedbackId}`,
-          partitionKey: `user:${userId}`
+          partitionKey: `memory:${userId}`
         });
         return {
           result: { feedbackId, jobId: feedbackJob.id },
@@ -1156,7 +1167,7 @@ export class JobProcessor {
             assistantReply: reply
           },
           idempotencyKey: `memory:multimodal:${inputIds[0]}`,
-          partitionKey: `user:${userId}`
+          partitionKey: `memory:${userId}`
         })
       : null;
     return { inputId: inputIds[0], inputIds, understanding, userModel, message, memoryJobId: memoryJob?.id ?? null };
@@ -1996,7 +2007,7 @@ export class JobProcessor {
         })
       },
       idempotencyKey: `memory:feedback:${feedbackId}`,
-      partitionKey: `user:${feedback.userId}`
+      partitionKey: `memory:${feedback.userId}`
     });
     return { userModel, memoryJobId: memoryJob.id };
   }
@@ -2040,7 +2051,7 @@ export class JobProcessor {
           type: "memory_consolidate",
           payload: { userId },
           idempotencyKey: `memory-profile:${job.id}`,
-          partitionKey: `user:${userId}`
+          partitionKey: `memory:${userId}`
         })
       : null;
     return {

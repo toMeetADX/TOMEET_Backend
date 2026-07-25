@@ -2077,6 +2077,7 @@ export class MemoryStore implements DataStore {
   }
 
   async claimJob(workerId: string): Promise<LlmJob | null> {
+    const nowMs = Date.now();
     const processingPartitions = new Set(
       [...this.jobs.values()]
         .filter((item) => item.status === "processing" && item.partitionKey)
@@ -2085,8 +2086,23 @@ export class MemoryStore implements DataStore {
     const job = [...this.jobs.values()]
       .filter((item) =>
         (item.status === "pending" || item.status === "retry")
-        && new Date(item.runAt).getTime() <= Date.now()
+        && new Date(item.runAt).getTime() <= nowMs
         && (!item.partitionKey || !processingPartitions.has(item.partitionKey))
+        && (!item.partitionKey || ![...this.jobs.values()].some((earlier) => (
+          earlier.id !== item.id
+          && earlier.partitionKey === item.partitionKey
+          && (
+            earlier.createdAt < item.createdAt
+            || (earlier.createdAt === item.createdAt && earlier.id < item.id)
+          )
+          && (
+            earlier.status === "processing"
+            || (
+              (earlier.status === "pending" || earlier.status === "retry")
+              && new Date(earlier.runAt).getTime() <= nowMs
+            )
+          )
+        )))
       )
       .sort((left, right) => left.runAt.localeCompare(right.runAt) || left.createdAt.localeCompare(right.createdAt))[0];
     if (!job) return null;
@@ -2139,6 +2155,9 @@ export class MemoryStore implements DataStore {
     }
     job.status = job.attempts >= job.maxAttempts ? "failed" : "retry";
     job.error = error;
+    if (job.status === "retry") {
+      job.runAt = new Date(Date.now() + Math.min(60, 2 ** job.attempts) * 1_000).toISOString();
+    }
     job.updatedAt = new Date().toISOString();
     this.jobLocks.delete(jobId);
   }

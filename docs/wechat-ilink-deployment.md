@@ -185,7 +185,13 @@ SUPABASE_SERVICE_ROLE_KEY=<server-only secret>
 WECHAT_CREDENTIAL_ENCRYPTION_KEY=<步骤 2 的第一个值>
 TOMEET_INTERNAL_API_TOKEN=<步骤 2 的第二个值>
 FRONTEND_ORIGIN=https://<微信 Vercel 域名>
+WECHAT_WEB_REGISTRATION_URL=https://tomeet.chat/register
+WECHAT_WEB_CLAIM_TTL_SECONDS=900
 ```
+
+Supabase Auth 必须开启 Anonymous Sign-Ins。首次扫码会先创建同一 UUID 的匿名 Auth
+用户，开场白再发送一次性注册链接；注册页契约见
+[`wechat-web-registration.md`](wechat-web-registration.md)。
 
 浏览器必须使用 API 的公开 HTTPS 域名。确认 API：
 
@@ -235,9 +241,9 @@ TOMEET_API_URL=http://${{api.RAILWAY_PRIVATE_DOMAIN}}:${{api.PORT}}
 WECHAT_WORKER_CONCURRENCY=8
 WECHAT_OUTBOUND_CONCURRENCY=20
 WECHAT_WORKER_CLAIM_INTERVAL_MS=1000
-WECHAT_TURN_BATCH_WINDOW_MS=1200
-WECHAT_TURN_PROGRESS_DELAY_MS=1500
-WECHAT_TURN_PROGRESS_INTERVAL_MS=5000
+WECHAT_TURN_BATCH_WINDOW_MS=400
+WECHAT_TURN_PROGRESS_DELAY_MS=30000
+WECHAT_TURN_PROGRESS_INTERVAL_MS=30000
 WECHAT_ILINK_CDN_BASE_URL=https://novac2c.cdn.weixin.qq.com/c2c
 ```
 
@@ -248,7 +254,9 @@ WECHAT_ILINK_CDN_BASE_URL=https://novac2c.cdn.weixin.qq.com/c2c
 
 当 Agent 生成时间超过 `WECHAT_TURN_PROGRESS_DELAY_MS` 时，worker 会直接在微信聊天框
 发送“正在思考”进度气泡；仍未完成时按 `WECHAT_TURN_PROGRESS_INTERVAL_MS` 继续发送下一阶段
-提示，最多三条。最终回复、失败或新输入抢占旧轮次时会立即停止，短请求不会额外打扰用户。
+提示，最多三条。默认首条在等待 30 秒后发送，后续每隔 30 秒逐条发送，避免多条提示
+集中出现。微信 Agent Job 默认最多等待 5 分钟；最终回复、失败或新输入抢占旧轮次时会立即
+停止，短请求不会额外打扰用户。
 
 上例假设 Railway API service 名称严格为 `api`；若实际名称不同，变量引用中的
 service 名称也必须按大小写替换。service-to-service 流量使用 Railway 私网，

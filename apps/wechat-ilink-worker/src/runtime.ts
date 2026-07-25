@@ -130,8 +130,8 @@ function errorName(error: unknown): string {
 
 const WECHAT_BUBBLE_MAX_CHARS = 260;
 const WECHAT_IMAGE_BATCH_MAX = 9;
-const WECHAT_TURN_PROGRESS_DELAY_MS = 1500;
-const WECHAT_TURN_PROGRESS_INTERVAL_MS = 5000;
+const WECHAT_TURN_PROGRESS_DELAY_MS = 30_000;
+const WECHAT_TURN_PROGRESS_INTERVAL_MS = 30_000;
 
 function stripTerminalPeriods(content: string): string {
   return content.trim().replace(/[。.]+$/u, "").trimEnd();
@@ -203,6 +203,7 @@ async function waitBetweenBubbles(delayMs: number): Promise<void> {
 
 interface PendingWechatTurn {
   messageId: string;
+  enqueuedAtMs: number;
   generationToken: string;
   contextToken?: string;
   runId?: string;
@@ -385,7 +386,7 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
           errorType: errorName(error)
         }));
       });
-    }, this.dependencies.turnBatchWindowMs ?? this.dependencies.imageBatchWindowMs ?? 1200);
+    }, this.dependencies.turnBatchWindowMs ?? this.dependencies.imageBatchWindowMs ?? 400);
   }
 
   async flush(): Promise<void> {
@@ -408,6 +409,11 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
   }
 
   private async deliver(batch: WechatTurnBatch): Promise<void> {
+    const batchStartedAt = Date.now();
+    const batchQueueMs = Math.max(
+      0,
+      batchStartedAt - Math.min(...batch.messages.map((message) => message.enqueuedAtMs))
+    );
     const messageIds = batch.messages.map((message) => message.messageId);
     const latest = batch.messages.at(-1)!;
     const batchKey = createHash("sha256").update(messageIds.join(":"))
@@ -435,6 +441,7 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
       this.activeProgressNotifier = progressNotifier;
       progressNotifier.start();
       let result: { reply: string | null; stale: boolean };
+      const agentStartedAt = Date.now();
       try {
         result = images.length > 0
           ? await this.dependencies.tomeet.sendImages({
@@ -458,6 +465,7 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
           this.activeProgressNotifier = null;
         }
       }
+      const agentMs = Date.now() - agentStartedAt;
       batch.settled = true;
       if (
         result.stale
@@ -475,6 +483,7 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
         }));
         return;
       }
+      const deliveryStartedAt = Date.now();
       await sendReplyBubbles({
         dependencies: this.dependencies,
         connection: this.connection,
@@ -487,13 +496,18 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
       await Promise.all(messageIds.map((messageId) => (
         this.dependencies.store.completeWechatMessage(this.connection.id, messageId)
       )));
+      const deliveryMs = Date.now() - deliveryStartedAt;
       (this.dependencies.logger ?? console).info(JSON.stringify({
         level: "info",
         event: "wechat_turn_batch_completed",
         connection: fingerprint(this.connection.id),
         user: fingerprint(this.connection.ownerIlinkUserId),
         imageCount: images.length,
-        messageCount: batch.messages.length
+        messageCount: batch.messages.length,
+        batchQueueMs,
+        agentMs,
+        deliveryMs,
+        totalMs: Date.now() - Math.min(...batch.messages.map((message) => message.enqueuedAtMs))
       }));
     } catch (error) {
       batch.settled = true;
@@ -580,6 +594,7 @@ export async function handleWechatMessage(
   turnBatcher?: WechatTurnBatchSink,
   openingTrigger?: boolean
 ): Promise<boolean> {
+  const receivedAtMs = Date.now();
   if (
     message.message_type !== 1
     || !message.from_user_id
@@ -673,6 +688,7 @@ export async function handleWechatMessage(
       if (images.length > 0 || content) {
         await batcher.enqueue({
           messageId: id,
+          enqueuedAtMs: receivedAtMs,
           generationToken,
           contextToken: message.context_token,
           runId: message.run_id,

@@ -41,6 +41,8 @@ DEMO_MODE=false
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<secret>
 FRONTEND_ORIGIN=https://<vercel-production-domain>
+WECHAT_WEB_REGISTRATION_URL=https://tomeet.chat/register
+WECHAT_WEB_CLAIM_TTL_SECONDS=900
 RATE_LIMIT_MAX=120
 ADVENTUREX_MATCHING_V1=true
 ADVENTUREX_TEST_POOL_ENABLED=false
@@ -48,6 +50,10 @@ ADVENTUREX_TEST_POOL_EMAIL=andy4fe0119@gmail.com
 ```
 
 `RATE_LIMIT_MAX` 是每个客户端 IP 每分钟允许的请求数；Railway 代理地址通过 Fastify `trustProxy` 正确还原。
+
+`WECHAT_WEB_REGISTRATION_URL` 是首次微信开场白中的个性化注册链接。API 会先创建
+同一 UUID 的 Supabase 匿名账号，再生成默认 15 分钟有效的一次性 claim。生产 Supabase
+必须开启 Anonymous Sign-Ins；前端接入见 [`wechat-web-registration.md`](wechat-web-registration.md)。
 
 预览域名或多个正式域名使用英文逗号分隔：
 
@@ -77,11 +83,20 @@ LLM_AUDIO_MODEL=FunAudioLLM/SenseVoiceSmall
 TAVILY_API_KEY=<optional-secret>
 TAVILY_API_BASE_URL=https://api.tavily.com
 WORKER_CONCURRENCY=8
-WORKER_POLL_INTERVAL_MS=1000
+WORKER_POLL_INTERVAL_MS=200
+LLM_SIMPLE_REPLY_FAST_PATH=true
+LLM_SINGLE_PASS_EVIDENCE_FINALIZER=true
 ADVENTUREX_MATCHING_V1=true
 ```
 
 `WORKER_CONCURRENCY` 允许 1–32；`WORKER_POLL_INTERVAL_MS` 允许 100–60000。变量非法时 Worker 会直接退出，让 Railway 明确标记部署失败，而不是启动一个不消费任务的空进程。
+
+交互式 `agent_reply` 只执行一次 Job 尝试，避免重复生成互相冲突的回复。微信客户端最多等待
+5 分钟，并通过进度气泡告知用户仍在处理。Agent 阶段截止时间分别为 plan 120 秒、grounding
+90 秒、verification 60 秒、action correction 45 秒，结构修复单次 30 秒。
+`LLM_SIMPLE_REPLY_FAST_PATH=true` 会在首轮结构合法、本地动作校验通过、没有联网事实、未验证
+链接或虚假成功声明时直接发布；普通陈述、提问和反问不会单独触发第二次模型调用。
+`LLM_SINGLE_PASS_EVIDENCE_FINALIZER=true` 把记忆/联网证据的 grounding 与发布校验合并成一次调用。
 
 `ADVENTUREX_MATCHING_V1` 必须在 API 与 Worker 使用相同值。`true` 启用轮次、候选、多选、开放局与原子结算；紧急回滚时两处同时改为 `false`，旧即时匹配路径仍保留。
 
@@ -104,14 +119,16 @@ WECHAT_WORKER_CONCURRENCY=8
 WECHAT_OUTBOUND_CONCURRENCY=20
 WECHAT_WORKER_CLAIM_INTERVAL_MS=1000
 WECHAT_BUBBLE_DELAY_MS=200
-WECHAT_TURN_PROGRESS_DELAY_MS=1500
-WECHAT_TURN_PROGRESS_INTERVAL_MS=5000
+WECHAT_TURN_BATCH_WINDOW_MS=400
+WECHAT_TURN_PROGRESS_DELAY_MS=30000
+WECHAT_TURN_PROGRESS_INTERVAL_MS=30000
 ```
 
 `WECHAT_BUBBLE_DELAY_MS` 控制一句话气泡之间的渐进发送间隔，允许 `0–5000` 毫秒，生产建议约 `180–220` 毫秒，测试使用 `0`。组局邀请和成局确认函字符卡片不会被拆分。
 
 `WECHAT_TURN_PROGRESS_DELAY_MS` 控制首条“Agent 正在工作”提示出现前的等待时间，
-`WECHAT_TURN_PROGRESS_INTERVAL_MS` 控制后续阶段提示间隔；最终回复或新输入到达后会停止提示。
+`WECHAT_TURN_PROGRESS_INTERVAL_MS` 控制后续阶段提示间隔；默认首条等待 30 秒，之后每隔
+30 秒逐条提示，最终回复或新输入到达后会停止提示。
 
 冷启动测试时可仅在 API 设置 `ADVENTUREX_TEST_POOL_ENABLED=true`。受保护开关只允许 `ADVENTUREX_TEST_POOL_EMAIL` 对应账号使用；正式真实用户池验收前应保持关闭。微信主动消息 Worker 使用 `WECHAT_OUTBOUND_CONCURRENCY` 并发发送候选、成局、超时和房间变化等异步通知。
 
@@ -186,6 +203,8 @@ curl -fsS https://<api-domain>/jobs/<job-id> \
 - token A 读取用户 B 的路径或资源失败。
 - Vercel 域名无 CORS 报错，未登记 Origin 被拒绝。
 - Worker 日志有 `job_completed`，无持续重复的 `worker_loop_error`。
+- 延迟诊断时联合查看 `agent_job_enqueued`、`llm_request`、`job_completed` 和
+  `wechat_turn_batch_completed`；它们分别提供持久化/入队、模型阶段、队列/处理、微信批处理/投递耗时。
 - Agent 文本任务、图片签名直传和任务轮询各通过一次。
 - Railway API 和 Worker 都至少保留一个可回滚的成功 Deployment。
 - Supabase service role key 未出现在浏览器网络请求、Vercel `NEXT_PUBLIC_*` 或 Git 历史中。

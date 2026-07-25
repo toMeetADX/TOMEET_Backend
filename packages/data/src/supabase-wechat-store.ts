@@ -1,10 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type {
   ActivateWechatSessionInput,
+  CreateWechatWebClaimInput,
   CreateWechatSessionInput,
   WechatConnection,
   WechatConnectionSession,
   WechatOutboundDelivery,
+  WechatWebClaim,
   WechatSessionUpdate
 } from "@tomeet/wechat-ilink";
 import { StoreConflictError, StoreNotFoundError } from "./store.js";
@@ -67,6 +69,23 @@ function mapOutboundDelivery(row: JsonRow): WechatOutboundDelivery {
   };
 }
 
+function mapWebClaim(row: JsonRow): WechatWebClaim {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id ?? row.userId),
+    tokenHash: String(row.token_hash ?? row.tokenHash),
+    accessTokenCiphertext: String(
+      row.access_token_ciphertext ?? row.accessTokenCiphertext
+    ),
+    refreshTokenCiphertext: String(
+      row.refresh_token_ciphertext ?? row.refreshTokenCiphertext
+    ),
+    expiresAt: String(row.expires_at ?? row.expiresAt),
+    consumedAt: (row.consumed_at ?? row.consumedAt ?? null) as string | null,
+    createdAt: String(row.created_at ?? row.createdAt)
+  };
+}
+
 export class SupabaseWechatStore implements WechatConnectionStore {
   constructor(private readonly client: SupabaseClient) {}
 
@@ -76,6 +95,43 @@ export class SupabaseWechatStore implements WechatConnectionStore {
       throw new StoreConflictError(error.message);
     }
     throw new Error(`${context}: ${error?.message ?? "Supabase request failed"}`);
+  }
+
+  async createWechatWebClaim(input: CreateWechatWebClaimInput): Promise<WechatWebClaim> {
+    const { data, error } = await this.client
+      .from("wechat_web_claims")
+      .insert({
+        id: input.id,
+        user_id: input.userId,
+        token_hash: input.tokenHash,
+        access_token_ciphertext: input.accessTokenCiphertext,
+        refresh_token_ciphertext: input.refreshTokenCiphertext,
+        expires_at: input.expiresAt
+      })
+      .select("*")
+      .single();
+    if (error) this.throwError("Create WeChat Web claim", error);
+    return mapWebClaim(data as JsonRow);
+  }
+
+  async consumeWechatWebClaim(tokenHash: string): Promise<WechatWebClaim | null> {
+    const now = new Date().toISOString();
+    const { data, error } = await this.client
+      .from("wechat_web_claims")
+      .delete()
+      .eq("token_hash", tokenHash)
+      .is("consumed_at", null)
+      .gt("expires_at", now)
+      .select("*")
+      .maybeSingle();
+    if (error) this.throwError("Consume WeChat Web claim", error);
+    if (data) return mapWebClaim(data as JsonRow);
+    const { error: cleanupError } = await this.client
+      .from("wechat_web_claims")
+      .delete()
+      .eq("token_hash", tokenHash);
+    if (cleanupError) this.throwError("Clean expired WeChat Web claim", cleanupError);
+    return null;
   }
 
   async createWechatSession(

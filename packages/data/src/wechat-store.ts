@@ -1,13 +1,17 @@
 import type {
   ActivateWechatSessionInput,
+  CreateWechatWebClaimInput,
   CreateWechatSessionInput,
   WechatConnection,
   WechatConnectionSession,
   WechatOutboundDelivery,
+  WechatWebClaim,
   WechatSessionUpdate
 } from "@tomeet/wechat-ilink";
 
 export interface WechatConnectionStore {
+  createWechatWebClaim(input: CreateWechatWebClaimInput): Promise<WechatWebClaim>;
+  consumeWechatWebClaim(tokenHash: string): Promise<WechatWebClaim | null>;
   createWechatSession(input: CreateWechatSessionInput): Promise<WechatConnectionSession>;
   getWechatSession(sessionId: string): Promise<WechatConnectionSession | null>;
   updateWechatSession(

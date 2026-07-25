@@ -120,6 +120,21 @@ function hostedWithSearch(provider?: WebSearchProvider): HostedLlmIntelligence {
   });
 }
 
+function optimizedHosted(provider?: WebSearchProvider): HostedLlmIntelligence {
+  return new HostedLlmIntelligence({
+    apiKey: "test-key",
+    baseUrl: "https://llm.example.test/v1",
+    textModel: "test-model",
+    visionModel: "test-model",
+    audioModel: "audio-model",
+    webSearchProvider: provider,
+    simpleReplyFastPath: true,
+    singlePassEvidenceFinalizer: true,
+    now: () => new Date("2026-07-23T04:00:00.000Z"),
+    timeZone: "Asia/Shanghai"
+  });
+}
+
 function leftFrame(title: "TOMEET 组局邀请" | "TOMEET 成局确认函", lines: string[]): string {
   return [
     "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -131,6 +146,32 @@ function leftFrame(title: "TOMEET 组局邀请" | "TOMEET 成局确认函", line
 }
 
 describe("hosted Agent web search", () => {
+  it("grounds and verifies web evidence in one finalizer call", async () => {
+    const search = vi.fn(async () => [{
+      title: "AdventureX 2026 官方网站",
+      url: "https://adventure-x.org/zh",
+      content: "AdventureX 2026 于 7 月 22 日至 26 日在杭州举行。"
+    }]);
+    const requestBodies = stubChatResponses(
+      plannedReply(),
+      {
+        reply: "AdventureX 2026 于 7 月 22 日至 26 日在杭州举行。",
+        usedSourceIndexes: [0],
+        usedMemoryIds: []
+      }
+    );
+
+    const insight = await optimizedHosted({ search }).reply(
+      agentContext(),
+      "AdventureX 今年在哪里举办？"
+    );
+
+    expect(insight.reply).toContain("杭州");
+    expect(insight.webSearch?.sources).toHaveLength(1);
+    expect(requestBodies).toHaveLength(2);
+    expect(requestBodies[1]).toContain("唯一的证据校验和最终成文阶段");
+  });
+
   it("searches AdventureX, verifies the answer, and keeps sources out of the reply text", async () => {
     const search = vi.fn(async (_query: WebSearchQuery) => [{
       title: "AdventureX 2026 官方网站",
@@ -402,19 +443,102 @@ describe("hosted Agent exploration pressure", () => {
     expect(requestBodies).toHaveLength(3);
   });
 
+  it("publishes a low-risk question reply after one model request and emits stage timing", async () => {
+    const requestBodies = stubChatResponses(plannedReply({
+      replyDraft: "交互设计里，你现在最想先解决的是哪一段体验？",
+      searchPlan: { required: false, queries: [] }
+    }));
+    const events: Array<{ stage: string; status: string; requestBytes: number }> = [];
+    const intelligence = new HostedLlmIntelligence({
+      apiKey: "test-key",
+      baseUrl: "https://llm.example.test/v1",
+      textModel: "test-model",
+      visionModel: "test-model",
+      audioModel: "audio-model",
+      simpleReplyFastPath: true,
+      onLlmRequestEvent: (event) => events.push(event)
+    });
+
+    const insight = await intelligence.reply(
+      agentContext(),
+      "我最近在做一个机器人项目，主要负责交互设计",
+      undefined,
+      "message-1"
+    );
+
+    expect(insight.reply).toContain("哪一段体验");
+    expect(requestBodies).toHaveLength(1);
+    expect(events).toEqual([expect.objectContaining({
+      stage: "agent_reply.plan",
+      status: "completed",
+      requestBytes: expect.any(Number)
+    })]);
+  });
+
+  it("publishes a locally validated product action from the first model response", async () => {
+    const action = {
+      type: "start_match",
+      intent: { rawText: "我想认识做机器人的人" }
+    };
+    const requestBodies = stubChatResponses(plannedReply({
+      replyDraft: "好，我开始按这个方向给你找现场候选",
+      socialIntentDetected: true,
+      currentIntent: { rawText: "我想认识做机器人的人" },
+      actions: [action],
+      searchPlan: { required: false, queries: [] }
+    }));
+
+    const insight = await optimizedHosted().reply(
+      agentContext(),
+      "我想认识做机器人的人"
+    );
+
+    expect(insight.actions).toEqual([action]);
+    expect(insight.reply).toContain("开始按这个方向");
+    expect(requestBodies).toHaveLength(1);
+  });
+
+  it("does not add a second model call only because the reply is rhetorical", async () => {
+    const requestBodies = stubChatResponses(plannedReply({
+      replyDraft: "难道你不是一直最想做交互设计吗？",
+      searchPlan: { required: false, queries: [] }
+    }));
+
+    const insight = await optimizedHosted().reply(agentContext(), "我最近在做交互设计");
+
+    expect(insight.reply).toContain("难道");
+    expect(requestBodies).toHaveLength(1);
+  });
+
+  it("drops a social hook with no evidence instead of spending repair calls", async () => {
+    const requestBodies = stubChatResponses(
+      plannedReply({
+        replyDraft: "这个机器人项目里，你具体负责哪一段交互？",
+        socialHooks: [{ hookText: "在做机器人项目", evidenceMessageIds: [] }],
+        searchPlan: { required: false, queries: [] }
+      }),
+      verifiedReply("这个机器人项目里，你具体负责哪一段交互？")
+    );
+
+    const insight = await hostedWithSearch().reply(agentContext(), "我在做机器人项目");
+
+    expect(insight.socialHooks).toEqual([]);
+    expect(requestBodies).toHaveLength(2);
+  });
+
   it("reports the exact stage and field after deterministic repair is exhausted", async () => {
     const invalidPlan = plannedReply({
       replyDraft: { unexpected: true },
       searchPlan: { required: false, queries: [] }
     });
-    const requestBodies = stubChatResponses(invalidPlan, invalidPlan, invalidPlan);
+    const requestBodies = stubChatResponses(invalidPlan, invalidPlan);
 
     await expect(hostedWithSearch().reply(agentContext(), "没什么特别介意的"))
       .rejects.toThrow(
         "LLM 结构化输出校验失败 stage=agent_reply.plan: replyDraft invalid_type expected=string received=object"
       );
 
-    expect(requestBodies).toHaveLength(3);
+    expect(requestBodies).toHaveLength(2);
     const repairRequest = JSON.parse(requestBodies[1]!) as { temperature: number };
     expect(repairRequest.temperature).toBe(0);
   });

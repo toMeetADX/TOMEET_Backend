@@ -33,7 +33,11 @@ import {
   type AccessTokenVerifier,
   type EmailAccessTokenMatcher
 } from "./auth.js";
-import { registerWechatRoutes, type WechatApiRuntime } from "./wechat-routes.js";
+import {
+  registerWechatRoutes,
+  type WechatApiRuntime,
+  type WechatWebRegistrationRuntime
+} from "./wechat-routes.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -48,6 +52,7 @@ export interface BuildAppOptions {
   internalApiToken?: string;
   autoProvisionChannelUsers?: boolean;
   wechat?: WechatApiRuntime;
+  wechatWebRegistration?: WechatWebRegistrationRuntime;
   logger?: boolean;
   verifyAccessToken?: AccessTokenVerifier;
   trustProxy?: boolean;
@@ -156,6 +161,7 @@ export async function buildApp(options: BuildAppOptions) {
     if (
       path === "/health"
       || path === "/ready"
+      || path === "/auth/wechat/claim"
       || path?.startsWith("/internal/")
       || (path?.startsWith("/wechat/connect/sessions") && !isWechatSessionCreation)
       || (isWechatSessionCreation && !request.headers.authorization)
@@ -300,10 +306,11 @@ export async function buildApp(options: BuildAppOptions) {
     internalTokenMatches,
     publicSessionRateLimitMax: options.wechatQrRateLimitMax,
     rapidQrAccessTokenMatches: options.wechatRapidQrAccessTokenMatches,
+    webRegistration: options.wechatWebRegistration,
     isNewWechatIdentity: async (externalUserId) => (
       (await options.store.resolveChannelIdentity("wechat", externalUserId)) === null
     ),
-    onActivated: async ({ userId, deliverText }) => {
+    onActivated: async ({ userId, deliverText, webRegistrationUrl }) => {
       const onboardingState = await options.store.ensureAdventurexOnboardingState(userId);
       if (onboardingState.welcomeDeliveredAt) return;
       const message = await options.store.startAdventurexOnboarding(userId, "zh");
@@ -311,6 +318,16 @@ export async function buildApp(options: BuildAppOptions) {
       const bubbles = message.content.split(/\n\s*\n+/u).filter(Boolean);
       for (const [index, text] of bubbles.entries()) {
         await deliverText({ text, runId: `activation-welcome-${userId}-${index + 1}` });
+      }
+      if (webRegistrationUrl) {
+        await deliverText({
+          text: "想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！",
+          runId: `activation-welcome-${userId}-web-register-intro`
+        });
+        await deliverText({
+          text: `点这里完成注册：${webRegistrationUrl}`,
+          runId: `activation-welcome-${userId}-web-register-link`
+        });
       }
       await options.store.markAdventurexWelcomeDelivered(userId);
     }
@@ -421,6 +438,7 @@ export async function buildApp(options: BuildAppOptions) {
     reply: FastifyReply,
     sourceChannel: "web" | "wechat"
   ) {
+    const receivedAt = Date.now();
     const input = agentMessageInputSchema.parse(request.body);
     const generation = sourceChannel === "wechat"
       ? z.object({
@@ -439,6 +457,7 @@ export async function buildApp(options: BuildAppOptions) {
     assertCurrentUser(request, input.userId);
     await options.store.ensureUser(input.userId, input.displayName);
     const rawMessages = "messages" in generation ? generation.messages : undefined;
+    const persistenceStartedAt = Date.now();
     const savedMessages = rawMessages
       ? await Promise.all(rawMessages.map((item) => options.store.appendMessage({
           userId: input.userId,
@@ -455,8 +474,10 @@ export async function buildApp(options: BuildAppOptions) {
           sourceChannel
         })];
     const userMessage = savedMessages.at(-1)!;
+    const persistenceMs = Date.now() - persistenceStartedAt;
     const connectionId = "connectionId" in generation ? generation.connectionId : undefined;
     const generationToken = "generationToken" in generation ? generation.generationToken : undefined;
+    const enqueueStartedAt = Date.now();
     const job = await options.store.enqueueJob({
       type: "agent_reply",
       payload: {
@@ -470,9 +491,29 @@ export async function buildApp(options: BuildAppOptions) {
       idempotencyKey: generationToken
         ? `agent-generation:${connectionId}:${generationToken}`
         : `agent:${userMessage.id}`,
+      maxAttempts: 1,
       partitionKey: `user:${input.userId}`
     });
+    const enqueueMs = Date.now() - enqueueStartedAt;
+    request.log.info({
+      event: "agent_job_enqueued",
+      sourceChannel,
+      jobId: job.id,
+      messageCount: savedMessages.length,
+      persistenceMs,
+      enqueueMs,
+      totalMs: Date.now() - receivedAt
+    });
+    const handoffStartedAt = Date.now();
     const currentJob = await runInline(job.id);
+    request.log.info({
+      event: "agent_submission_completed",
+      sourceChannel,
+      jobId: job.id,
+      jobStatus: currentJob?.status ?? "missing",
+      handoffMs: Date.now() - handoffStartedAt,
+      totalMs: Date.now() - receivedAt
+    });
     return reply.code(currentJob?.status === "completed" ? 200 : 202).send({ userMessage, job: currentJob });
   }
 
