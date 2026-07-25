@@ -4,8 +4,12 @@ import tseslint from "typescript-eslint";
 const backendTypeScriptFiles = [
   "apps/api/**/*.ts",
   "apps/intelligence-worker/**/*.ts",
+  "apps/relationship-worker/**/*.ts",
   "apps/wechat-ilink-worker/**/*.ts",
-  "packages/**/*.ts"
+  "packages/**/*.ts",
+  "hardhat.config.ts",
+  "ignition/**/*.ts",
+  "test/**/*.ts"
 ];
 
 export default defineConfig([
