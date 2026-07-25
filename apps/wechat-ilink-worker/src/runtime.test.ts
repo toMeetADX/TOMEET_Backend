@@ -2,7 +2,8 @@ import { randomBytes } from "node:crypto";
 import {
   adventurexWelcomeBubbles,
   adventurexWelcomeContent,
-  channelTurnFailureNotice
+  channelTurnFailureNotice,
+  channelTurnProgressNotices
 } from "@tomeet/contracts";
 import type { WechatConnectionStore } from "@tomeet/data";
 import {
@@ -223,6 +224,88 @@ describe("WeChat worker runtime", () => {
     );
     expect(JSON.stringify(runtime.logger.info.mock.calls)).not.toContain("你好");
     expect(JSON.stringify(runtime.logger.info.mock.calls)).not.toContain("bot-secret");
+  });
+
+  it("streams staged progress bubbles while a slow Agent turn is running", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
+    runtime.dependencies.turnProgressDelayMs = 0;
+    runtime.dependencies.turnProgressIntervalMs = 5;
+    let resolveAgent!: (result: { reply: string; stale: boolean }) => void;
+    runtime.tomeet.sendTextBatch.mockImplementation(() => (
+      new Promise((resolve) => { resolveAgent = resolve; })
+    ));
+
+    const handling = handleWechatMessage(
+      runtime.dependencies,
+      activeConnection,
+      "bot-secret",
+      {
+        message_id: 45,
+        message_type: 1,
+        from_user_id: activeConnection.ownerIlinkUserId,
+        context_token: "context-progress",
+        run_id: "wechat-run-45",
+        item_list: [{ type: 1, text_item: { text: "帮我认真想想" } }]
+      }
+    );
+
+    await vi.waitFor(() => {
+      expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text))
+        .toEqual(channelTurnProgressNotices.zh);
+    });
+    resolveAgent({ reply: "想好了，这是我的回答。", stale: false });
+    await handling;
+
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+      ...channelTurnProgressNotices.zh,
+      "想好了，这是我的回答"
+    ]);
+    expect(runtime.ilink.sendText.mock.calls.slice(0, 3).map(([input]) => input.runId)).toEqual([
+      expect.stringMatching(/-progress-1$/u),
+      expect.stringMatching(/-progress-2$/u),
+      expect.stringMatching(/-progress-3$/u)
+    ]);
+    expect(runtime.ilink.sendText.mock.calls.every(([input]) => (
+      input.contextToken === "context-progress"
+    ))).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runtime.ilink.sendText).toHaveBeenCalledTimes(4);
+  });
+
+  it("still sends the final reply when a progress bubble fails", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
+    runtime.dependencies.turnProgressDelayMs = 0;
+    runtime.dependencies.turnProgressIntervalMs = 1000;
+    runtime.ilink.sendText
+      .mockRejectedValueOnce(new Error("progress_transport_failed"))
+      .mockResolvedValue("client-2");
+    runtime.tomeet.sendTextBatch.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { reply: "正式回复。", stale: false };
+    });
+
+    await handleWechatMessage(runtime.dependencies, activeConnection, "bot-secret", {
+      message_id: 46,
+      message_type: 1,
+      from_user_id: activeConnection.ownerIlinkUserId,
+      context_token: "context-progress-failure",
+      item_list: [{ type: 1, text_item: { text: "继续" } }]
+    });
+
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+      channelTurnProgressNotices.zh[0],
+      "正式回复"
+    ]);
+    expect(JSON.stringify(runtime.logger.error.mock.calls))
+      .toContain("wechat_turn_progress_failed");
+    expect(runtime.store.completeWechatMessage).toHaveBeenCalledWith(
+      activeConnection.id,
+      "46"
+    );
   });
 
   it("consumes the first inbound trigger when activation already delivered the welcome", async () => {
@@ -965,6 +1048,94 @@ describe("WeChat worker runtime", () => {
     expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
       "合并后的回复"
     ]);
+  });
+
+  it("stops progress for an obsolete turn when a newer message supersedes it", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    activeConnection.syncCursor = "cursor-before-progress";
+    runtime.dependencies.turnProgressDelayMs = 0;
+    runtime.dependencies.turnProgressIntervalMs = 5;
+    runtime.store.updateWechatConnectionCursor.mockResolvedValue(true);
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    let resolveFirst!: (result: { reply: string; stale: boolean }) => void;
+    runtime.tomeet.sendTextBatch
+      .mockImplementationOnce(async () => {
+        markFirstStarted();
+        return new Promise((resolve) => { resolveFirst = resolve; });
+      })
+      .mockResolvedValueOnce({ reply: "合并后的最终回复", stale: false });
+    let registrations = 0;
+    runtime.tomeet.setResponseGeneration.mockImplementation(async () => {
+      registrations += 1;
+      if (registrations === 2) resolveFirst({ reply: "旧回复", stale: true });
+    });
+    let markFirstProgressSent!: () => void;
+    const firstProgressSent = new Promise<void>((resolve) => { markFirstProgressSent = resolve; });
+    runtime.ilink.sendText.mockImplementation(async (input) => {
+      if (input.text === channelTurnProgressNotices.zh[0]) markFirstProgressSent();
+      return "client-1";
+    });
+    let poll = 0;
+    const controller = new AbortController();
+    runtime.ilink.getUpdates.mockImplementation(async () => {
+      poll += 1;
+      if (poll === 1) {
+        return {
+          ret: 0,
+          get_updates_buf: "cursor-progress-1",
+          msgs: [{
+            message_id: 121,
+            message_type: 1,
+            from_user_id: activeConnection.ownerIlinkUserId,
+            context_token: "context-progress-1",
+            item_list: [{ type: 1, text_item: { text: "第一个问题" } }]
+          }]
+        };
+      }
+      if (poll === 2) {
+        await Promise.all([firstStarted, firstProgressSent]);
+        return {
+          ret: 0,
+          get_updates_buf: "cursor-progress-2",
+          msgs: [{
+            message_id: 122,
+            message_type: 1,
+            from_user_id: activeConnection.ownerIlinkUserId,
+            context_token: "context-progress-2",
+            item_list: [{ type: 1, text_item: { text: "补充一句" } }]
+          }]
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      controller.abort();
+      return { ret: 0, msgs: [], get_updates_buf: "cursor-progress-3" };
+    });
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: controller.signal,
+      turnBatchWindowMs: 0
+    });
+
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+      channelTurnProgressNotices.zh[0],
+      "合并后的最终回复"
+    ]);
+    expect(runtime.ilink.sendText.mock.calls[0]?.[0]).toMatchObject({
+      contextToken: "context-progress-1",
+      runId: expect.stringMatching(/-progress-1$/u)
+    });
+    expect(runtime.tomeet.sendTextBatch.mock.calls[1]?.[0]).toMatchObject({
+      turns: [
+        { messageId: "121", content: "第一个问题" },
+        { messageId: "122", content: "补充一句" }
+      ]
+    });
   });
 
   it("marks iLink -14 as requiring a fresh QR authorization", async () => {
