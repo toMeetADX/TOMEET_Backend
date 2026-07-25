@@ -257,8 +257,9 @@ export interface DataStore {
   enqueueJob(input: EnqueueJobInput): Promise<LlmJob>;
   getJob(jobId: string): Promise<LlmJob | null>;
   claimJob(workerId: string): Promise<LlmJob | null>;
-  completeJob(jobId: string, result: Record<string, unknown>): Promise<void>;
-  failJob(jobId: string, error: string): Promise<void>;
+  heartbeatJob(jobId: string, workerId: string): Promise<boolean>;
+  completeJob(jobId: string, result: Record<string, unknown>, workerId?: string): Promise<void>;
+  failJob(jobId: string, error: string, workerId?: string): Promise<void>;
   ping(): Promise<void>;
 }
 

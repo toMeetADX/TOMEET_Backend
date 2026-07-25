@@ -22,6 +22,7 @@ const webSearchProvider = tavilyApiKey
       baseUrl: process.env.TAVILY_API_BASE_URL
     })
   : undefined;
+const adventurexMatchingV1 = process.env.ADVENTUREX_MATCHING_V1 === "true";
 const hosted = new HostedLlmIntelligence({
   apiKey,
   baseUrl: process.env.LLM_API_BASE_URL ?? "https://api.siliconflow.cn/v1",
@@ -29,12 +30,13 @@ const hosted = new HostedLlmIntelligence({
   visionModel: process.env.LLM_VISION_MODEL ?? textModel,
   audioModel: process.env.LLM_AUDIO_MODEL ?? "whisper-1",
   webSearchProvider,
+  adventurexMatchingV1,
   onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event }))
 });
 
 const store = new SupabaseStore(supabaseUrl, serviceRoleKey);
 const processor = new JobProcessor(store, hosted, hosted, {
-  adventurexMatchingV1: process.env.ADVENTUREX_MATCHING_V1 === "true"
+  adventurexMatchingV1
 });
 const workerId = `${process.env.RAILWAY_REPLICA_ID ?? "local"}:${randomUUID().slice(0, 8)}`;
 
@@ -115,13 +117,13 @@ async function runSlot(slot: number): Promise<void> {
         continue;
       }
       try {
-        const result = await processor.process(job);
-        await store.completeJob(job.id, result);
+        const result = await processor.process(job, { workerId: slotId });
+        await store.completeJob(job.id, result, slotId);
         emitJobMetrics(job.type, result);
         console.info(JSON.stringify({ level: "info", event: "job_completed", worker: slotId, jobId: job.id, type: job.type }));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        await store.failJob(job.id, message);
+        await store.failJob(job.id, message, slotId);
         console.error(JSON.stringify({ level: "error", event: "job_failed", worker: slotId, jobId: job.id, type: job.type, error: message }));
       }
     } catch (error) {

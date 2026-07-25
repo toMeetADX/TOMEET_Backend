@@ -1236,13 +1236,30 @@ export class SupabaseStore implements DataStore {
     return row ? mapJob(row as JsonRow) : null;
   }
 
-  async completeJob(jobId: string, result: Record<string, unknown>): Promise<void> {
-    const { error } = await this.client.rpc("complete_llm_job", { p_job_id: jobId, p_result: result });
+  async heartbeatJob(jobId: string, workerId: string): Promise<boolean> {
+    const { data, error } = await this.client.rpc("heartbeat_llm_job", {
+      p_job_id: jobId,
+      p_worker_id: workerId
+    });
+    if (error) this.throwError("续期智能任务锁", error);
+    return data === true;
+  }
+
+  async completeJob(jobId: string, result: Record<string, unknown>, workerId?: string): Promise<void> {
+    const { error } = await this.client.rpc("complete_llm_job", {
+      p_job_id: jobId,
+      p_result: result,
+      p_worker_id: workerId ?? null
+    });
     if (error) this.throwError("完成智能任务", error);
   }
 
-  async failJob(jobId: string, errorMessage: string): Promise<void> {
-    const { error } = await this.client.rpc("fail_llm_job", { p_job_id: jobId, p_error: errorMessage });
+  async failJob(jobId: string, errorMessage: string, workerId?: string): Promise<void> {
+    const { error } = await this.client.rpc("fail_llm_job", {
+      p_job_id: jobId,
+      p_error: errorMessage,
+      p_worker_id: workerId ?? null
+    });
     if (error) this.throwError("标记智能任务失败", error);
   }
 

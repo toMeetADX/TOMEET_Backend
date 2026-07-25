@@ -130,7 +130,12 @@ if (!decision?.requestIds.includes(requiredRequestId)) throw new Error("真实�
 console.log(JSON.stringify({
   model: textModel,
   valid: true,
-  actions: [start.actions[0].type, confirm.actions[0].type, complete.actions[0].type, feedback.actions[0].type],
+  actions: [
+    start.actions[0]?.type ?? null,
+    confirm.actions[0]?.type ?? null,
+    complete.actions[0]?.type ?? null,
+    feedback.actions[0]?.type ?? null
+  ],
   matchmakingIncludesRequester: true,
   sampleReply: start.reply
 }, null, 2));

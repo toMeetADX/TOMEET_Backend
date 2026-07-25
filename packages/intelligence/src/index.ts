@@ -22,6 +22,7 @@ import {
   type MatchRoundProposal,
   type MatchRoom,
   type UserMemoryProfile,
+  type UserMemorySourceType,
   type UserModel
 } from "@tomeet/contracts";
 import type { DataStore } from "@tomeet/data";
@@ -39,7 +40,14 @@ import {
   validateRoomJoinDecision
 } from "@tomeet/matchmaking";
 import { applyConversationInsight, applyMultimodalInsight } from "@tomeet/user-model";
+import {
+  actionFailureCode,
+  assertActionMatchesMatchingFlag,
+  filterSocialHooksByTextEvidence,
+  type OutboundDeliveryClass
+} from "./agent-policy.js";
 
+export * from "./agent-policy.js";
 export * from "./hosted-llm.js";
 export * from "./web-search.js";
 export { buildAgentContext } from "@tomeet/agent-core";
@@ -52,6 +60,37 @@ function requireString(payload: Record<string, unknown>, key: string): string {
 
 function sourceChannelFromJob(job: LlmJob) {
   return messageSourceChannelSchema.catch("legacy").parse(job.payload.sourceChannel);
+}
+
+function observationList(understanding: Record<string, unknown>, key: string): string[] {
+  const value = understanding[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && Boolean(item))
+    : [];
+}
+
+/**
+ * Vision output is evidence about the person, never the user's own words. The `[图片观察]`
+ * prefix is the contract the Agent prompt keys on to keep it out of social hooks.
+ */
+function describeImageObservation(
+  understanding: Record<string, unknown>,
+  imageCount: number,
+  hint?: string
+): string {
+  const observableDetails = observationList(understanding, "observableDetails");
+  const personCues = observationList(understanding, "personCues");
+  const uncertainty = observationList(understanding, "uncertainty");
+  const suggestedQuestion = typeof understanding.suggestedQuestion === "string"
+    ? understanding.suggestedQuestion
+    : "";
+  const lines = [`[图片观察] 用户刚发来 ${imageCount} 张图片。`];
+  if (hint) lines.push(`用户为这组图片补充的文字：${hint}`);
+  if (observableDetails.length > 0) lines.push(`可直接观察到：${observableDetails.join("；")}`);
+  if (personCues.length > 0) lines.push(`关于用户本人的待求证线索：${personCues.join("；")}`);
+  if (uncertainty.length > 0) lines.push(`看不准的地方：${uncertainty.join("；")}`);
+  if (suggestedQuestion) lines.push(`建议的追问方向：${suggestedQuestion}`);
+  return lines.join("\n");
 }
 
 export async function scheduleAdventurexMatchRequest(
@@ -116,30 +155,46 @@ export class JobProcessor {
     } = {}
   ) {}
 
-  async process(job: LlmJob): Promise<Record<string, unknown>> {
-    switch (job.type) {
-      case "agent_reply":
-        return this.processAgentReply(job);
-      case "agent_event_reply":
-        return this.processAgentEventReply(job);
-      case "multimodal_understanding":
-        return this.processMultimodal(job);
-      case "matchmaking":
-        return this.processMatchmaking(job);
-      case "match_round_generate":
-        return this.processMatchRoundGenerate(job);
-      case "match_round_settle":
-        return this.processMatchRoundSettle(job);
-      case "room_change_notify":
-        return this.processRoomChangeNotify();
-      case "feedback_update":
-        return this.processFeedback(job);
-      case "memory_extract":
-        return this.processMemoryExtract(job);
-      case "memory_consolidate":
-        return this.processMemoryConsolidate(job);
+  async process(job: LlmJob, runtime: { workerId?: string } = {}): Promise<Record<string, unknown>> {
+    const stopHeartbeat = runtime.workerId
+      ? this.startJobHeartbeat(job.id, runtime.workerId)
+      : null;
+    try {
+      switch (job.type) {
+        case "agent_reply":
+          return await this.processAgentReply(job);
+        case "agent_event_reply":
+          return await this.processAgentEventReply(job);
+        case "multimodal_understanding":
+          return await this.processMultimodal(job);
+        case "matchmaking":
+          return await this.processMatchmaking(job);
+        case "match_round_generate":
+          return await this.processMatchRoundGenerate(job);
+        case "match_round_settle":
+          return await this.processMatchRoundSettle(job);
+        case "room_change_notify":
+          return await this.processRoomChangeNotify();
+        case "feedback_update":
+          return await this.processFeedback(job);
+        case "memory_extract":
+          return await this.processMemoryExtract(job);
+        case "memory_consolidate":
+          return await this.processMemoryConsolidate(job);
+      }
+      throw new Error(`不支持的任务类型：${job.type}`);
+    } finally {
+      stopHeartbeat?.();
     }
-    throw new Error(`不支持的任务类型：${job.type}`);
+  }
+
+  private startJobHeartbeat(jobId: string, workerId: string): () => void {
+    const intervalMs = 60_000;
+    const timer = setInterval(() => {
+      void this.store.heartbeatJob(jobId, workerId).catch(() => undefined);
+    }, intervalMs);
+    timer.unref?.();
+    return () => clearInterval(timer);
   }
 
   private get adventurexMatchingV1(): boolean {
@@ -193,21 +248,23 @@ export class JobProcessor {
   }
 
   private async buildProductContext(userId: string) {
-    const [model, matchRequest, room, memoryProfile, matchOptions, onboardingState, messages] = await Promise.all([
+    const [model, matchRequest, room, memoryProfile, matchOptions, onboardingState, messages, socialHooks] = await Promise.all([
       this.store.getUserModel(userId),
       this.store.getLatestMatchRequestForUser(userId),
       this.store.getLatestRoomForUser(userId),
       this.store.getMemoryProfile(userId),
       this.store.listCurrentMatchOptions(userId),
       this.store.ensureAdventurexOnboardingState(userId),
-      this.store.listRecentMessages(userId, 32)
+      this.store.listRecentMessages(userId, 32),
+      this.store.listActiveSocialHooks(userId, 16)
     ]);
     return buildAgentContext(messages, model, {
       matchRequest,
       room,
       memoryProfile,
       matchOptions,
-      onboardingState
+      onboardingState,
+      socialHooks
     });
   }
 
@@ -222,7 +279,15 @@ export class JobProcessor {
     userId: string;
     content: string;
     idempotencyKey: string;
+    deliveryClass?: OutboundDeliveryClass;
   }) {
+    const deliveryClass = input.deliveryClass ?? "active_flow";
+    if (deliveryClass === "proactive_recall") {
+      const request = await this.store.getLatestMatchRequestForUser(input.userId);
+      if (!request?.proactivePushEnabled) {
+        return null;
+      }
+    }
     const message = await this.store.appendMessage({
       userId: input.userId,
       role: "assistant",
@@ -238,12 +303,14 @@ export class JobProcessor {
     userId: string;
     event: AgentProductEvent;
     idempotencyKey: string;
+    deliveryClass?: OutboundDeliveryClass;
   }) {
     const composed = await this.composeProductMessage(input.userId, input.event);
     const message = await this.appendProactiveMessage({
       userId: input.userId,
       content: composed.content,
-      idempotencyKey: input.idempotencyKey
+      idempotencyKey: input.idempotencyKey,
+      deliveryClass: input.deliveryClass
     });
     return { composed, message };
   }
@@ -285,6 +352,30 @@ export class JobProcessor {
     const userId = requireString(job.payload, "userId");
     const userContent = requireString(job.payload, "content");
     const userMessageId = requireString(job.payload, "userMessageId");
+    return this.runAgentTurn(job, {
+      userId,
+      userContent,
+      userMessageId,
+      replyIdempotencyKey: `agent-reply:${job.id}`,
+      memorySource: { sourceType: "message", sourceId: userMessageId, content: userContent }
+    });
+  }
+
+  /**
+   * One conversational turn through the single TOMEET persona. Text messages and image
+   * observations both enter here so the two input kinds cannot drift into different voices.
+   */
+  private async runAgentTurn(
+    job: LlmJob,
+    input: {
+      userId: string;
+      userContent: string;
+      userMessageId?: string;
+      replyIdempotencyKey: string;
+      memorySource: { sourceType: UserMemorySourceType; sourceId: string; content: string } | null;
+    }
+  ): Promise<Record<string, unknown>> {
+    const { userId, userContent, userMessageId } = input;
     const sourceChannel = sourceChannelFromJob(job);
     const [
       model,
@@ -293,7 +384,8 @@ export class JobProcessor {
       initialRoom,
       memoryProfile,
       matchOptions,
-      onboardingState
+      onboardingState,
+      socialHooks
     ] = await Promise.all([
       this.store.getUserModel(userId),
       this.store.getLatestMatchRequestForUser(userId),
@@ -301,7 +393,8 @@ export class JobProcessor {
       this.store.getLatestRoomForUser(userId),
       this.store.getMemoryProfile(userId),
       this.store.listCurrentMatchOptions(userId),
-      this.store.ensureAdventurexOnboardingState(userId)
+      this.store.ensureAdventurexOnboardingState(userId),
+      this.store.listActiveSocialHooks(userId, 16)
     ]);
     const [messages, checkpoint] = await Promise.all([
       this.store.listRecentMessages(userId, 32),
@@ -315,6 +408,7 @@ export class JobProcessor {
       memoryProfile,
       matchOptions,
       onboardingState,
+      socialHooks,
       excludeMessageId: userMessageId
     });
     const insight = await this.agent.reply(
@@ -341,12 +435,8 @@ export class JobProcessor {
     } else if (insight.onboardingTransition === "language_zh") {
       await this.store.updateAdventurexOnboardingState(userId, { preferredLanguage: "zh" });
     }
-    const messageIds = new Set((await this.store.listRecentMessages(userId, 100))
-      .filter((message) => message.role === "user")
-      .map((message) => message.id));
-    const validSocialHooks = insight.socialHooks.filter((hook) =>
-      hook.evidenceMessageIds.every((messageId) => messageIds.has(messageId))
-    );
+    const recentForEvidence = await this.store.listRecentMessages(userId, 100);
+    const validSocialHooks = filterSocialHooksByTextEvidence(insight.socialHooks, recentForEvidence);
     const savedSocialHooks = await this.store.saveSocialHooks(userId, validSocialHooks);
     await this.store.recordMemoryUsage(userId, insight.usedMemoryIds);
     const currentIntent = insight.currentIntent && insight.socialIntentDetected
@@ -367,6 +457,7 @@ export class JobProcessor {
     let room = initialRoom;
     for (const action of insight.actions) {
       try {
+        assertActionMatchesMatchingFlag(action, this.adventurexMatchingV1);
         const result = await this.executeAgentAction(
           job,
           userId,
@@ -381,36 +472,59 @@ export class JobProcessor {
         if (result.matchInvite !== undefined) matchInvite = result.matchInvite;
         room = result.room;
       } catch (error) {
-        if (!(error instanceof StoreConflictError) && !(error instanceof StoreNotFoundError)) throw error;
-        actionResults.push({ type: action.type, ok: false, error: error.message });
+        if (
+          !(error instanceof StoreConflictError)
+          && !(error instanceof StoreNotFoundError)
+        ) throw error;
+        actionResults.push({
+          type: action.type,
+          ok: false,
+          error: error.message,
+          code: actionFailureCode(error)
+        });
       }
     }
-    const actionErrors = actionResults.filter((result) => result.ok === false).map((result) => result.error);
+    const actionErrors = actionResults.filter((result) => result.ok === false);
     const replyOverride = actionResults.find((result) => typeof result.replyOverride === "string")?.replyOverride;
-    const replyContent = actionErrors.length
-      ? `${insight.reply}\n\n不过这次操作暂时没有完成：${actionErrors.join("；")}`
-      : typeof replyOverride === "string" ? replyOverride : insight.reply;
+    let replyContent = typeof replyOverride === "string" ? replyOverride : insight.reply;
+    if (actionErrors.length > 0 && typeof replyOverride !== "string") {
+      const failureMessage = await this.composeProductMessage(userId, {
+        kind: "action_failed",
+        facts: {
+          draftReply: insight.reply,
+          failedActions: actionErrors.map((result) => ({
+            type: result.type,
+            code: result.code ?? "failed"
+          })),
+          canContinue: true
+        }
+      });
+      replyContent = failureMessage.content;
+    }
     const message = await this.appendAssistantReply(job, {
       userId,
       content: replyContent,
-      idempotencyKey: `agent-reply:${job.id}`,
+      idempotencyKey: input.replyIdempotencyKey,
       sourceChannel,
       replyToMessageId: userMessageId
     });
     if (!message) return { stale: true, supersededBeforeCommit: false };
-    const memoryJob = await this.store.enqueueJob({
-      type: "memory_extract",
-      payload: {
-        userId,
-        sourceType: "message",
-        sourceId: userMessageId,
-        content: userContent,
-        assistantReply: replyContent,
-        memoryReviewSuggested: insight.memoryReviewSuggested
-      },
-      idempotencyKey: `memory:message:${userMessageId}`,
-      partitionKey: `user:${userId}`
-    });
+    const memorySource = input.memorySource;
+    const memoryJob = memorySource
+      ? await this.store.enqueueJob({
+          type: "memory_extract",
+          payload: {
+            userId,
+            sourceType: memorySource.sourceType,
+            sourceId: memorySource.sourceId,
+            content: memorySource.content,
+            assistantReply: replyContent,
+            memoryReviewSuggested: insight.memoryReviewSuggested
+          },
+          idempotencyKey: `memory:${memorySource.sourceType}:${memorySource.sourceId}`,
+          partitionKey: `user:${userId}`
+        })
+      : null;
     return {
       message,
       userModel: updatedModel,
@@ -420,7 +534,7 @@ export class JobProcessor {
       matchRequest,
       matchInvite,
       room,
-      memoryJobId: memoryJob.id,
+      memoryJobId: memoryJob?.id ?? null,
       contextBudget: context.budget,
       usedMemoryCount: insight.usedMemoryIds.length,
       savedSocialHookCount: savedSocialHooks.length
@@ -576,6 +690,9 @@ export class JobProcessor {
         throw new StoreConflictError("当前没有正在进行的匹配");
       }
       case "select_match_options": {
+        if (!this.adventurexMatchingV1) {
+          throw new StoreConflictError("未开启 AdventureX V1 时不支持候选选择");
+        }
         if (!currentMatchRequest || currentMatchRequest.status !== "matching") {
           throw new StoreNotFoundError("当前没有可以选择的候选");
         }
@@ -608,12 +725,49 @@ export class JobProcessor {
         return { result: { choices }, matchRequest: await this.store.getMatchRequest(currentMatchRequest.requestId), room: currentRoom };
       }
       case "refresh_match_options": {
+        if (!this.adventurexMatchingV1) {
+          throw new StoreConflictError("未开启 AdventureX V1 时不支持换一批");
+        }
         if (!currentMatchRequest || currentMatchRequest.status !== "matching") throw new StoreNotFoundError("当前没有可刷新的匹配");
         await this.store.expireMatchOptions(currentMatchRequest.requestId);
         const request = await this.store.getMatchRequest(currentMatchRequest.requestId);
         if (!request) throw new StoreNotFoundError("匹配请求不存在");
         const scheduled = await this.scheduleMatchRequest(request);
         return { result: scheduled, matchRequest: request, room: currentRoom };
+      }
+      case "explain_match_option": {
+        if (!this.adventurexMatchingV1) {
+          throw new StoreConflictError("未开启 AdventureX V1 时不支持候选说明");
+        }
+        const options = await this.store.listCurrentMatchOptions(userId);
+        const option = options?.options.find((item) => item.optionNumber === action.optionNumber);
+        if (!options || !option) throw new StoreNotFoundError("当前没有可说明的候选");
+        const composed = await this.composeProductMessage(userId, {
+          kind: "match_option_detail",
+          facts: {
+            optionNumber: option.optionNumber,
+            option: {
+              optionNumber: option.optionNumber,
+              activityName: option.activityName,
+              activityDescription: option.previewText,
+              sourceType: option.sourceType,
+              confirmedFacts: option.hooks
+                .filter((hook) => hook.certainty === "confirmed")
+                .map((hook) => ({ hookText: hook.hookText })),
+              possibleFacts: option.hooks
+                .filter((hook) => hook.certainty === "possible")
+                .map((hook) => ({ hookText: hook.hookText })),
+              expiresAt: options.expiresAt
+            },
+            offerWindowExpiresAt: options.expiresAt
+          }
+        });
+        return {
+          result: { optionNumber: option.optionNumber },
+          matchRequest: currentMatchRequest,
+          room: currentRoom,
+          replyOverride: composed.content
+        };
       }
       case "cancel_match": {
         if (!currentMatchRequest) throw new StoreNotFoundError("当前没有可以取消的匹配");
@@ -623,7 +777,14 @@ export class JobProcessor {
       case "restart_match": {
         if (!currentMatchRequest) throw new StoreNotFoundError("没有可重新开始的匹配记录");
         const request = await this.store.restartMatch(currentMatchRequest.requestId);
-        const scheduled = await this.scheduleMatchRequest(request);
+        const scheduled = this.adventurexMatchingV1
+          ? await this.scheduleMatchRequest(request)
+          : await this.store.enqueueJob({
+              type: "matchmaking",
+              payload: { requestId: request.requestId },
+              idempotencyKey: `match:${request.requestId}`,
+              partitionKey: `user:${userId}`
+            }).then((queued) => ({ roundId: null, jobId: queued.id }));
         return { result: { matchRequest: request, ...scheduled }, matchRequest: request, room: currentRoom };
       }
       case "enable_match_push": {
@@ -691,6 +852,9 @@ export class JobProcessor {
         };
       }
       case "confirm_room": {
+        if (this.adventurexMatchingV1) {
+          throw new StoreConflictError("AdventureX V1 接受候选即确认，无需再次确认房间");
+        }
         if (!currentRoom) throw new StoreNotFoundError("当前没有可以确认的房间");
         const room = await this.store.confirmRoom(currentRoom.roomId, userId);
         return { result: { room }, matchRequest: currentMatchRequest, room };
@@ -817,11 +981,12 @@ export class JobProcessor {
       Promise.all(storagePaths.map((storagePath) => this.store.resolveStorageUrl(storagePath))),
       this.store.ensureAdventurexOnboardingState(userId)
     ]);
+    const hint = typeof job.payload.hint === "string" ? job.payload.hint : undefined;
     const understanding = await this.agent.understandMultimodal({
       kind,
       storagePaths: resolvedStoragePaths,
       mimeTypes,
-      hint: typeof job.payload.hint === "string" ? job.payload.hint : undefined,
+      hint,
       preferredLanguage: onboardingState.preferredLanguage
     });
     if (!(await this.isReplyGenerationCurrent(job))) {
@@ -832,6 +997,22 @@ export class JobProcessor {
     const userModel = await this.saveModelWithRetry(userId, (current) =>
       applyMultimodalInsight(current, inputIds[0]!, understanding)
     );
+    const memoryContent = typeof understanding.recentImpression === "string"
+      ? understanding.recentImpression
+      : typeof understanding.summary === "string"
+        ? understanding.summary
+        : "";
+    if (kind === "image") {
+      const turn = await this.runAgentTurn(job, {
+        userId,
+        userContent: describeImageObservation(understanding, storagePaths.length, hint),
+        replyIdempotencyKey: `multimodal-reply:${job.id}`,
+        memorySource: memoryContent
+          ? { sourceType: "multimodal", sourceId: inputIds[0]!, content: memoryContent }
+          : null
+      });
+      return { inputId: inputIds[0], inputIds, understanding, ...turn };
+    }
     const reply = typeof understanding.reply === "string" ? understanding.reply : null;
     if (!reply) throw new Error("多模态理解没有返回可发布回复");
     const message = await this.appendAssistantReply(job, {
@@ -841,11 +1022,6 @@ export class JobProcessor {
       sourceChannel: sourceChannelFromJob(job)
     });
     if (!message) return { stale: true, supersededBeforeCommit: false, understanding };
-    const memoryContent = typeof understanding.recentImpression === "string"
-      ? understanding.recentImpression
-      : typeof understanding.summary === "string"
-        ? understanding.summary
-        : "";
     const memoryJob = memoryContent
       ? await this.store.enqueueJob({
           type: "memory_extract",
@@ -1077,6 +1253,18 @@ export class JobProcessor {
       this.store.listRoundCandidates(roundId),
       this.store.listOfflineGames()
     ]);
+    const consentGatedRequestIds = new Set(
+      candidates
+        .filter((candidate) =>
+          candidate.request.proactivePushEnabled
+          && (
+            candidate.request.phase === "watching"
+            || candidate.matchingPriority === "watching"
+            || candidate.matchingPriority === "confirmation_follow_up"
+          )
+        )
+        .map((candidate) => candidate.request.requestId)
+    );
     const candidateByRequest = new Map(candidates.map((candidate) => [candidate.request.requestId, candidate]));
     const activeEntrants = candidates.filter((candidate) =>
       candidate.request.status === "matching"
@@ -1274,7 +1462,10 @@ export class JobProcessor {
                 currentInterestState: latest.phase
               }
             },
-            idempotencyKey: `match-unavailable:${roundId}:${candidate.request.requestId}:${idempotencySuffix}`
+            idempotencyKey: `match-unavailable:${roundId}:${candidate.request.requestId}:${idempotencySuffix}`,
+            deliveryClass: consentGatedRequestIds.has(candidate.request.requestId)
+              ? "proactive_recall"
+              : "active_flow"
           });
         }));
     };
@@ -1401,7 +1592,8 @@ export class JobProcessor {
       await this.appendProactiveMessage({
         userId: candidate.request.userId,
         content,
-        idempotencyKey: `match-options:${roundId}:${requestId}`
+        idempotencyKey: `match-options:${roundId}:${requestId}`,
+        deliveryClass: consentGatedRequestIds.has(requestId) ? "proactive_recall" : "active_flow"
       });
     }));
     await notifyUnavailable(noOfferEntrants, unavailableCause, "partial");
@@ -1509,7 +1701,8 @@ export class JobProcessor {
               followUpPriority: "confirmation_follow_up"
             }
           },
-          idempotencyKey: `match-confirmation-incomplete:${roundId}:${request.requestId}`
+          idempotencyKey: `match-confirmation-incomplete:${roundId}:${request.requestId}`,
+          deliveryClass: latest.phase === "watching" ? "proactive_recall" : "active_flow"
         });
         if (latest.phase === "watching") watchingRequestCount += 1;
         continue;
@@ -1527,7 +1720,8 @@ export class JobProcessor {
               currentInterestState: "watching"
             }
           },
-          idempotencyKey: `match-unavailable:${roundId}:${request.requestId}:settled`
+          idempotencyKey: `match-unavailable:${roundId}:${request.requestId}:settled`,
+          deliveryClass: "proactive_recall"
         });
         watchingRequestCount += 1;
         continue;

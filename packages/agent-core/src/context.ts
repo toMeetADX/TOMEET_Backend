@@ -5,6 +5,7 @@ import type {
   MatchRequest,
   MatchRoom,
   Message,
+  SocialHook,
   UserMemory,
   UserMemoryProfile,
   UserModel
@@ -108,6 +109,13 @@ function selectMemories(
   };
 }
 
+function buildProfileReadiness(socialHooks: SocialHook[]): Record<string, unknown> {
+  return {
+    confirmedSocialHooks: socialHooks.slice(0, 8).map((hook) => hook.hookText),
+    confirmedSocialHookCount: socialHooks.length
+  };
+}
+
 function buildPromptRuntime(
   currentIntent: Record<string, unknown>,
   matchRequest: MatchRequest | null,
@@ -115,9 +123,12 @@ function buildPromptRuntime(
   onboardingState: AdventurexOnboardingState | null,
   matchInvite: MatchInvite | null,
   room: MatchRoom | null,
+  socialHooks: SocialHook[],
   maxTokens: number
 ): Record<string, unknown> {
+  const profileReadiness = buildProfileReadiness(socialHooks);
   const projected = {
+    profileReadiness,
     currentIntent,
     matchRequest: matchRequest
       ? {
@@ -180,6 +191,7 @@ function buildPromptRuntime(
   };
   if (estimateTokens(projected) <= maxTokens) return projected;
   return {
+    profileReadiness,
     currentIntentSummary: truncateToEstimatedTokens(JSON.stringify(currentIntent), Math.floor(maxTokens * 0.55)),
     matchRequest: matchRequest
       ? {
@@ -239,6 +251,7 @@ export function buildAgentContext(
     relevantMemories?: UserMemory[];
     matchOptions?: MatchOptionContext | null;
     onboardingState?: AdventurexOnboardingState | null;
+    socialHooks?: SocialHook[];
     excludeMessageId?: string;
   } = {},
   options: ContextAssemblerOptions = {}
@@ -276,6 +289,7 @@ export function buildAgentContext(
   const onboardingState = socialState.onboardingState ?? null;
   const matchInvite = socialState.matchInvite ?? null;
   const room = socialState.room ?? null;
+  const socialHooks = socialState.socialHooks ?? [];
   const promptRuntime = buildPromptRuntime(
     userModel.currentIntent,
     matchRequest,
@@ -283,6 +297,7 @@ export function buildAgentContext(
     onboardingState,
     matchInvite,
     room,
+    socialHooks,
     limits.runtimeTokenBudget
   );
   const runtimeTokens = estimateTokens(promptRuntime);
@@ -292,7 +307,8 @@ export function buildAgentContext(
     matchOptions,
     onboardingState,
     matchInvite,
-    room
+    room,
+    profileReadiness: buildProfileReadiness(socialHooks)
   }) > runtimeTokens) {
     truncatedSections.push("runtimeState");
   }

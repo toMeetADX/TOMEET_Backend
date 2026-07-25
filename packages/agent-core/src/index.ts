@@ -35,6 +35,7 @@ export type AgentAction =
       rawText: string;
     }
   | { type: "refresh_match_options" }
+  | { type: "explain_match_option"; optionNumber: 1 | 2 | 3 }
   | { type: "cancel_match" }
   | { type: "restart_match"; intent: Record<string, unknown> }
   | { type: "enable_match_push" }
@@ -234,7 +235,11 @@ export class MockAgentIntelligence implements AgentIntelligence {
       ? ({ "一": 1, "二": 2, "三": 3, "1": 1, "2": 2, "3": 3 } as const)[numberMatch[1] as "一" | "二" | "三" | "1" | "2" | "3"]
       : null;
 
-    if (
+    if (normalized.startsWith("[图片观察]")) {
+      onboardingTransition = "engaged";
+      reply = /建议的追问方向：(.+)/u.exec(normalized)?.[1]?.trim()
+        || "你刚发的这些里，哪一件是你自己在做的？";
+    } else if (
       stopMatchRequested
       && (
         context.room?.matchingStatus === "active"
@@ -374,7 +379,21 @@ export class MockAgentIntelligence implements AgentIntelligence {
         nextIntent: normalized
       });
       reply = "我记下了这次对人和游戏的感受，也会用它改进下一次匹配。";
-    } else if (actions.length === 0 && context.room?.status === "confirming" && /(确认|参加|可以去|愿意去|没问题)/u.test(normalized)) {
+    } else if (
+      actions.length === 0
+      && context.matchOptions
+      && /(?:第\s*[一二三123]\s*(?:个|项)?|选项\s*[123]).{0,12}(?:再讲|多讲|详细|什么局|什么活动|介绍)/u.test(normalized)
+    ) {
+      const matched = /(?:第\s*([一二三123])\s*(?:个|项)?|选项\s*([123]))/u.exec(normalized);
+      const raw = matched?.[1] ?? matched?.[2] ?? "1";
+      const optionNumber = (raw === "2" || raw === "二" ? 2 : raw === "3" || raw === "三" ? 3 : 1) as 1 | 2 | 3;
+      actions.push({ type: "explain_match_option", optionNumber });
+      reply = "我根据当前候选事实补充说明。";
+    } else if (
+      actions.length === 0
+      && context.room?.status === "confirming"
+      && /(确认|参加|可以去|愿意去|没问题)/u.test(normalized)
+    ) {
       actions.push({ type: "confirm_room" });
       reply = "好的，我来为你确认参加。";
     } else if (actions.length === 0 && context.room?.status === "confirmed" && /(结束|完成|参加完|活动完)/u.test(normalized)) {
@@ -478,13 +497,16 @@ export class MockAgentIntelligence implements AgentIntelligence {
     const examples: Record<AgentProductEvent["kind"], string> = {
       legacy_match_ready: "匹配已经完成，接下来可以看看这次活动和成员安排。",
       match_options: "候选已经准备好了。",
+      match_option_detail: "我根据当前候选事实补充说明这一个选项。",
       match_unavailable: "现在还没有足够合适的人和局。如果你愿意，有合适的出现时我可以主动告诉你。",
       match_confirmation_incomplete: "这次候选没有完成成局确认。你的选择已经收到；如果你愿意，有新的合适安排时我可以主动告诉你。",
       room_intro: "成局信息已经准备好。",
       match_expired: "这次匹配已经超时并结束了。如果还想再匹配，告诉我就行。",
       room_change: "当前活动的信息发生了变化，我把最新情况同步给你。",
       draft_change: "你看过的候选发生了变化，我会按最新情况重新说明。",
-      unsupported_channel_message: "这条消息目前无法读取，你可以换一种方式告诉我。"
+      unsupported_channel_message: "这条消息目前无法读取，你可以换一种方式告诉我。",
+      channel_media_unreadable: "你发的图片我这边没有取到，可以再发一次吗？",
+      action_failed: "刚才那步操作暂时没有完成，你可以稍后再试，或者换一种说法告诉我。"
     };
     return { content: examples[event.kind], optionPreviews: [] };
   }
@@ -506,9 +528,8 @@ export class MockAgentIntelligence implements AgentIntelligence {
     hint?: string;
     preferredLanguage?: AdventurexLanguage;
   }): Promise<Record<string, unknown>> {
-    return {
+    const shared = {
       kind: input.kind,
-      reply: "我已经理解了这份材料，会把它作为近期印象而不是确定的个人事实。",
       summary: input.hint || `用户提供了一份${input.kind === "image" ? "图片" : "短录音"}材料。`,
       recentImpression: input.hint
         ? `用户通过${input.kind === "image" ? "图片" : "录音"}传递的近期印象：${input.hint}`
@@ -516,6 +537,16 @@ export class MockAgentIntelligence implements AgentIntelligence {
       sources: input.storagePaths,
       mock: true
     };
+    // Image observation never carries a reply: the main Agent turn writes the user-facing text.
+    return input.kind === "image"
+      ? {
+          ...shared,
+          observableDetails: ["画面里有一个正在进行的现场活动"],
+          uncertainty: ["看不出用户本人在其中的角色"],
+          personCues: ["用户可能亲自参与了画面里的这件事"],
+          suggestedQuestion: "这件事你是去看的，还是自己上手做的？"
+        }
+      : { ...shared, reply: "我已经理解了这份材料，会把它作为近期印象而不是确定的个人事实。" };
   }
 
   async reflectOnFeedback(feedback: PostEventFeedback, _userModel: UserModel): Promise<FeedbackInsight> {

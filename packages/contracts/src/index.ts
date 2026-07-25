@@ -33,13 +33,16 @@ export type Message = z.infer<typeof messageSchema>;
 export const agentProductEventKindSchema = z.enum([
   "legacy_match_ready",
   "match_options",
+  "match_option_detail",
   "match_unavailable",
   "match_confirmation_incomplete",
   "room_intro",
   "match_expired",
   "room_change",
   "draft_change",
-  "unsupported_channel_message"
+  "unsupported_channel_message",
+  "channel_media_unreadable",
+  "action_failed"
 ]);
 export type AgentProductEventKind = z.infer<typeof agentProductEventKindSchema>;
 
@@ -89,6 +92,16 @@ export function adventurexWelcomeContent(language: AdventurexLanguage): string {
   return adventurexWelcomeBubbles[language].join("\n\n");
 }
 
+export const channelSupportedInputs = ["text", "image", "transcribed_audio"] as const;
+export type ChannelSupportedInput = typeof channelSupportedInputs[number];
+
+// Delivered straight over the channel transport: it is the notice for the case where the
+// Agent itself could not be reached, so its wording cannot come from the Agent.
+export const channelTurnFailureNotice: Record<AdventurexLanguage, string> = {
+  zh: "刚才这组消息没处理成功，可以再发一次吗？",
+  en: "I could not process that last batch of messages. Could you send it again?"
+};
+
 export const adventurexOnboardingStateSchema = z.object({
   userId: idSchema,
   stage: adventurexOnboardingStageSchema,
@@ -118,11 +131,12 @@ export const socialHookSchema = z.object({
 });
 export type SocialHook = z.infer<typeof socialHookSchema>;
 
+// Vision only observes; the reply is written by the main Agent so images and text share one persona.
 export const adventurexImageUnderstandingSchema = z.object({
   observableDetails: z.array(z.string().min(1).max(240)).max(5),
   uncertainty: z.array(z.string().min(1).max(240)).max(3),
-  suggestedQuestion: z.string().min(1).max(500),
-  reply: z.string().min(1).max(2_000)
+  personCues: z.array(z.string().min(1).max(240)).max(5),
+  suggestedQuestion: z.string().min(1).max(500)
 });
 export type AdventurexImageUnderstanding = z.infer<typeof adventurexImageUnderstandingSchema>;
 

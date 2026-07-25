@@ -76,17 +76,21 @@ export async function downloadWechatImage(
     timeoutMs?: number;
   } = {}
 ): Promise<DownloadedWechatImage> {
-  if (item.type !== 2 || !item.image_item?.media) {
+  if (item.type !== 2 || !item.image_item) {
     throw new Error("微信消息不包含可下载图片");
   }
-  const media = item.image_item.media;
-  if (!media.encrypt_query_param && !media.full_url) {
+  const image = item.image_item;
+  const media = [image.media, image.thumb_media].find((candidate) => (
+    candidate?.encrypt_query_param || candidate?.full_url
+  ));
+  const fullUrl = media?.full_url ?? image.url;
+  if (!media?.encrypt_query_param && !fullUrl) {
     throw new Error("微信图片缺少 CDN 下载参数");
   }
   const url = safeCdnUrl(
-    media.encrypt_query_param ?? "",
+    media?.encrypt_query_param ?? "",
     options.cdnBaseUrl ?? DEFAULT_WECHAT_CDN_BASE_URL,
-    media.full_url
+    fullUrl
   );
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_IMAGE_BYTES;
   const response = await (options.fetch ?? globalThis.fetch)(url, {
@@ -99,9 +103,8 @@ export async function downloadWechatImage(
   if (encrypted.length === 0 || encrypted.length > maxBytes + 16) {
     throw new Error("微信图片为空或超过大小限制");
   }
-  const aesKeyBase64 = item.image_item.aeskey
-    ? Buffer.from(item.image_item.aeskey, "hex").toString("base64")
-    : media.aes_key;
+  const aesKeyBase64 = media?.aes_key
+    ?? (image.aeskey ? Buffer.from(image.aeskey, "hex").toString("base64") : undefined);
   const plaintext = aesKeyBase64
     ? decryptAesEcb(encrypted, parseAesKey(aesKeyBase64))
     : encrypted;
