@@ -191,6 +191,53 @@ describe("WeChat one-time QR onboarding", () => {
     expect(JSON.stringify(sentMessages)).not.toContain("anonymous-refresh-token");
   });
 
+  it("keeps one Web user and one welcome when the same WeChat account scans different QR codes", async () => {
+    const owner = "wechat-owner-multiple-qr-codes";
+    const confirmed = {
+      status: "confirmed",
+      bot_token: "first-bot-secret",
+      ilink_bot_id: "first-bot",
+      baseurl: "https://ilink-api.example.com",
+      ilink_user_id: owner
+    };
+    const {
+      app,
+      store,
+      sentMessages,
+      accountProvisioner,
+      provisionedUserId
+    } = await setup([
+      confirmed,
+      {
+        ...confirmed,
+        bot_token: "rotated-bot-secret",
+        ilink_bot_id: "second-bot"
+      }
+    ], undefined, undefined, undefined, { webRegistration: true });
+
+    for (let index = 0; index < 2; index += 1) {
+      const created = await app.inject({
+        method: "POST",
+        url: "/wechat/connect/sessions",
+        payload: {}
+      });
+      const session = created.json();
+      const activated = await app.inject({
+        method: "GET",
+        url: `/wechat/connect/sessions/${session.sessionId}`,
+        headers: { "x-wechat-session-token": session.sessionToken }
+      });
+      expect(activated.json()).toMatchObject({ status: "active" });
+    }
+
+    expect(await store.resolveChannelIdentity("wechat", owner))
+      .toMatchObject({ userId: provisionedUserId });
+    expect(accountProvisioner.provision).toHaveBeenCalledTimes(1);
+    expect(accountProvisioner.discard).not.toHaveBeenCalled();
+    expect(sentMessageTexts(sentMessages)).toHaveLength(6);
+    expect(sentMessageTexts(sentMessages).slice(0, 4)).toEqual(adventurexWelcomeBubbles.zh);
+  });
+
   it("returns QR creation secrets once and never exposes them from status or SSE", async () => {
     const { app } = await setup([{
       status: "confirmed",
@@ -603,7 +650,7 @@ describe("WeChat one-time QR onboarding", () => {
       .toMatchObject({ userId });
   });
 
-  it("protects and idempotently exposes the first-inbound onboarding welcome", async () => {
+  it("exposes the first-inbound onboarding welcome only once even before delivery is acknowledged", async () => {
     const internalApiToken = "internal-onboarding-token-at-least-32-characters";
     const { app, store } = await setup([], internalApiToken);
     const userId = randomUUID();
@@ -633,7 +680,7 @@ describe("WeChat one-time QR onboarding", () => {
     expect(first.json()).toMatchObject({
       message: { content: adventurexWelcomeContent("zh") }
     });
-    expect(second.json().message.id).toBe(first.json().message.id);
+    expect(second.json()).toEqual({ message: null });
     expect(await store.listRecentMessages(userId)).toEqual([
       expect.objectContaining({ id: first.json().message.id })
     ]);
