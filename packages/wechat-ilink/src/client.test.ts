@@ -67,6 +67,59 @@ describe("WechatILinkClient", () => {
     })).toBe("第一段\n语音转写");
   });
 
+  it("keeps the transport open beyond the provider long-poll window", async () => {
+    let requestSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve, reject) => {
+        requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason));
+        setTimeout(() => resolve(new Response(JSON.stringify({
+          ret: 0,
+          msgs: [],
+          get_updates_buf: "cursor-2",
+          longpolling_timeout_ms: 5
+        }))), 5);
+      });
+    });
+    const client = new WechatILinkClient({
+      fetch: fetchMock as typeof fetch,
+      longPollGraceMs: 25
+    });
+
+    await expect(client.getUpdates({
+      baseUrl: "https://api.example.com",
+      botToken: "bot-secret",
+      cursor: "cursor-1",
+      timeoutMs: 5
+    })).resolves.toMatchObject({ get_updates_buf: "cursor-2" });
+    expect(requestSignal).toBeDefined();
+    expect(requestSignal!.aborted).toBe(false);
+  });
+
+  it("marks a local long-poll transport timeout without advancing the cursor", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => (
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      })
+    ));
+    const client = new WechatILinkClient({
+      fetch: fetchMock as typeof fetch,
+      longPollGraceMs: 5
+    });
+
+    await expect(client.getUpdates({
+      baseUrl: "https://api.example.com",
+      botToken: "bot-secret",
+      cursor: "cursor-1",
+      timeoutMs: 5
+    })).resolves.toEqual({
+      ret: 0,
+      msgs: [],
+      get_updates_buf: "cursor-1",
+      transport_timed_out: true
+    });
+  });
+
   it("treats transient QR polling failures as a wait state", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response("gateway timeout", { status: 524 }))

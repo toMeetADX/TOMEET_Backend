@@ -232,6 +232,7 @@ describe("WeChat worker runtime", () => {
     activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
     runtime.dependencies.turnProgressDelayMs = 0;
     runtime.dependencies.turnProgressIntervalMs = 5;
+    runtime.dependencies.turnProgressMaxNotices = 3;
     let resolveAgent!: (result: { reply: string; stale: boolean }) => void;
     runtime.tomeet.sendTextBatch.mockImplementation(() => (
       new Promise((resolve) => { resolveAgent = resolve; })
@@ -274,7 +275,7 @@ describe("WeChat worker runtime", () => {
     expect(runtime.ilink.sendText).toHaveBeenCalledTimes(4);
   });
 
-  it("waits 30 seconds and spaces default progress bubbles 30 seconds apart", async () => {
+  it("waits 60 seconds and sends only one default progress bubble", async () => {
     vi.useFakeTimers();
     try {
       const runtime = setup();
@@ -298,7 +299,7 @@ describe("WeChat worker runtime", () => {
         }
       );
 
-      await vi.advanceTimersByTimeAsync(29_999);
+      await vi.advanceTimersByTimeAsync(59_999);
       expect(runtime.ilink.sendText).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(1);
@@ -306,20 +307,13 @@ describe("WeChat worker runtime", () => {
         channelTurnProgressNotices.zh[0]
       ]);
 
-      await vi.advanceTimersByTimeAsync(29_999);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(runtime.ilink.sendText).toHaveBeenCalledTimes(1);
-
-      await vi.advanceTimersByTimeAsync(1);
-      expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
-        channelTurnProgressNotices.zh[0],
-        channelTurnProgressNotices.zh[1]
-      ]);
 
       resolveAgent({ reply: "想好了，这是我的回答。", stale: false });
       await handling;
       expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
         channelTurnProgressNotices.zh[0],
-        channelTurnProgressNotices.zh[1],
         "想好了，这是我的回答"
       ]);
     } finally {
@@ -1246,5 +1240,60 @@ describe("WeChat worker runtime", () => {
       undefined
     );
     expect(runtime.store.releaseWechatConnection).toHaveBeenCalled();
+  });
+
+  it("uses the provider long-poll timeout on the next request and logs poll timing", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    activeConnection.syncCursor = "cursor-1";
+    runtime.ilink.getUpdates
+      .mockResolvedValueOnce({
+        ret: 0,
+        msgs: [],
+        get_updates_buf: "cursor-2",
+        longpolling_timeout_ms: 48_000
+      })
+      .mockResolvedValueOnce({
+        ret: 0,
+        msgs: [],
+        get_updates_buf: "cursor-2",
+        transport_timed_out: true
+      });
+    runtime.store.updateWechatConnectionCursor
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: new AbortController().signal
+    });
+
+    expect(runtime.ilink.getUpdates.mock.calls.map(([input]) => input.timeoutMs)).toEqual([
+      35_000,
+      48_000
+    ]);
+    const pollLogs = runtime.logger.info.mock.calls
+      .map(([message]) => JSON.parse(message) as Record<string, unknown>)
+      .filter((entry) => entry.event === "wechat_updates_poll");
+    expect(pollLogs).toEqual([
+      expect.objectContaining({
+        messageCount: 0,
+        cursorChanged: true,
+        expectedLongPollTimeoutMs: 35_000,
+        providerLongPollTimeoutMs: 48_000,
+        transportTimedOut: false,
+        consecutiveTransportTimeouts: 0
+      }),
+      expect.objectContaining({
+        cursorChanged: false,
+        expectedLongPollTimeoutMs: 48_000,
+        providerLongPollTimeoutMs: null,
+        transportTimedOut: true,
+        consecutiveTransportTimeouts: 1
+      })
+    ]);
   });
 });
