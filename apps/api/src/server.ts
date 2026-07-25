@@ -122,7 +122,10 @@ if (demoMode) {
     visionModel: process.env.LLM_VISION_MODEL ?? textModel,
     audioModel: process.env.LLM_AUDIO_MODEL ?? "whisper-1",
     webSearchProvider,
-    onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event }))
+    simpleReplyFastPath: process.env.LLM_SIMPLE_REPLY_FAST_PATH === "true",
+    singlePassEvidenceFinalizer: process.env.LLM_SINGLE_PASS_EVIDENCE_FINALIZER === "true",
+    onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event })),
+    onLlmRequestEvent: (event) => console.info(JSON.stringify({ level: "info", event: "llm_request", ...event }))
   });
   inlineProcessor = new JobProcessor(store, hosted, hosted, {
     adventurexMatchingV1: process.env.ADVENTUREX_MATCHING_V1 === "true"

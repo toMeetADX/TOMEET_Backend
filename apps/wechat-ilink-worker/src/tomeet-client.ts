@@ -51,9 +51,10 @@ export class TomeetClient {
   constructor(options: TomeetClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.internalApiToken = options.internalApiToken;
-    this.pollIntervalMs = options.pollIntervalMs ?? 1000;
-    this.pollAttempts = options.pollAttempts ?? 180;
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 180_000;
+    this.pollIntervalMs = options.pollIntervalMs ?? 200;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 300_000;
+    this.pollAttempts = options.pollAttempts
+      ?? Math.ceil(this.requestTimeoutMs / this.pollIntervalMs);
   }
 
   async startOnboarding(input: { userId: string }): Promise<string | null> {

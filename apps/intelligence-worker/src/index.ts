@@ -36,7 +36,10 @@ const hosted = new HostedLlmIntelligence({
   audioModel: process.env.LLM_AUDIO_MODEL ?? "whisper-1",
   webSearchProvider,
   adventurexMatchingV1,
-  onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event }))
+  simpleReplyFastPath: process.env.LLM_SIMPLE_REPLY_FAST_PATH === "true",
+  singlePassEvidenceFinalizer: process.env.LLM_SINGLE_PASS_EVIDENCE_FINALIZER === "true",
+  onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event })),
+  onLlmRequestEvent: (event) => console.info(JSON.stringify({ level: "info", event: "llm_request", ...event }))
 });
 
 const store = new SupabaseStore(supabaseUrl, serviceRoleKey);
@@ -63,7 +66,7 @@ function parseIntegerInRange(
 const concurrency = parseIntegerInRange(process.env.WORKER_CONCURRENCY, 8, 1, 32, "WORKER_CONCURRENCY");
 const pollInterval = parseIntegerInRange(
   process.env.WORKER_POLL_INTERVAL_MS,
-  1000,
+  200,
   100,
   60_000,
   "WORKER_POLL_INTERVAL_MS"
@@ -121,11 +124,27 @@ async function runSlot(slot: number): Promise<void> {
         await delay(pollInterval);
         continue;
       }
+      const claimedAt = Date.now();
+      const queueMs = Math.max(0, claimedAt - Date.parse(job.createdAt));
       try {
+        const processingStartedAt = Date.now();
         const result = await processor.process(job, { workerId: slotId });
+        const processingMs = Date.now() - processingStartedAt;
+        const completionStartedAt = Date.now();
         await store.completeJob(job.id, result, slotId);
+        const completionMs = Date.now() - completionStartedAt;
         emitJobMetrics(job.type, result);
-        console.info(JSON.stringify({ level: "info", event: "job_completed", worker: slotId, jobId: job.id, type: job.type }));
+        console.info(JSON.stringify({
+          level: "info",
+          event: "job_completed",
+          worker: slotId,
+          jobId: job.id,
+          type: job.type,
+          queueMs,
+          processingMs,
+          completionMs,
+          totalMs: Date.now() - Date.parse(job.createdAt)
+        }));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await store.failJob(job.id, message, slotId);
@@ -164,8 +183,11 @@ try {
     event: "worker_started",
     workerId,
     concurrency,
+    pollInterval,
     model: textModel,
-    webSearchEnabled: Boolean(webSearchProvider)
+    webSearchEnabled: Boolean(webSearchProvider),
+    simpleReplyFastPath: process.env.LLM_SIMPLE_REPLY_FAST_PATH === "true",
+    singlePassEvidenceFinalizer: process.env.LLM_SINGLE_PASS_EVIDENCE_FINALIZER === "true"
   }));
   const slots = Array.from(
     { length: concurrency },

@@ -56,6 +56,10 @@
     "20260726120000_wechat_web_registration_claims.sql": {
       "sha256": "69abb306ff543c8360bec366104fffb827f99162ac0833db6d2106f1ce182604",
       "reason": "Create a service-role-only table for short-lived encrypted Supabase sessions used by one-time WeChat-to-Web registration claims; REVOKE prevents browser roles from reading login credentials."
+    },
+    "20260726130000_interactive_job_latency_guards.sql": {
+      "sha256": "201f370263880efa2f33a8c1b1fb0aa633defea34c96ba60e599e64c66e1c592",
+      "reason": "Move pending background memory jobs to a dedicated partition and replace the claim RPC so future retries do not block ready interactive work; REVOKE preserves service-role-only job claiming."
     }
   }
 }

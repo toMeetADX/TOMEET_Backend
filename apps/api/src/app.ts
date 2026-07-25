@@ -438,6 +438,7 @@ export async function buildApp(options: BuildAppOptions) {
     reply: FastifyReply,
     sourceChannel: "web" | "wechat"
   ) {
+    const receivedAt = Date.now();
     const input = agentMessageInputSchema.parse(request.body);
     const generation = sourceChannel === "wechat"
       ? z.object({
@@ -456,6 +457,7 @@ export async function buildApp(options: BuildAppOptions) {
     assertCurrentUser(request, input.userId);
     await options.store.ensureUser(input.userId, input.displayName);
     const rawMessages = "messages" in generation ? generation.messages : undefined;
+    const persistenceStartedAt = Date.now();
     const savedMessages = rawMessages
       ? await Promise.all(rawMessages.map((item) => options.store.appendMessage({
           userId: input.userId,
@@ -472,8 +474,10 @@ export async function buildApp(options: BuildAppOptions) {
           sourceChannel
         })];
     const userMessage = savedMessages.at(-1)!;
+    const persistenceMs = Date.now() - persistenceStartedAt;
     const connectionId = "connectionId" in generation ? generation.connectionId : undefined;
     const generationToken = "generationToken" in generation ? generation.generationToken : undefined;
+    const enqueueStartedAt = Date.now();
     const job = await options.store.enqueueJob({
       type: "agent_reply",
       payload: {
@@ -487,9 +491,29 @@ export async function buildApp(options: BuildAppOptions) {
       idempotencyKey: generationToken
         ? `agent-generation:${connectionId}:${generationToken}`
         : `agent:${userMessage.id}`,
+      maxAttempts: 1,
       partitionKey: `user:${input.userId}`
     });
+    const enqueueMs = Date.now() - enqueueStartedAt;
+    request.log.info({
+      event: "agent_job_enqueued",
+      sourceChannel,
+      jobId: job.id,
+      messageCount: savedMessages.length,
+      persistenceMs,
+      enqueueMs,
+      totalMs: Date.now() - receivedAt
+    });
+    const handoffStartedAt = Date.now();
     const currentJob = await runInline(job.id);
+    request.log.info({
+      event: "agent_submission_completed",
+      sourceChannel,
+      jobId: job.id,
+      jobStatus: currentJob?.status ?? "missing",
+      handoffMs: Date.now() - handoffStartedAt,
+      totalMs: Date.now() - receivedAt
+    });
     return reply.code(currentJob?.status === "completed" ? 200 : 202).send({ userMessage, job: currentJob });
   }
 

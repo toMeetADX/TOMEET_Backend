@@ -601,7 +601,7 @@ export class JobProcessor {
             memoryReviewSuggested: insight.memoryReviewSuggested
           },
           idempotencyKey: `memory:${memorySource.sourceType}:${memorySource.sourceId}`,
-          partitionKey: `user:${userId}`
+          partitionKey: `memory:${userId}`
         })
       : null;
     this.deferConversationCheckpointUpdate(userId);
@@ -1044,7 +1044,7 @@ export class JobProcessor {
           type: "feedback_update",
           payload: { feedback, feedbackId },
           idempotencyKey: `feedback:${feedbackId}`,
-          partitionKey: `user:${userId}`
+          partitionKey: `memory:${userId}`
         });
         return {
           result: { feedbackId, jobId: feedbackJob.id },
@@ -1167,7 +1167,7 @@ export class JobProcessor {
             assistantReply: reply
           },
           idempotencyKey: `memory:multimodal:${inputIds[0]}`,
-          partitionKey: `user:${userId}`
+          partitionKey: `memory:${userId}`
         })
       : null;
     return { inputId: inputIds[0], inputIds, understanding, userModel, message, memoryJobId: memoryJob?.id ?? null };
@@ -2007,7 +2007,7 @@ export class JobProcessor {
         })
       },
       idempotencyKey: `memory:feedback:${feedbackId}`,
-      partitionKey: `user:${feedback.userId}`
+      partitionKey: `memory:${feedback.userId}`
     });
     return { userModel, memoryJobId: memoryJob.id };
   }
@@ -2051,7 +2051,7 @@ export class JobProcessor {
           type: "memory_consolidate",
           payload: { userId },
           idempotencyKey: `memory-profile:${job.id}`,
-          partitionKey: `user:${userId}`
+          partitionKey: `memory:${userId}`
         })
       : null;
     return {
