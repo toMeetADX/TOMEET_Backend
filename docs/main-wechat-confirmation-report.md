@@ -17,7 +17,7 @@
 | WeChat 来源分支 | `origin/feat/wechat-channel` |
 | WeChat 来源 SHA | `06e7b71a8c1519e9248696b50924d0511090bedc` |
 | 候选源码提交 SHA | `67c97769489cbfb7a7d58d6038013a1437b4ee60` |
-| `main` 合并 SHA | 待补 |
+| `main` 合并 SHA | `0970cc1bf904326b8935ccdd7167770825d27b16` |
 | Production 实际部署 SHA | 待补 |
 | 最终确认标签 | 待创建：`confirmed-main-wechat-v1` |
 
@@ -112,8 +112,11 @@ OPTIONS、匿名创建、错误/正确 Header、SSE 首事件和状态查询；�
 | 历史 PR #15 | PASS | <https://github.com/toMeetADX/TOMEET_Backend/pull/15> |
 | 历史 PR 校验 | PASS | <https://github.com/toMeetADX/TOMEET_Backend/actions/runs/30150588175> |
 | 历史 main Release | FAIL（Staging 缺少 `RAILWAY_PROJECT_ID`） | <https://github.com/toMeetADX/TOMEET_Backend/actions/runs/30150591470> |
-| 本候选 PR | PENDING | 待补 |
-| `Main Validation / validate-pr` | PENDING | 待补 |
+| 本候选 PR #17 | MERGED（校验完成前由仓库所有者合并） | <https://github.com/toMeetADX/TOMEET_Backend/pull/17> |
+| PR #17 `Main Validation / validate-pr` | CANCELLED（合并取消了运行中的 `pnpm check`） | <https://github.com/toMeetADX/TOMEET_Backend/actions/runs/30151988410> |
+| 合并后 Release | FAIL CLOSED（配置校验发现 Staging Environment 全空，部署前停止） | <https://github.com/toMeetADX/TOMEET_Backend/actions/runs/30151991077> |
+| docs-only 补证 PR | PENDING | 待补 |
+| 补证 `Main Validation / validate-pr` | PENDING | 待补 |
 | Staging 四服务部署 | PENDING | 待补部署 ID |
 | Staging cross-channel smoke | PENDING | 待补 |
 | Staging QR smoke | PENDING | 待补 |
@@ -129,6 +132,19 @@ OPTIONS、匿名创建、错误/正确 Header、SSE 首事件和状态查询；�
 | --- | --- | --- |
 | `prod-web-stable` | 待反查 | PENDING |
 | `prod-wechat-stable` | 待反查 | PENDING |
+
+2026-07-25 Railway 只读盘点：
+
+- 实际项目：`TOMEET-staging`
+  (`531b348f-0ccc-43be-9b86-d44cc566bef6`)。
+- Staging Environment：
+  `71a5aa38-b8ea-49f7-a4d3-c76c76be87ff`；四个 Service 实例存在，
+  但四者均没有任何历史 deployment。
+- Production Environment：
+  `1800f31e-d21d-427b-9b35-f38f68714bfa`；当前没有 Service 实例，
+  四个 Service 也均没有任何历史 deployment。
+- 因此无法从 Railway 反查任何成功部署 Git SHA；不得创建
+  `prod-web-stable` 或 `prod-wechat-stable`，Production 保持关闭。
 
 在可靠 SHA、Production GitHub Autodeploy 关闭、overlap/draining 配置和
 Supabase 备份/PITR 均得到验证前，Production 发布保持关闭。
