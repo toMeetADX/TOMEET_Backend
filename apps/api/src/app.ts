@@ -6,17 +6,25 @@ import {
   adventurexLanguageSchema,
   agentMessageInputSchema,
   agentProductEventSchema,
+  confirmEventPlanInputSchema,
   createMatchRequestInputSchema,
   linkChannelIdentityInputSchema,
   multimodalInputSchema,
   postEventFeedbackSchema,
   resolveChannelIdentityInputSchema,
   saveMatchChoicesInputSchema,
+  updateEventPlanInputSchema,
   uuidSchema
 } from "@tomeet/contracts";
 import type { DataStore } from "@tomeet/data";
 import { StoreConflictError, StoreNotFoundError } from "@tomeet/data";
-import { scheduleAdventurexMatchRequest, type JobProcessor } from "@tomeet/intelligence";
+import {
+  notifyEventPlanDraft,
+  notifyEventPlanPublished,
+  notifyRoomUpdate,
+  scheduleAdventurexMatchRequest,
+  type JobProcessor
+} from "@tomeet/intelligence";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import {
@@ -129,7 +137,7 @@ export async function buildApp(options: BuildAppOptions) {
   await app.register(cors, {
     origin: allowedOrigins,
     credentials: true,
-    methods: ["GET", "POST"],
+    methods: ["GET", "POST", "PATCH"],
     allowedHeaders: [
       "authorization",
       "content-type",
@@ -215,6 +223,7 @@ export async function buildApp(options: BuildAppOptions) {
       || room.status === "completed"
       || room.matchingStatus !== "active"
       || room.members.length >= room.capacity
+      || !room.eventPlans.published
     ) return;
     const job = await options.store.enqueueJob({
       type: "matchmaking",
@@ -892,6 +901,7 @@ export async function buildApp(options: BuildAppOptions) {
     assertCurrentUser(request, userId);
     const resolution = await options.store.acceptMatchInvite(id, userId);
     if (resolution.room) {
+      await notifyRoomUpdate(options.store, resolution.room, resolution.invite);
       await enqueueRoomContinuation(
         resolution.room.roomId,
         resolution.room.members.length,
@@ -942,6 +952,46 @@ export async function buildApp(options: BuildAppOptions) {
     if (!room) throw new StoreNotFoundError("房间不存在");
     assertRoomMember(request, room.members.map((member) => member.userId));
     return { room };
+  });
+
+  app.patch("/rooms/:id/event-plan", async (request) => {
+    const { id } = z.object({ id: uuidSchema }).parse(request.params);
+    const input = updateEventPlanInputSchema.parse(request.body);
+    assertCurrentUser(request, input.userId);
+    const mutation = await options.store.updateEventPlan(
+      id,
+      input.userId,
+      input.expectedVersion,
+      input.patch
+    );
+    const actor = mutation.room.members.find((member) => member.userId === input.userId);
+    await notifyEventPlanDraft(options.store, mutation.room, {
+      reason: "updated",
+      actorName: actor?.displayName
+    });
+    return mutation;
+  });
+
+  app.post("/rooms/:id/event-plan/confirm", async (request) => {
+    const { id } = z.object({ id: uuidSchema }).parse(request.params);
+    const input = confirmEventPlanInputSchema.parse(request.body);
+    assertCurrentUser(request, input.userId);
+    const mutation = await options.store.confirmEventPlan(id, input.userId, input.version);
+    if (mutation.published) {
+      await notifyEventPlanPublished(options.store, mutation.room);
+      await enqueueRoomContinuation(
+        mutation.room.roomId,
+        mutation.room.members.length,
+        `api-event-plan-published:${mutation.eventPlan.version}`
+      );
+    } else {
+      const actor = mutation.room.members.find((member) => member.userId === input.userId);
+      await notifyEventPlanDraft(options.store, mutation.room, {
+        reason: "confirmed",
+        actorName: actor?.displayName
+      });
+    }
+    return mutation;
   });
 
   app.post("/rooms/:id/confirm", async (request) => {

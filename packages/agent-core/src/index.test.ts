@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { MatchRoom, OfflineGame } from "@tomeet/contracts";
 import { createDefaultUserModel } from "@tomeet/user-model";
 import {
   buildAgentContext,
@@ -38,6 +39,153 @@ describe("mock agent intelligence", () => {
       nextIntent: "下次继续小组深聊"
     }, createDefaultUserModel("u1"));
     expect(reflection.currentIntent.nextIntent).toContain("小组深聊");
+  });
+
+  it("parses founder event-plan changes and keeps non-founders read-only", async () => {
+    const now = nowIso();
+    const game: OfflineGame = {
+      id: "game-story-table",
+      name: "故事交换桌",
+      description: "通过故事卡自然交流",
+      minPlayers: 3,
+      maxPlayers: 6,
+      intentTags: [],
+      traits: [],
+      requirements: [],
+      instructions: []
+    };
+    const secondGame: OfflineGame = {
+      ...game,
+      id: "game-city-clues",
+      name: "城市线索"
+    };
+    const room: MatchRoom = {
+      roomId: "room-1",
+      members: [
+        {
+          userId: "u1",
+          displayName: "创始人一",
+          confirmed: true,
+          participationStatus: "confirmed",
+          role: "founder"
+        },
+        {
+          userId: "u2",
+          displayName: "创始人二",
+          confirmed: true,
+          participationStatus: "confirmed",
+          role: "founder"
+        },
+        {
+          userId: "u3",
+          displayName: "普通成员",
+          confirmed: true,
+          participationStatus: "confirmed",
+          role: "member"
+        }
+      ],
+      offlineGame: game,
+      matchSummary: "自然匹配",
+      status: "confirmed",
+      sourceDraftId: null,
+      targetPlayers: game.maxPlayers,
+      recruitmentStatus: "open",
+      version: 0,
+      meetingPoint: null,
+      matchingStatus: "active",
+      capacity: game.maxPlayers,
+      eventPlans: {
+        draft: {
+          planId: "plan-2",
+          roomId: "room-1",
+          version: 2,
+          status: "draft",
+          time: {
+            startsAt: null,
+            endsAt: null,
+            timeZone: "Asia/Shanghai",
+            note: "待商定"
+          },
+          location: {
+            name: null,
+            address: null,
+            url: null,
+            note: "待商定"
+          },
+          games: [{ game, primary: true, position: 0 }],
+          confirmations: [],
+          createdBy: "u1",
+          createdAt: now,
+          publishedAt: null
+        },
+        published: null
+      },
+      createdAt: now,
+      completedAt: null
+    };
+    const intelligence = new MockAgentIntelligence();
+    const founderContext = buildAgentContext([], createDefaultUserModel("u1"), {
+      room,
+      availableGames: [game, secondGame]
+    });
+
+    const changed = await intelligence.reply(founderContext, "地点改成人民公园");
+    expect(changed.actions[0]).toMatchObject({
+      type: "update_event_plan",
+      expectedVersion: 2,
+      patch: { location: { name: "人民公园" } }
+    });
+    const changedTime = await intelligence.reply(founderContext, "时间改到周六下午");
+    expect(changedTime.actions[0]).toMatchObject({
+      type: "update_event_plan",
+      expectedVersion: 2,
+      patch: { time: { note: "周六下午", timeZone: "Asia/Shanghai" } }
+    });
+    const changedGame = await intelligence.reply(founderContext, "游戏替换成城市线索");
+    expect(changedGame.actions[0]).toMatchObject({
+      type: "update_event_plan",
+      expectedVersion: 2,
+      patch: { gameIds: ["game-city-clues"] }
+    });
+    const confirmed = await intelligence.reply(founderContext, "方案没问题");
+    expect(confirmed.actions[0]).toEqual({ type: "confirm_event_plan", version: 2 });
+    const ambiguous = await intelligence.reply(founderContext, "清单改一下");
+    expect(ambiguous.actions).toEqual([]);
+    expect(ambiguous.reply).toContain("明确");
+
+    const memberContext = buildAgentContext([], createDefaultUserModel("u3"), {
+      room,
+      availableGames: [game, secondGame]
+    });
+    const denied = await intelligence.reply(memberContext, "地点改成人民公园");
+    expect(denied.actions).toEqual([]);
+    expect(denied.reply).toContain("只有最初匹配的两位");
+
+    const publishedRoom: MatchRoom = {
+      ...room,
+      eventPlans: {
+        draft: null,
+        published: {
+          ...room.eventPlans.draft!,
+          status: "published",
+          confirmations: [
+            { userId: "u1", displayName: "创始人一", confirmedAt: now },
+            { userId: "u2", displayName: "创始人二", confirmedAt: now }
+          ],
+          publishedAt: now
+        }
+      }
+    };
+    const publishedContext = buildAgentContext([], createDefaultUserModel("u1"), {
+      room: publishedRoom,
+      availableGames: [game, secondGame]
+    });
+    const nextDraft = await intelligence.reply(publishedContext, "地点改成中山公园");
+    expect(nextDraft.actions[0]).toMatchObject({
+      type: "update_event_plan",
+      expectedVersion: 2,
+      patch: { location: { name: "中山公园" } }
+    });
   });
 
   it("excludes the current user message and bounds every historical context section", () => {
@@ -267,7 +415,8 @@ describe("mock agent intelligence", () => {
         userId,
         displayName: userId,
         confirmed: true,
-        participationStatus: "confirmed" as const
+        participationStatus: "confirmed" as const,
+        role: userId === "u1" || userId === "u2" ? "founder" as const : "member" as const
       })),
       offlineGame: {
         id: "game-story-table",
@@ -289,6 +438,7 @@ describe("mock agent intelligence", () => {
       meetingPoint: null,
       matchingStatus: "full" as const,
       capacity: 3,
+      eventPlans: { draft: null, published: null },
       createdAt: now,
       completedAt: null
     };

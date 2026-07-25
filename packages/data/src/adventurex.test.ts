@@ -65,7 +65,7 @@ describe("AdventureX MemoryStore", () => {
     }])).rejects.toThrow("当前用户的文字消息");
   });
 
-  it("settles accepted choices, fills an open room with version checks, and emits one notification per existing member", async () => {
+  it("settles accepted choices, publishes the plan before expansion, and emits one notification per existing member", async () => {
     const store = new MemoryStore();
     const userIds = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
     const requestIds: string[] = [];
@@ -138,7 +138,15 @@ describe("AdventureX MemoryStore", () => {
       targetPlayers: 4,
       summary: "现场互动测试"
     }]);
-    const room = (await store.getRoom(roomIds[0]!))!;
+    let room = (await store.getRoom(roomIds[0]!))!;
+    expect(room.recruitmentStatus).toBe("closed");
+    expect(room.eventPlans).toMatchObject({
+      draft: { version: 1 },
+      published: null
+    });
+    await store.confirmEventPlan(room.roomId, userIds[0]!, 1);
+    await store.confirmEventPlan(room.roomId, userIds[1]!, 1);
+    room = (await store.getRoom(room.roomId))!;
     expect(room.recruitmentStatus).toBe("open");
     expect(await store.getRoomIntro(room.roomId, userIds[0]!)).toBeNull();
     await store.saveRoomIntro(
@@ -178,7 +186,7 @@ describe("AdventureX MemoryStore", () => {
     });
     const joined = await store.joinOpenRoom(requestIds[3]!, openOffers[0]!.offerId, 0);
     expect(joined.version).toBe(1);
-    expect(joined.recruitmentStatus).toBe("full");
+    expect(joined.recruitmentStatus).toBe("open");
     expect(await store.listPendingRoomChangeNotifications()).toHaveLength(3);
     await expect(store.joinOpenRoom(requestIds[3]!, openOffers[0]!.offerId, 0)).rejects.toThrow();
 

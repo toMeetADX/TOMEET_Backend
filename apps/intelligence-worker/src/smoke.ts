@@ -39,9 +39,27 @@ if (start.actions[0]?.type !== "start_match") throw new Error("真实模型未�
 const room = {
   roomId: "30000000-0000-4000-8000-000000000001",
   members: [
-    { userId: baseModel.userId, displayName: "测试用户", confirmed: false, participationStatus: "invited" as const },
-    { userId: "30000000-0000-4000-8000-000000000002", displayName: "林知夏", confirmed: true, participationStatus: "confirmed" as const },
-    { userId: "30000000-0000-4000-8000-000000000003", displayName: "陈屿", confirmed: true, participationStatus: "confirmed" as const }
+    {
+      userId: baseModel.userId,
+      displayName: "测试用户",
+      confirmed: false,
+      participationStatus: "invited" as const,
+      role: "founder" as const
+    },
+    {
+      userId: "30000000-0000-4000-8000-000000000002",
+      displayName: "林知夏",
+      confirmed: true,
+      participationStatus: "confirmed" as const,
+      role: "founder" as const
+    },
+    {
+      userId: "30000000-0000-4000-8000-000000000003",
+      displayName: "陈屿",
+      confirmed: true,
+      participationStatus: "confirmed" as const,
+      role: "member" as const
+    }
   ],
   offlineGame: {
     id: "game-story-table",
@@ -63,6 +81,7 @@ const room = {
   meetingPoint: null,
   matchingStatus: "active" as const,
   capacity: 6,
+  eventPlans: { draft: null, published: null },
   createdAt: new Date().toISOString(),
   completedAt: null
 };

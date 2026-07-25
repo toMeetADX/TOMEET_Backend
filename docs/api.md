@@ -109,6 +109,8 @@ export async function tomeetApi<T>(path: string, init: RequestInit = {}): Promis
 | POST | `/match-requests/:id/open-room/:roomId/join` | 使用 offer/version 加入开放局 | 200 |
 | GET | `/jobs/:id` | 查询异步任务 | 200 |
 | GET | `/rooms/:id` | 查询当前用户所在房间 | 200 |
+| PATCH | `/rooms/:id/event-plan` | founder 创建活动清单新版本 | 200 |
+| POST | `/rooms/:id/event-plan/confirm` | founder 确认清单版本 | 200 |
 | POST | `/rooms/:id/confirm` | 当前用户确认参加 | 200 |
 | POST | `/rooms/:id/leave` | 退出已确认房间并通知剩余成员 | 200 |
 | POST | `/rooms/:id/complete` | 房间成员标记活动完成 | 200 |
@@ -156,7 +158,7 @@ export async function tomeetApi<T>(path: string, init: RequestInit = {}): Promis
 }
 ```
 
-完成后的 `job.result` 可能包含 `message`、`userModel`、`socialIntentDetected`、`webSearch`、`actions`、`matchRequest` 和 `room`。产品主流程可以只发送自然语言：Agent 会根据对话执行发起匹配、确认房间、完成活动和提交反馈等结构化动作。
+完成后的 `job.result` 可能包含 `message`、`userModel`、`socialIntentDetected`、`webSearch`、`actions`、`matchRequest` 和 `room`。产品主流程可以只发送自然语言：Agent 会根据对话执行发起匹配、修改/确认活动清单、确认房间、完成活动和提交反馈等结构化动作。
 
 AdventureX V1 中还支持自然语言选择候选、换一批、取消、重新匹配和退出房间。用户看到的正文不包含 `hookId`、候选成员 ID 或 `sourceUserId`。
 
@@ -326,7 +328,11 @@ await supabase.storage
 
 ### `POST /match-invites/:id/accept`
 
-请求体为 `{ "userId": "UUID" }`。初始邀请需双方接受才会原子建房；入房邀请由候选用户接受后原子加入。返回 `{ "invite": MatchInvite, "room": MatchRoom | null, "requeuedRequestIds": string[] }`。
+```json
+{ "userId": "UUID" }
+```
+
+初始双边邀请在双方都接受后原子创建 2 人房间和活动清单草稿 v1；入房邀请在候选用户接受后原子加入成员。返回 `{ "invite": MatchInvite, "room": MatchRoom | null, "requeuedRequestIds": string[] }`。`room_join` 的 `MatchInvite.eventPlan` 始终是当前已发布清单，因此候选用户在接受前即可看到时间、地点和游戏。
 
 ### `POST /match-invites/:id/decline`
 
@@ -336,7 +342,39 @@ await supabase.storage
 
 ### `GET /rooms/:id`
 
-只有房间成员可读取。返回 `{ "room": MatchRoom }`。
+只有房间成员可读取。返回 `{ "room": MatchRoom }`。`members[].role` 为
+`founder | member`；`eventPlans` 同时暴露当前 `draft` 和仍然有效的
+`published` 版本。
+
+### `PATCH /rooms/:id/event-plan`
+
+仅初始两位 `founder` 可调用：
+
+```json
+{
+  "userId": "UUID",
+  "expectedVersion": 1,
+  "patch": {
+    "location": {
+      "name": "人民公园",
+      "address": null,
+      "url": null,
+      "note": "用户明确指定"
+    },
+    "gameIds": ["game-story-table", "game-city-clues"]
+  }
+}
+```
+
+每次修改创建新版本并清空新版本确认；版本过期返回 `409`。`gameIds[0]` 是主游戏并
+决定房间容量。响应为 `{ "room": MatchRoom, "eventPlan": RoomEventPlan,
+"published": false }`。
+
+### `POST /rooms/:id/event-plan/confirm`
+
+请求体为 `{ "userId": "UUID", "version": 2 }`。两位 founder 确认同一草稿后原子
+发布，旧发布版标记为 `superseded` 并开始继续匹配。后续修改期间旧发布版继续对
+当前成员和 pending invitee 有效。
 
 ### `POST /rooms/:id/confirm`
 

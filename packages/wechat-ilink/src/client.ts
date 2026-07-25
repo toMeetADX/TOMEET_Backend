@@ -183,8 +183,10 @@ export class WechatILinkClient {
     text: string;
     contextToken?: string;
     runId?: string;
+    clientId?: string;
   }): Promise<string> {
-    const clientId = `tomeet:${Date.now()}-${randomBytes(4).toString("hex")}`;
+    const clientId = input.clientId
+      ?? `tomeet:${Date.now()}-${randomBytes(4).toString("hex")}`;
     const response = await this.request<{ ret?: number; errmsg?: string }>(
       normalizeBaseUrl(input.baseUrl),
       "ilink/bot/sendmessage",

@@ -172,6 +172,7 @@ export interface MatchInvite {
   }>;
   offlineGameId: string;
   matchSummary: string;
+  eventPlan: RoomEventPlan | null;
   status: "pending" | "accepted" | "declined" | "cancelled";
   createdAt: string;
   resolvedAt: string | null;
@@ -193,6 +194,31 @@ export interface RoomMember {
   userId: string;
   displayName: string;
   confirmed: boolean;
+  role: "founder" | "member";
+}
+
+export interface RoomEventPlan {
+  planId: string;
+  roomId: string;
+  version: number;
+  status: "draft" | "published" | "superseded";
+  time: {
+    startsAt: string | null;
+    endsAt: string | null;
+    timeZone: string;
+    note: string;
+  };
+  location: {
+    name: string | null;
+    address: string | null;
+    url: string | null;
+    note: string;
+  };
+  games: Array<{ game: OfflineGame; primary: boolean; position: number }>;
+  confirmations: Array<{ userId: string; displayName: string; confirmedAt: string }>;
+  createdBy: string | null;
+  createdAt: string;
+  publishedAt: string | null;
 }
 
 export interface MatchRoom {
@@ -203,6 +229,10 @@ export interface MatchRoom {
   status: "confirming" | "confirmed" | "completed";
   matchingStatus: "active" | "stopped" | "full";
   capacity: number;
+  eventPlans: {
+    draft: RoomEventPlan | null;
+    published: RoomEventPlan | null;
+  };
   createdAt: string;
   completedAt: string | null;
 }
@@ -229,6 +259,8 @@ export interface MatchRoom {
 | `POST` | `/match-invites/:id/decline` | Bearer | 200 | 拒绝匹配邀请 |
 | `GET` | `/jobs/:id` | Bearer | 200 | 查询异步任务 |
 | `GET` | `/rooms/:id` | Bearer | 200 | 查询房间 |
+| `PATCH` | `/rooms/:id/event-plan` | Bearer | 200 | founder 修改活动清单 |
+| `POST` | `/rooms/:id/event-plan/confirm` | Bearer | 200 | founder 确认清单版本 |
 | `POST` | `/rooms/:id/confirm` | Bearer | 200 | 确认参加 |
 | `POST` | `/rooms/:id/stop-match` | Bearer | 200 | 停止房间继续匹配 |
 | `POST` | `/rooms/:id/complete` | Bearer | 200 | 标记活动完成 |
@@ -539,7 +571,7 @@ interface MatchRequestResponse {
 - `POST /match-invites/:id/accept`，请求体 `{ "userId": "UUID" }`
 - `POST /match-invites/:id/decline`，请求体 `{ "userId": "UUID" }`
 
-初始邀请需要双方接受，第二位接受后响应中的 `room` 才会非空。`room_join` 邀请只需要被邀请的新用户接受。
+初始邀请需要双方接受，第二位接受后响应中的 `room` 才会非空。`room_join` 邀请只需要被邀请的新用户接受，并通过 `eventPlan` 在接受前展示当前发布版的时间、地点和游戏。
 
 ## 9. 房间和反馈
 
@@ -557,7 +589,44 @@ interface RoomResponse {
 
 当前没有“我的房间列表”接口。前端需要从 `MatchRequest.roomId`、Agent 消息或任务结果获得房间 ID。
 
-### 9.2 确认参加
+### 9.2 协商活动清单
+
+初始两位成员的 `role` 为 `founder`。修改时使用当前
+`room.eventPlans.draft?.version ?? room.eventPlans.published.version`：
+
+```http
+PATCH /rooms/:id/event-plan
+```
+
+```json
+{
+  "userId": "UUID",
+  "expectedVersion": 1,
+  "patch": {
+    "time": {
+      "startsAt": "2026-08-01T06:00:00.000Z",
+      "endsAt": null,
+      "timeZone": "Asia/Shanghai",
+      "note": "周六下午两点"
+    }
+  }
+}
+```
+
+修改会创建新版本；`409` 表示需要刷新房间后重试。确认当前版本：
+
+```http
+POST /rooms/:id/event-plan/confirm
+```
+
+```json
+{ "userId": "UUID", "version": 2 }
+```
+
+两位 founder 确认后 `published === true`，后端才开始继续匹配。后续编辑时，
+`published` 仍是对所有成员和 pending invitee 生效的版本，直到新草稿再次双确认。
+
+### 9.3 确认参加
 
 `POST /rooms/:id/confirm`
 
@@ -569,7 +638,7 @@ interface RoomResponse {
 
 所有成员确认后，房间状态变为 `confirmed`。
 
-### 9.3 停止房间匹配
+### 9.4 停止房间匹配
 
 `POST /rooms/:id/stop-match`
 
@@ -579,13 +648,13 @@ interface RoomResponse {
 
 任一房间成员都可以调用。停止后 `matchingStatus === "stopped"`；达到 `capacity` 时后端自动设置为 `full`。
 
-### 9.4 标记完成
+### 9.5 标记完成
 
 `POST /rooms/:id/complete`
 
 无请求体。当前用户必须是房间成员，且房间状态允许完成。重复调用按后端业务状态处理。
 
-### 9.5 提交反馈
+### 9.6 提交反馈
 
 `POST /rooms/:id/feedback`
 

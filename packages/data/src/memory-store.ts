@@ -6,6 +6,9 @@ import type {
   ChannelIdentity,
   ChannelProvider,
   FinalRoomDecision,
+  EventPlanMutationResult,
+  EventPlanPatch,
+  EventPlanSeed,
   LlmJob,
   MatchChoice,
   MatchDecision,
@@ -20,6 +23,7 @@ import type {
   Message,
   OfflineGame,
   PostEventFeedback,
+  RoomEventPlan,
   RoomJoinDecision,
   SaveMatchChoicesInput,
   SocialHook,
@@ -64,6 +68,7 @@ interface MemoryUser {
 interface MemoryMatchInvite {
   invite: MatchInvite;
   participantRequestIds: Record<string, string>;
+  eventPlanSeed?: EventPlanSeed;
   sourceJobId?: string;
 }
 
@@ -354,6 +359,22 @@ export class MemoryStore implements DataStore {
       return null;
     }
     return this.appendMessage(input);
+  }
+
+  async appendProactiveMessage(input: {
+    userId: string;
+    content: string;
+    idempotencyKey: string;
+  }): Promise<Message> {
+    const message = await this.appendMessage({
+      userId: input.userId,
+      role: "assistant",
+      content: input.content,
+      idempotencyKey: input.idempotencyKey,
+      sourceChannel: "system"
+    });
+    await this.enqueueWechatOutboundMessage(message);
+    return message;
   }
 
   async listRecentMessages(userId: string, limit = 50): Promise<Message[]> {
@@ -1165,24 +1186,53 @@ export class MemoryStore implements DataStore {
       const roomId = randomUUID();
       const room: MatchRoom = {
         roomId,
-        members: decision.memberIds.map((userId) => ({
+        members: decision.memberIds.map((userId, index) => ({
           userId,
           displayName: this.users.get(userId)?.displayName ?? "成员",
           confirmed: true,
-          participationStatus: "confirmed"
+          participationStatus: "confirmed",
+          role: index < 2 ? "founder" : "member"
         })),
         offlineGame: structuredClone(game),
         matchSummary: decision.summary,
         status: "confirmed",
         sourceDraftId: decision.draftId,
         targetPlayers: decision.targetPlayers,
-        recruitmentStatus: decision.memberIds.length < Math.min(decision.targetPlayers, game.maxPlayers) ? "open" : "full",
+        recruitmentStatus: "closed",
         version: 0,
         meetingPoint: "TOMEET 集合点",
-        matchingStatus: decision.memberIds.length < Math.min(decision.targetPlayers, game.maxPlayers)
-          ? "active"
-          : "full",
+        matchingStatus: "stopped",
         capacity: Math.min(decision.targetPlayers, game.maxPlayers),
+        eventPlans: {
+          draft: {
+            planId: randomUUID(),
+            roomId,
+            version: 1,
+            status: "draft",
+            time: {
+              startsAt: null,
+              endsAt: null,
+              timeZone: "Asia/Shanghai",
+              note: "待商定"
+            },
+            location: {
+              name: null,
+              address: null,
+              url: null,
+              note: "待商定"
+            },
+            games: [{
+              game: structuredClone(game),
+              primary: true,
+              position: 0
+            }],
+            confirmations: [],
+            createdBy: null,
+            createdAt: now,
+            publishedAt: null
+          },
+          published: null
+        },
         createdAt: now,
         completedAt: null
       };
@@ -1225,6 +1275,7 @@ export class MemoryStore implements DataStore {
     return [...this.rooms.values()]
       .filter((room) => {
         if (room.status === "completed" || room.recruitmentStatus !== "open") return false;
+        if (!room.eventPlans.published) return false;
         if (room.members.some((member) => member.userId === userId)) return false;
         const confirmed = room.members.filter((member) => member.participationStatus === "confirmed").length;
         const limitCount = Math.min(room.targetPlayers ?? room.offlineGame.maxPlayers, room.offlineGame.maxPlayers);
@@ -1273,7 +1324,8 @@ export class MemoryStore implements DataStore {
         userId: request.userId,
         displayName: this.users.get(request.userId)?.displayName ?? "成员",
         confirmed: true,
-        participationStatus: "confirmed"
+        participationStatus: "confirmed",
+        role: "member"
       });
     }
     request.status = "matched";
@@ -1290,14 +1342,32 @@ export class MemoryStore implements DataStore {
 
   async getMatchInvite(inviteId: string): Promise<MatchInvite | null> {
     const record = this.matchInvites.get(inviteId);
-    return record ? structuredClone(record.invite) : null;
+    if (!record) return null;
+    if (record.invite.kind === "room_join" && record.invite.roomId) {
+      record.invite.eventPlan = this.rooms.get(record.invite.roomId)?.eventPlans.published ?? null;
+    }
+    return structuredClone(record.invite);
   }
 
   async getLatestMatchInviteForUser(userId: string): Promise<MatchInvite | null> {
     const record = [...this.matchInvites.values()]
       .filter(({ invite }) => invite.participants.some((participant) => participant.userId === userId))
       .sort((a, b) => b.invite.createdAt.localeCompare(a.invite.createdAt))[0];
-    return record ? structuredClone(record.invite) : null;
+    if (!record) return null;
+    return this.getMatchInvite(record.invite.inviteId);
+  }
+
+  async getPendingRoomJoinInviteForRoom(roomId: string): Promise<MatchInvite | null> {
+    const record = [...this.matchInvites.values()]
+      .filter(({ invite }) =>
+        invite.kind === "room_join"
+        && invite.roomId === roomId
+        && invite.status === "pending"
+      )
+      .sort((a, b) => b.invite.createdAt.localeCompare(a.invite.createdAt))[0];
+    if (!record) return null;
+    record.invite.eventPlan = this.rooms.get(roomId)?.eventPlans.published ?? null;
+    return structuredClone(record.invite);
   }
 
   async createInitialMatchInvite(decision: MatchDecision, sourceJobId?: string): Promise<MatchInvite> {
@@ -1323,6 +1393,7 @@ export class MemoryStore implements DataStore {
       participants,
       offlineGameId: decision.offlineGameId,
       matchSummary: decision.summary,
+      eventPlan: null,
       status: "pending",
       createdAt: now,
       resolvedAt: null
@@ -1332,6 +1403,7 @@ export class MemoryStore implements DataStore {
       participantRequestIds: Object.fromEntries(
         participants.map((participant) => [participant.userId, participant.requestId])
       ),
+      eventPlanSeed: structuredClone(decision.eventPlanSeed),
       sourceJobId
     });
     if (sourceJobId) this.sourceJobInvites.set(sourceJobId, inviteId);
@@ -1350,7 +1422,14 @@ export class MemoryStore implements DataStore {
     }
     const request = this.matchRequests.get(decision.requestId);
     const room = this.rooms.get(decision.roomId);
-    validateRoomJoinDecision(decision, request ? [request] : [], room ? [room] : []);
+    if (!room?.eventPlans.published) {
+      throw new StoreConflictError("房间活动清单尚未确认");
+    }
+    validateRoomJoinDecision(
+      decision,
+      request ? [request] : [],
+      room ? [room] : []
+    );
     if ([...this.matchInvites.values()].some(
       ({ invite }) => invite.kind === "room_join"
         && invite.roomId === decision.roomId
@@ -1373,6 +1452,7 @@ export class MemoryStore implements DataStore {
       participants: [participant],
       offlineGameId: room!.offlineGame.id,
       matchSummary: decision.summary,
+      eventPlan: structuredClone(room!.eventPlans.published),
       status: "pending",
       createdAt: now,
       resolvedAt: null
@@ -1416,26 +1496,67 @@ export class MemoryStore implements DataStore {
     if (invite.kind === "initial_pair") {
       const game = curatedGames.find((item) => item.id === invite.offlineGameId);
       if (!game) throw new StoreNotFoundError("线下游戏不存在");
+      const seed = record.eventPlanSeed ?? {
+        time: {
+          startsAt: null,
+          endsAt: null,
+          timeZone: "Asia/Shanghai",
+          note: "待商定"
+        },
+        location: {
+          name: null,
+          address: null,
+          url: null,
+          note: "待商定"
+        },
+        gameIds: [game.id]
+      };
+      const games = seed.gameIds.map((gameId, position) => {
+        const eventGame = curatedGames.find((item) => item.id === gameId);
+        if (!eventGame) throw new StoreConflictError("活动清单包含无效游戏");
+        return { game: structuredClone(eventGame), primary: position === 0, position };
+      });
+      if (games[0]?.game.id !== game.id) {
+        throw new StoreConflictError("活动清单主游戏与匹配结果不一致");
+      }
       const roomId = randomUUID();
       const capacity = game.maxPlayers;
+      const eventPlan: RoomEventPlan = {
+        planId: randomUUID(),
+        roomId,
+        version: 1,
+        status: "draft",
+        time: structuredClone(seed.time),
+        location: structuredClone(seed.location),
+        games,
+        confirmations: [],
+        createdBy: null,
+        createdAt: now,
+        publishedAt: null
+      };
       room = {
         roomId,
         members: invite.participants.map((item) => ({
           userId: item.userId,
           displayName: item.displayName,
           confirmed: true,
-          participationStatus: "confirmed"
+          participationStatus: "confirmed",
+          role: "founder"
         })),
         offlineGame: structuredClone(game),
         matchSummary: invite.matchSummary,
         status: "confirmed",
         sourceDraftId: null,
         targetPlayers: capacity,
-        recruitmentStatus: invite.participants.length >= capacity ? "full" : "open",
+        recruitmentStatus: "closed",
         version: 0,
         meetingPoint: null,
-        matchingStatus: invite.participants.length >= capacity ? "full" : "active",
+        matchingStatus: "stopped",
         capacity,
+        eventPlans: {
+          draft: eventPlan,
+          published: null
+        },
         createdAt: now,
         completedAt: null
       };
@@ -1475,7 +1596,8 @@ export class MemoryStore implements DataStore {
           userId: participant.userId,
           displayName: participant.displayName,
           confirmed: true,
-          participationStatus: "confirmed"
+          participationStatus: "confirmed",
+          role: "member"
         });
       }
       const request = this.matchRequests.get(participant.requestId)!;
@@ -1502,6 +1624,7 @@ export class MemoryStore implements DataStore {
     }
     invite.status = "accepted";
     invite.resolvedAt = now;
+    invite.eventPlan = invite.kind === "room_join" ? room.eventPlans.published : null;
     return {
       invite: structuredClone(invite),
       room: structuredClone(room),
@@ -1577,6 +1700,7 @@ export class MemoryStore implements DataStore {
         ).length;
         return room.status !== "completed"
           && room.matchingStatus === "active"
+          && room.eventPlans.published !== null
           && memberCount < room.capacity
           && ![...this.matchInvites.values()].some(
             ({ invite }) => invite.kind === "room_join"
@@ -1625,6 +1749,124 @@ export class MemoryStore implements DataStore {
     const membership = rooms.members.find((member) => member.userId === userId);
     if (rooms.status !== "completed" && membership?.participationStatus === "withdrawn") return null;
     return structuredClone(rooms);
+  }
+
+  async updateEventPlan(
+    roomId: string,
+    userId: string,
+    expectedVersion: number,
+    patch: EventPlanPatch
+  ): Promise<EventPlanMutationResult> {
+    const room = this.rooms.get(roomId);
+    if (!room || room.status === "completed") {
+      throw new StoreNotFoundError("房间不存在或已经结束");
+    }
+    const founder = room.members.find(
+      (member) => member.userId === userId && member.role === "founder"
+    );
+    if (!founder) throw new StoreConflictError("只有最初匹配的两位成员可以修改活动清单");
+    const base = room.eventPlans.draft ?? room.eventPlans.published;
+    if (!base) throw new StoreConflictError("当前房间没有活动清单");
+    if (base.version !== expectedVersion) {
+      throw new StoreConflictError("活动清单已更新，请基于最新版本修改");
+    }
+
+    const gameIds = patch.gameIds ?? [...base.games]
+      .sort((left, right) => left.position - right.position)
+      .map(({ game }) => game.id);
+    const games = gameIds.map((gameId, position) => {
+      const game = curatedGames.find((item) => item.id === gameId);
+      if (!game) throw new StoreConflictError("活动清单只能使用目录中的游戏");
+      return { game: structuredClone(game), primary: position === 0, position };
+    });
+    const primary = games[0]?.game;
+    if (!primary || primary.maxPlayers < room.members.length) {
+      throw new StoreConflictError("主游戏人数上限不能小于当前房间人数");
+    }
+
+    const time = { ...base.time, ...patch.time };
+    if (
+      time.startsAt
+      && time.endsAt
+      && new Date(time.endsAt).getTime() <= new Date(time.startsAt).getTime()
+    ) {
+      throw new StoreConflictError("活动结束时间必须晚于开始时间");
+    }
+    const now = new Date().toISOString();
+    if (room.eventPlans.draft) room.eventPlans.draft.status = "superseded";
+    const eventPlan: RoomEventPlan = {
+      planId: randomUUID(),
+      roomId,
+      version: base.version + 1,
+      status: "draft",
+      time,
+      location: { ...base.location, ...patch.location },
+      games,
+      confirmations: [],
+      createdBy: userId,
+      createdAt: now,
+      publishedAt: null
+    };
+    room.eventPlans.draft = eventPlan;
+    return {
+      room: structuredClone(room),
+      eventPlan: structuredClone(eventPlan),
+      published: false
+    };
+  }
+
+  async confirmEventPlan(
+    roomId: string,
+    userId: string,
+    version: number
+  ): Promise<EventPlanMutationResult> {
+    const room = this.rooms.get(roomId);
+    if (!room || room.status === "completed") {
+      throw new StoreNotFoundError("房间不存在或已经结束");
+    }
+    const founder = room.members.find(
+      (member) => member.userId === userId && member.role === "founder"
+    );
+    if (!founder) throw new StoreConflictError("只有最初匹配的两位成员可以确认活动清单");
+    const draft = room.eventPlans.draft;
+    if (!draft || draft.version !== version) {
+      throw new StoreConflictError("只能确认当前活动清单草稿");
+    }
+    if (!draft.confirmations.some((confirmation) => confirmation.userId === userId)) {
+      draft.confirmations.push({
+        userId,
+        displayName: founder.displayName,
+        confirmedAt: new Date().toISOString()
+      });
+    }
+    const founderIds = room.members
+      .filter((member) => member.role === "founder")
+      .map((member) => member.userId);
+    const published = founderIds.every((founderId) =>
+      draft.confirmations.some((confirmation) => confirmation.userId === founderId)
+    );
+    if (published) {
+      if (room.eventPlans.published) room.eventPlans.published.status = "superseded";
+      draft.status = "published";
+      draft.publishedAt = new Date().toISOString();
+      room.eventPlans.published = draft;
+      room.eventPlans.draft = null;
+      const primary = draft.games.find((game) => game.primary)?.game;
+      if (!primary) throw new StoreConflictError("活动清单缺少主游戏");
+      room.offlineGame = structuredClone(primary);
+      room.targetPlayers = primary.maxPlayers;
+      room.capacity = primary.maxPlayers;
+      const activeMemberCount = room.members.filter(
+        (member) => member.participationStatus !== "withdrawn"
+      ).length;
+      room.recruitmentStatus = activeMemberCount >= room.capacity ? "full" : "open";
+      room.matchingStatus = activeMemberCount >= room.capacity ? "full" : "active";
+    }
+    return {
+      room: structuredClone(room),
+      eventPlan: structuredClone(draft),
+      published
+    };
   }
 
   async confirmRoom(roomId: string, userId: string): Promise<MatchRoom> {

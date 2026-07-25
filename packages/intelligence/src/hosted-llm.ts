@@ -11,6 +11,7 @@ import {
   agentProductMessageSchema,
   adventurexImageUnderstandingSchema,
   groupActivityJudgementSchema,
+  eventPlanPatchSchema,
   memoryExtractionResultSchema,
   memoryProfileDraftSchema,
   matchDecisionSchema,
@@ -82,6 +83,15 @@ const conversationPlanSchema = z.object({
     }),
     z.object({ type: z.literal("confirm_room") }),
     z.object({ type: z.literal("complete_room") }),
+    z.object({
+      type: z.literal("update_event_plan"),
+      expectedVersion: z.number().int().positive(),
+      patch: eventPlanPatchSchema
+    }),
+    z.object({
+      type: z.literal("confirm_event_plan"),
+      version: z.number().int().positive()
+    }),
     z.object({
       type: z.literal("submit_feedback"),
       peopleFeedback: z.string().min(1),
@@ -670,7 +680,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         "用户要求围绕某个活动的地点、日期或日程约酒、组局、找搭子，也属于明确社交意图：同时输出 start_match 和用于核实活动事实的 searchPlan；不得等搜索完成后再决定是否开始匹配。",
         "只有假设、将来可能、泛泛讨论社交，或只是说喜欢某个兴趣而没有想认识人的表达，socialIntentDetected 才为 false。",
         "回复自然、克制，不虚构尚未发生的匹配或状态变化。所有产品操作必须通过 actions 输出，由系统执行。",
-        "可用 action：start_match、accept_match、decline_match、stop_match、select_match_options、explain_match_option、refresh_match_options、cancel_match、restart_match、enable_match_push、disable_match_push、activate_match、leave_room、confirm_room、complete_room、submit_feedback。没有操作时 actions=[]。",
+        "可用 action：start_match、accept_match、decline_match、stop_match、select_match_options、explain_match_option、refresh_match_options、cancel_match、restart_match、enable_match_push、disable_match_push、activate_match、leave_room、update_event_plan、confirm_event_plan、confirm_room、complete_room、submit_feedback。没有操作时 actions=[]。",
         "只有用户明确表达现在想社交，且没有等待中的请求或未结束房间时，才输出 start_match，并把本次意图放入 intent。",
         "当前有 pending 匹配邀请时，用户明确接受就输出 accept_match，明确拒绝就输出 decline_match。",
         "用户明确说“停止匹配”“不要再找人”“停止加人”等同义指令时输出 stop_match；它表示停止等待或停止当前房间继续扩充，不等于线下活动已经结束。",
@@ -685,6 +695,13 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         this.options.adventurexMatchingV1
           ? "AdventureX V1 接受候选即加入并确认，禁止输出 confirm_room。runtime.room.status=confirming 只表示人数尚未达到活动最低要求、仍在补位；只允许 leave_room 或 actions=[]，向用户说明无需再次确认。"
           : "只有用户明确接受当前 confirming 房间时才输出 confirm_room。",
+        "只有用户明确表达现在想社交，且没有等待中的请求或未结束房间时，才输出 start_match，并把本次意图放入 intent。",
+        "当前有 pending 匹配邀请时，用户明确接受就输出 accept_match，明确拒绝就输出 decline_match。",
+        "用户明确说“停止匹配”“不要再找人”“停止加人”等同义指令时输出 stop_match；它表示停止等待或停止当前房间继续扩充，不等于线下活动已经结束。",
+        "当前房间有活动清单且当前用户 role=founder 时：用户明确修改时间、地点或目录游戏就输出 update_event_plan；expectedVersion 必须等于当前 draft.version，若没有 draft 则等于 published.version。patch 只写用户明确提供的信息。相对时间应结合 currentTime/timeZone 解析为 ISO UTC，同时保留原话 note。不得虚构时间或地点。",
+        "用户明确说“确认这个清单”“方案没问题”等时输出 confirm_event_plan，version 必须等于当前 draft.version。含糊地说“改一下”时只追问，不输出 action。",
+        "当前用户不是 founder 时，不得输出 update_event_plan 或 confirm_event_plan，并说明其只有查阅权限。",
+        "只有用户明确接受当前 confirming 房间时才输出 confirm_room。",
         "只有用户明确表示线下活动已经结束，且当前房间 confirmed 时才输出 complete_room。",
         "只有当前房间 completed 且用户表达了活动感受时才输出 submit_feedback，分别整理 peopleFeedback、gameFeedback 和 nextIntent。",
         "不要猜测 connectionUserIds；只有用户明确指向房间成员且能够确定 ID 时才填写，否则用空数组。",
@@ -721,6 +738,12 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       ? "当前只允许 actions=[] 或 submit_feedback；禁止 confirm_room 和 complete_room。"
       : context.matchInvite?.status === "pending"
         ? "当前只允许 actions=[]、accept_match、decline_match 或 stop_match。"
+        : context.room?.eventPlans.draft || context.room?.eventPlans.published
+          ? context.room.members.some((member) => member.userId === context.userId && member.role === "founder")
+            ? context.room.eventPlans.draft
+              ? "当前活动清单待确认，只允许 actions=[]、update_event_plan、confirm_event_plan，或在仍扩房时 stop_match。"
+              : "当前活动清单已发布，只允许 actions=[]、update_event_plan，或在仍扩房时 stop_match。"
+            : "当前用户不是 founder，只允许 actions=[]，或在仍扩房时 stop_match。"
         : context.room?.status === "confirming"
           ? this.options.adventurexMatchingV1
             ? context.room.matchingStatus === "active"
@@ -750,6 +773,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       [
         "输出字段：replyDraft, socialIntentDetected, currentIntent, actions, memoryPlan, socialHooks, searchPlan, onboardingTransition。",
         "actions 必须符合给定状态；requiredHookIds 只能来自 runtime.matchOptions。",
+        "actions 只能使用系统提示中列出的 action；update_event_plan 必须包含 expectedVersion 和 patch，confirm_event_plan 必须包含 version。",
         "memoryPlan 必须包含 queries:string[] 和 reviewSuggested:boolean；queries 最多 2 条。",
         "socialHooks 最多 4 条，每条包含 hookText 和 evidenceMessageIds；证据 ID 只能来自输入。",
         "searchPlan.required=false 时 queries 必须为空；required=true 时 queries 必须有 1–2 个 {query, topic, timeRange?}。",
@@ -1084,6 +1108,8 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
     if (candidates.length < 2) return null;
     const matchingInput = {
       requiredRequestId,
+      currentTime: (this.options.now?.() ?? new Date()).toISOString(),
+      timeZone: this.options.timeZone ?? "Asia/Shanghai",
       candidates: candidates.map(({ request, userModel, matchingNarrative }) => ({
         requestId: request.requestId,
         userId: request.userId,
@@ -1109,14 +1135,16 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         "严禁使用兴趣标签重合、intentTags、traits、性格分类、人口属性、关键词计数、向量标签或任何打分维度。不要因为提到相同名词就判定合适。",
         "关注表达节奏、能量互补、关系距离、好奇心方向、线下相处画面与潜在互动流动；不要推断敏感属性。",
         "输入已有至少 2 位候选人时必须给出正好 2 人；memberIds 与 requestIds 按同一顺序一一对应。",
-        "选择一个 maxPlayers 至少为 2 的游戏，其 maxPlayers 同时作为后续房间人数上限。只输出 JSON：memberIds, requestIds, offlineGameId, summary。"
+        "选择一个 maxPlayers 至少为 2 的游戏，其 maxPlayers 同时作为后续房间人数上限。",
+        "同时输出 eventPlanSeed：gameIds 第一项必须等于 offlineGameId；时间和地点只能从双方 currentVibe 的明确表达提取。可结合 currentTime/timeZone 解析明确的相对时间为 UTC ISO；若双方没有明确时间或地点，startsAt/endsAt/name/address/url 使用 null，note 使用“待商定”，不得编造具体场所。",
+        "只输出 JSON：memberIds, requestIds, offlineGameId, summary, eventPlanSeed。"
       ].join("\n"),
       JSON.stringify(matchingInput)
     );
     return this.parseOrRepair(
       matchDecisionSchema,
       result,
-      "只输出 memberIds, requestIds, offlineGameId, summary；必须正好选择 2 人，成员与请求顺序一一对应，并包含 requiredRequestId。",
+      "只输出 memberIds, requestIds, offlineGameId, summary, eventPlanSeed；必须正好选择 2 人，成员与请求顺序一一对应，并包含 requiredRequestId。",
       matchingInput
     );
   }
@@ -1301,6 +1329,16 @@ function isActionAllowed(
   if (context.room?.status === "completed") return type === "submit_feedback";
   if (context.matchInvite?.status === "pending") {
     return type === "accept_match" || type === "decline_match" || type === "stop_match";
+  }
+  if (type === "update_event_plan" || type === "confirm_event_plan") {
+    if (!context.room?.eventPlans.draft && !context.room?.eventPlans.published) return false;
+    const founder = context.room.members.some(
+      (member) => member.userId === context.userId && member.role === "founder"
+    );
+    return founder && (
+      type === "update_event_plan"
+      || Boolean(context.room.eventPlans.draft)
+    );
   }
   if (context.room?.status === "confirming") {
     return (!adventurexMatchingV1 && type === "confirm_room")

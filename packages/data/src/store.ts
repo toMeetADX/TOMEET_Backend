@@ -23,6 +23,8 @@ import type {
   Message,
   OfflineGame,
   PostEventFeedback,
+  EventPlanMutationResult,
+  EventPlanPatch,
   RoomJoinDecision,
   SaveMatchChoicesInput,
   SocialHook,
@@ -170,6 +172,11 @@ export interface DataStore {
     sourceChannel?: Message["sourceChannel"];
     replyToMessageId?: string | null;
   }): Promise<Message | null>;
+  appendProactiveMessage(input: {
+    userId: string;
+    content: string;
+    idempotencyKey: string;
+  }): Promise<Message>;
   listRecentMessages(userId: string, limit?: number): Promise<Message[]>;
   listMessagesRange(userId: string, offset: number, limit: number): Promise<Message[]>;
   countMessages(userId: string): Promise<number>;
@@ -238,6 +245,7 @@ export interface DataStore {
   joinOpenRoom(requestId: string, offerId: string, sourceVersion: number): Promise<MatchRoom>;
   getMatchInvite(inviteId: string): Promise<MatchInvite | null>;
   getLatestMatchInviteForUser(userId: string): Promise<MatchInvite | null>;
+  getPendingRoomJoinInviteForRoom(roomId: string): Promise<MatchInvite | null>;
   createInitialMatchInvite(decision: MatchDecision, sourceJobId?: string): Promise<MatchInvite>;
   createRoomJoinInvite(decision: RoomJoinDecision, sourceJobId?: string): Promise<MatchInvite>;
   acceptMatchInvite(inviteId: string, userId: string): Promise<MatchInviteResolution>;
@@ -247,6 +255,17 @@ export interface DataStore {
   listOfflineGames(): Promise<OfflineGame[]>;
   getRoom(roomId: string): Promise<MatchRoom | null>;
   getLatestRoomForUser(userId: string): Promise<MatchRoom | null>;
+  updateEventPlan(
+    roomId: string,
+    userId: string,
+    expectedVersion: number,
+    patch: EventPlanPatch
+  ): Promise<EventPlanMutationResult>;
+  confirmEventPlan(
+    roomId: string,
+    userId: string,
+    version: number
+  ): Promise<EventPlanMutationResult>;
   confirmRoom(roomId: string, userId: string): Promise<MatchRoom>;
   leaveRoom(roomId: string, userId: string, reason?: string): Promise<MatchRoom>;
   getRoomIntro(roomId: string, userId: string): Promise<string | null>;

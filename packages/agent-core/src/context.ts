@@ -5,6 +5,7 @@ import type {
   MatchRequest,
   MatchRoom,
   Message,
+  OfflineGame,
   SocialHook,
   UserMemory,
   UserMemoryProfile,
@@ -23,6 +24,7 @@ export interface AgentContextBudget {
 }
 
 export interface AgentContext {
+  userId: string;
   recentMessages: Message[];
   checkpoint: string;
   profileNarrative: string;
@@ -33,6 +35,7 @@ export interface AgentContext {
   onboardingState: AdventurexOnboardingState | null;
   matchInvite: MatchInvite | null;
   room: MatchRoom | null;
+  availableGames: OfflineGame[];
   promptRuntime: Record<string, unknown>;
   budget: AgentContextBudget;
 }
@@ -124,6 +127,7 @@ function buildPromptRuntime(
   matchInvite: MatchInvite | null,
   room: MatchRoom | null,
   socialHooks: SocialHook[],
+  availableGames: OfflineGame[],
   maxTokens: number
 ): Record<string, unknown> {
   const profileReadiness = buildProfileReadiness(socialHooks);
@@ -166,7 +170,8 @@ function buildPromptRuntime(
           kind: matchInvite.kind,
           roomId: matchInvite.roomId,
           status: matchInvite.status,
-          participants: matchInvite.participants
+          participants: matchInvite.participants,
+          eventPlan: matchInvite.eventPlan
         }
       : null,
     room: room
@@ -178,16 +183,24 @@ function buildPromptRuntime(
           members: room.members.map((member) => ({
             userId: member.userId,
             displayName: member.displayName,
-            confirmed: member.confirmed
+            confirmed: member.confirmed,
+            role: member.role
           })),
           offlineGame: {
             id: room.offlineGame.id,
             name: room.offlineGame.name,
             description: room.offlineGame.description
           },
+          eventPlans: room.eventPlans,
           completedAt: room.completedAt
         }
-      : null
+      : null,
+    availableGames: availableGames.map((game) => ({
+      id: game.id,
+      name: game.name,
+      minPlayers: game.minPlayers,
+      maxPlayers: game.maxPlayers
+    }))
   };
   if (estimateTokens(projected) <= maxTokens) return projected;
   return {
@@ -220,7 +233,12 @@ function buildPromptRuntime(
       : null,
     onboardingState,
     matchInvite: matchInvite
-      ? { inviteId: matchInvite.inviteId, kind: matchInvite.kind, status: matchInvite.status }
+      ? {
+          inviteId: matchInvite.inviteId,
+          kind: matchInvite.kind,
+          status: matchInvite.status,
+          eventPlan: matchInvite.eventPlan
+        }
       : null,
     room: room
       ? {
@@ -233,9 +251,11 @@ function buildPromptRuntime(
             id: room.offlineGame.id,
             name: truncateToEstimatedTokens(room.offlineGame.name, 80)
           },
+          eventPlans: room.eventPlans,
           completedAt: room.completedAt
         }
-      : null
+      : null,
+    availableGames: availableGames.map((game) => ({ id: game.id, name: game.name }))
   };
 }
 
@@ -246,6 +266,7 @@ export function buildAgentContext(
     matchRequest?: MatchRequest | null;
     matchInvite?: MatchInvite | null;
     room?: MatchRoom | null;
+    availableGames?: OfflineGame[];
     checkpoint?: string;
     memoryProfile?: UserMemoryProfile | null;
     relevantMemories?: UserMemory[];
@@ -290,6 +311,7 @@ export function buildAgentContext(
   const matchInvite = socialState.matchInvite ?? null;
   const room = socialState.room ?? null;
   const socialHooks = socialState.socialHooks ?? [];
+  const availableGames = socialState.availableGames ?? [];
   const promptRuntime = buildPromptRuntime(
     userModel.currentIntent,
     matchRequest,
@@ -298,6 +320,7 @@ export function buildAgentContext(
     matchInvite,
     room,
     socialHooks,
+    availableGames,
     limits.runtimeTokenBudget
   );
   const runtimeTokens = estimateTokens(promptRuntime);
@@ -308,6 +331,7 @@ export function buildAgentContext(
     onboardingState,
     matchInvite,
     room,
+    availableGames,
     profileReadiness: buildProfileReadiness(socialHooks)
   }) > runtimeTokens) {
     truncatedSections.push("runtimeState");
@@ -321,6 +345,7 @@ export function buildAgentContext(
   if (totalEstimatedTokens > limits.totalTokenBudget) truncatedSections.push("totalBudget");
 
   return {
+    userId: userModel.userId,
     recentMessages: recent.messages,
     checkpoint,
     profileNarrative,
@@ -331,6 +356,7 @@ export function buildAgentContext(
     onboardingState,
     matchInvite,
     room,
+    availableGames,
     promptRuntime,
     budget: {
       totalEstimatedTokens,
