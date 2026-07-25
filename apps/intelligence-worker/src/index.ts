@@ -39,7 +39,12 @@ const hosted = new HostedLlmIntelligence({
   simpleReplyFastPath: process.env.LLM_SIMPLE_REPLY_FAST_PATH === "true",
   singlePassEvidenceFinalizer: process.env.LLM_SINGLE_PASS_EVIDENCE_FINALIZER === "true",
   onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event })),
-  onLlmRequestEvent: (event) => console.info(JSON.stringify({ level: "info", event: "llm_request", ...event }))
+  onLlmRequestEvent: (event) => console.info(JSON.stringify({ level: "info", event: "llm_request", ...event })),
+  onReplyFallbackEvent: (event) => console.warn(JSON.stringify({
+    level: "warn",
+    event: "agent_reply_fallback",
+    ...event
+  }))
 });
 
 const store = new SupabaseStore(supabaseUrl, serviceRoleKey);

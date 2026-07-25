@@ -135,6 +135,26 @@ function optimizedHosted(provider?: WebSearchProvider): HostedLlmIntelligence {
   });
 }
 
+function hostedWithFallbackEvents(
+  events: Array<{ stage: string; errorKind: string }>,
+  provider?: WebSearchProvider,
+  optimized = false
+): HostedLlmIntelligence {
+  return new HostedLlmIntelligence({
+    apiKey: "test-key",
+    baseUrl: "https://llm.example.test/v1",
+    textModel: "test-model",
+    visionModel: "test-model",
+    audioModel: "audio-model",
+    webSearchProvider: provider,
+    simpleReplyFastPath: optimized,
+    singlePassEvidenceFinalizer: optimized,
+    onReplyFallbackEvent: (event) => events.push(event),
+    now: () => new Date("2026-07-23T04:00:00.000Z"),
+    timeZone: "Asia/Shanghai"
+  });
+}
+
 function leftFrame(title: "TOMEET 组局邀请" | "TOMEET 成局确认函", lines: string[]): string {
   return [
     "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -397,6 +417,129 @@ describe("hosted Agent web search", () => {
   });
 });
 
+describe("hosted Agent reply fallback", () => {
+  it.each([
+    {
+      name: "HTTP failure",
+      response: () => new Response("upstream failed", { status: 500 }),
+      errorKind: "http_error"
+    },
+    {
+      name: "empty content",
+      response: () => new Response(JSON.stringify({ choices: [{ message: {} }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      }),
+      errorKind: "empty_content"
+    },
+    {
+      name: "invalid JSON",
+      response: () => new Response(JSON.stringify({
+        choices: [{ message: { content: "这不是 JSON，但不应覆盖已有草稿" } }]
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      }),
+      errorKind: "LlmJsonParseError"
+    }
+  ])("publishes the candidate when verification has $name", async ({ response, errorKind }) => {
+    let requestCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(plannedReply({
+            replyDraft: "你刚提到在做机器人，交互里最棘手的是哪一段？",
+            searchPlan: { required: false, queries: [] }
+          })) } }]
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return response();
+    }));
+    const events: Array<{ stage: string; errorKind: string }> = [];
+
+    const insight = await hostedWithFallbackEvents(events).reply(
+      agentContext(),
+      "我最近在做一个机器人项目"
+    );
+
+    expect(insight.reply).toBe("你刚提到在做机器人，交互里最棘手的是哪一段？");
+    expect(insight.actions).toEqual([]);
+    expect(events).toContainEqual({ stage: "verification", errorKind });
+  });
+
+  it("publishes the safe base draft without sources when grounding fails", async () => {
+    const search = vi.fn(async () => [{
+      title: "AdventureX 2026",
+      url: "https://adventure-x.org/zh",
+      content: "AdventureX 2026 在杭州举行。"
+    }]);
+    let requestCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(plannedReply({
+            replyDraft: "我先核实 AdventureX 的地点，再给你准确答案。"
+          })) } }]
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response("grounding unavailable", { status: 503 });
+    }));
+    const events: Array<{ stage: string; errorKind: string }> = [];
+
+    const insight = await hostedWithFallbackEvents(events, { search }, true).reply(
+      agentContext(),
+      "AdventureX 今年在哪里？"
+    );
+
+    expect(insight.reply).toBe("我先核实 AdventureX 的地点，再给你准确答案。");
+    expect(insight.webSearch).toEqual({ status: "completed", sources: [] });
+    expect(requestCount).toBe(2);
+    expect(events).toContainEqual({ stage: "grounding", errorKind: "http_error" });
+  });
+
+  it("uses a model-generated reply-only recovery when the plan request fails", async () => {
+    let requestCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      requestCount += 1;
+      if (requestCount === 1) return new Response("plan unavailable", { status: 500 });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          reply: "你刚才问的是交互延迟，最明显的是发送后一直没有任何状态反馈吗？"
+        }) } }]
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+    const events: Array<{ stage: string; errorKind: string }> = [];
+
+    const insight = await hostedWithFallbackEvents(events).reply(
+      agentContext(),
+      "现在消息回复很慢"
+    );
+
+    expect(insight.reply).toContain("交互延迟");
+    expect(insight.actions).toEqual([]);
+    expect(requestCount).toBe(2);
+    expect(events).toContainEqual({ stage: "plan", errorKind: "http_error" });
+  });
+
+  it("salvages replyDraft from malformed plan JSON instead of failing the job", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: "{\"replyDraft\":\"你提到发送后会卡住，最常卡在哪一步？\",\"actions\":[" } }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    const events: Array<{ stage: string; errorKind: string }> = [];
+
+    const insight = await hostedWithFallbackEvents(events).reply(
+      agentContext(),
+      "发送后经常卡住"
+    );
+
+    expect(insight.reply).toBe("你提到发送后会卡住，最常卡在哪一步？");
+    expect(insight.actions).toEqual([]);
+    expect(events).toContainEqual({ stage: "plan", errorKind: "LlmJsonParseError" });
+  });
+});
+
 describe("hosted Agent exploration pressure", () => {
   it("normalizes common structured text shapes without failing the Agent job", async () => {
     const lookupMemories = vi.fn(async () => []);
@@ -526,21 +669,25 @@ describe("hosted Agent exploration pressure", () => {
     expect(requestBodies).toHaveLength(2);
   });
 
-  it("reports the exact stage and field after deterministic repair is exhausted", async () => {
+  it("uses a reply-only model recovery after structured plan repair is exhausted", async () => {
     const invalidPlan = plannedReply({
       replyDraft: { unexpected: true },
       searchPlan: { required: false, queries: [] }
     });
-    const requestBodies = stubChatResponses(invalidPlan, invalidPlan);
+    const requestBodies = stubChatResponses(
+      invalidPlan,
+      invalidPlan,
+      { reply: "你刚才说没什么特别介意的，那最近最愿意花时间做的事是什么？" }
+    );
 
-    await expect(hostedWithSearch().reply(agentContext(), "没什么特别介意的"))
-      .rejects.toThrow(
-        "LLM 结构化输出校验失败 stage=agent_reply.plan: replyDraft invalid_type expected=string received=object"
-      );
+    const insight = await hostedWithSearch().reply(agentContext(), "没什么特别介意的");
 
-    expect(requestBodies).toHaveLength(2);
+    expect(insight.reply).toContain("最近最愿意花时间");
+    expect(insight.actions).toEqual([]);
+    expect(requestBodies).toHaveLength(3);
     const repairRequest = JSON.parse(requestBodies[1]!) as { temperature: number };
     expect(repairRequest.temperature).toBe(0);
+    expect(requestBodies[2]).toContain("只负责给用户写一条自然、具体、可直接发送的回复");
   });
 
   it("forbids mirror replies in planning and rewrites one at the publish gate", async () => {
