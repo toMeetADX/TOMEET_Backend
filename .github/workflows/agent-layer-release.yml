@@ -3,12 +3,12 @@ name: Agent Layer Release
 on:
   push:
     branches:
-      - feat/wechat-channel
+      - main
     paths:
-      - ".agent-sync/**"
       - ".github/workflows/**"
       - "apps/api/**"
       - "apps/intelligence-worker/**"
+      - "apps/wechat-ilink-worker/**"
       - "packages/agent-core/**"
       - "packages/intelligence/**"
       - "packages/user-model/**"
@@ -17,6 +17,8 @@ on:
       - "packages/contracts/**"
       - "packages/data/**"
       - "packages/game-catalog/**"
+      - "packages/room/**"
+      - "packages/wechat-ilink/**"
       - "supabase/migrations/**"
       - "scripts/**"
       - "package.json"
@@ -26,12 +28,13 @@ on:
       - "eslint.config.mjs"
       - "railway.api.toml"
       - "railway.worker.toml"
+      - "railway.wechat.toml"
   workflow_dispatch:
     inputs:
-      target_ref:
-        description: WeChat target ref to validate
+      release_ref:
+        description: Main ref to validate and release
         required: false
-        default: feat/wechat-channel
+        default: main
         type: string
       dry_run:
         description: Stop after Staging validation
@@ -52,9 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: staging
     outputs:
-      source_commit: ${{ steps.verify.outputs.source_commit }}
-      target_commit: ${{ steps.verify.outputs.target_commit }}
-      migration_hash: ${{ steps.verify.outputs.migration_hash }}
+      source_commit: ${{ steps.release.outputs.release_commit }}
+      target_commit: ${{ steps.release.outputs.release_commit }}
     env:
       RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
       RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
@@ -75,7 +77,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref || github.sha }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.sha }}
           fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
@@ -109,25 +111,20 @@ jobs:
             fi
           done
       - name: Fetch release refs
-        run: git fetch origin main feat/wechat-channel --tags
-      - name: Verify exact Agent release pair
-        id: verify
+        run: git fetch origin main --tags
+      - name: Resolve immutable main release commit
+        id: release
         shell: bash
         run: |
-          pnpm install --frozen-lockfile
-          node scripts/agent-layer-sync.mjs verify \
-            --source origin/main \
-            --target HEAD \
-            --json > "$RUNNER_TEMP/release.json"
-          node --input-type=module <<'NODE'
-          import { readFileSync, appendFileSync } from "node:fs";
-          const release = JSON.parse(readFileSync(process.env.RUNNER_TEMP + "/release.json", "utf8"));
-          appendFileSync(process.env.GITHUB_OUTPUT, `source_commit=${release.sourceCommit}\n`);
-          appendFileSync(process.env.GITHUB_OUTPUT, `target_commit=${release.targetCommit}\n`);
-          appendFileSync(process.env.GITHUB_OUTPUT, `migration_hash=${release.migrationHash}\n`);
-          NODE
+          release_commit="$(git rev-parse HEAD)"
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            echo "::error::Release ref must resolve to a commit already merged into main."
+            exit 1
+          fi
+          echo "release_commit=$release_commit" >> "$GITHUB_OUTPUT"
       - name: Re-run release gates
         run: |
+          pnpm install --frozen-lockfile
           pnpm agent:migrations:check -- --all
           pnpm check
       - name: Validate and apply migrations to isolated Staging
@@ -136,53 +133,47 @@ jobs:
           supabase db push --db-url "$STAGING_DB_URL"
           supabase migration list --db-url "$STAGING_DB_URL"
           supabase db lint --db-url "$STAGING_DB_URL" --fail-on error
-      - name: Prepare immutable release worktrees
+      - name: Prepare immutable release worktree
         id: worktrees
         env:
-          SOURCE_COMMIT: ${{ steps.verify.outputs.source_commit }}
-          TARGET_COMMIT: ${{ steps.verify.outputs.target_commit }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.release_commit }}
         shell: bash
         run: |
-          source_dir="$RUNNER_TEMP/tomeet-source"
-          target_dir="$RUNNER_TEMP/tomeet-target"
-          git worktree add --detach "$source_dir" "$SOURCE_COMMIT"
-          git worktree add --detach "$target_dir" "$TARGET_COMMIT"
-          echo "source_dir=$source_dir" >> "$GITHUB_OUTPUT"
-          echo "target_dir=$target_dir" >> "$GITHUB_OUTPUT"
+          release_dir="$RUNNER_TEMP/tomeet-release"
+          git worktree add --detach "$release_dir" "$RELEASE_COMMIT"
+          echo "release_dir=$release_dir" >> "$GITHUB_OUTPUT"
       - name: Deploy Staging services in compatibility order
         env:
-          SOURCE_DIR: ${{ steps.worktrees.outputs.source_dir }}
-          TARGET_DIR: ${{ steps.worktrees.outputs.target_dir }}
-          SOURCE_COMMIT: ${{ steps.verify.outputs.source_commit }}
-          TARGET_COMMIT: ${{ steps.verify.outputs.target_commit }}
+          RELEASE_DIR: ${{ steps.worktrees.outputs.release_dir }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.release_commit }}
         shell: bash
         run: |
           node scripts/railway-release.mjs deploy \
-            --cwd "$SOURCE_DIR" \
+            --cwd "$RELEASE_DIR" \
             --project "$RAILWAY_PROJECT_ID" \
             --environment "$RAILWAY_ENVIRONMENT_ID" \
             --service "$RAILWAY_INTELLIGENCE_SERVICE" \
-            --message "staging agent worker $SOURCE_COMMIT"
+            --message "staging agent worker $RELEASE_COMMIT"
           node scripts/railway-release.mjs deploy \
-            --cwd "$SOURCE_DIR" \
+            --cwd "$RELEASE_DIR" \
             --project "$RAILWAY_PROJECT_ID" \
             --environment "$RAILWAY_ENVIRONMENT_ID" \
             --service "$RAILWAY_WEB_API_SERVICE" \
             --health-url "$WEB_API_READY_URL" \
-            --message "staging web api $SOURCE_COMMIT"
+            --message "staging web api $RELEASE_COMMIT"
           node scripts/railway-release.mjs deploy \
-            --cwd "$TARGET_DIR" \
+            --cwd "$RELEASE_DIR" \
             --project "$RAILWAY_PROJECT_ID" \
             --environment "$RAILWAY_ENVIRONMENT_ID" \
             --service "$RAILWAY_WECHAT_API_SERVICE" \
             --health-url "$WECHAT_API_READY_URL" \
-            --message "staging wechat api $TARGET_COMMIT"
+            --message "staging wechat api $RELEASE_COMMIT"
           node scripts/railway-release.mjs deploy \
-            --cwd "$TARGET_DIR" \
+            --cwd "$RELEASE_DIR" \
             --project "$RAILWAY_PROJECT_ID" \
             --environment "$RAILWAY_ENVIRONMENT_ID" \
             --service "$RAILWAY_WECHAT_WORKER_SERVICE" \
-            --message "staging wechat worker $TARGET_COMMIT"
+            --message "staging wechat worker $RELEASE_COMMIT"
       - name: Run real cross-channel Staging smoke
         env:
           SMOKE_WEB_API_URL: ${{ vars.WEB_API_URL }}
@@ -261,7 +252,7 @@ jobs:
               exit 1
             fi
           done
-          git fetch origin main feat/wechat-channel --tags
+          git fetch origin main --tags
           git rev-parse --verify "prod-web-stable^{commit}"
           git rev-parse --verify "prod-wechat-stable^{commit}"
           if [ "$AUTODEPLOY_DISABLED" != "true" ]; then
@@ -272,10 +263,11 @@ jobs:
             echo "::error::Set PRODUCTION_ZERO_DOWNTIME_CONFIGURED=true only after configuring overlap and draining variables."
             exit 1
           fi
-      - name: Re-verify release pair before Production
+      - name: Re-verify immutable main release before Production
         run: |
           pnpm install --frozen-lockfile
-          pnpm agent:release:verify -- --source "$SOURCE_COMMIT" --target "$TARGET_COMMIT"
+          test "$SOURCE_COMMIT" = "$TARGET_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           pnpm agent:migrations:check -- --all
       - name: Require Production backup for schema changes
         env:
@@ -298,22 +290,18 @@ jobs:
         id: worktrees
         shell: bash
         run: |
-          current_source="$RUNNER_TEMP/current-source"
-          current_target="$RUNNER_TEMP/current-target"
+          current_release="$RUNNER_TEMP/current-release"
           stable_source="$RUNNER_TEMP/stable-source"
           stable_target="$RUNNER_TEMP/stable-target"
-          git worktree add --detach "$current_source" "$SOURCE_COMMIT"
-          git worktree add --detach "$current_target" "$TARGET_COMMIT"
+          git worktree add --detach "$current_release" "$SOURCE_COMMIT"
           git worktree add --detach "$stable_source" prod-web-stable
           git worktree add --detach "$stable_target" prod-wechat-stable
-          echo "current_source=$current_source" >> "$GITHUB_OUTPUT"
-          echo "current_target=$current_target" >> "$GITHUB_OUTPUT"
+          echo "current_release=$current_release" >> "$GITHUB_OUTPUT"
           echo "stable_source=$stable_source" >> "$GITHUB_OUTPUT"
           echo "stable_target=$stable_target" >> "$GITHUB_OUTPUT"
       - name: Deploy Production, smoke, observe, and rollback on failure
         env:
-          CURRENT_SOURCE: ${{ steps.worktrees.outputs.current_source }}
-          CURRENT_TARGET: ${{ steps.worktrees.outputs.current_target }}
+          CURRENT_RELEASE: ${{ steps.worktrees.outputs.current_release }}
           STABLE_SOURCE: ${{ steps.worktrees.outputs.stable_source }}
           STABLE_TARGET: ${{ steps.worktrees.outputs.stable_target }}
           SMOKE_RUN_ID: production-${{ github.run_id }}-${{ github.run_attempt }}
@@ -348,15 +336,15 @@ jobs:
           }
 
           release_failed=0
-          deploy_service "$CURRENT_SOURCE" "$RAILWAY_INTELLIGENCE_SERVICE" "" "production agent worker $SOURCE_COMMIT" || release_failed=1
+          deploy_service "$CURRENT_RELEASE" "$RAILWAY_INTELLIGENCE_SERVICE" "" "production agent worker $SOURCE_COMMIT" || release_failed=1
           if [ "$release_failed" -eq 0 ]; then
-            deploy_service "$CURRENT_SOURCE" "$RAILWAY_WEB_API_SERVICE" "$WEB_API_READY_URL" "production web api $SOURCE_COMMIT" || release_failed=1
+            deploy_service "$CURRENT_RELEASE" "$RAILWAY_WEB_API_SERVICE" "$WEB_API_READY_URL" "production web api $SOURCE_COMMIT" || release_failed=1
           fi
           if [ "$release_failed" -eq 0 ]; then
-            deploy_service "$CURRENT_TARGET" "$RAILWAY_WECHAT_API_SERVICE" "$WECHAT_API_READY_URL" "production wechat api $TARGET_COMMIT" || release_failed=1
+            deploy_service "$CURRENT_RELEASE" "$RAILWAY_WECHAT_API_SERVICE" "$WECHAT_API_READY_URL" "production wechat api $SOURCE_COMMIT" || release_failed=1
           fi
           if [ "$release_failed" -eq 0 ]; then
-            deploy_service "$CURRENT_TARGET" "$RAILWAY_WECHAT_WORKER_SERVICE" "" "production wechat worker $TARGET_COMMIT" || release_failed=1
+            deploy_service "$CURRENT_RELEASE" "$RAILWAY_WECHAT_WORKER_SERVICE" "" "production wechat worker $SOURCE_COMMIT" || release_failed=1
           fi
           if [ "$release_failed" -eq 0 ]; then
             pnpm agent:smoke:cross-channel || {
@@ -386,7 +374,7 @@ jobs:
           git tag --force prod-web-previous "$previous_web"
           git tag --force prod-wechat-previous "$previous_wechat"
           git tag --force prod-web-stable "$SOURCE_COMMIT"
-          git tag --force prod-wechat-stable "$TARGET_COMMIT"
+          git tag --force prod-wechat-stable "$SOURCE_COMMIT"
           git push --force origin \
             refs/tags/prod-web-previous \
             refs/tags/prod-wechat-previous \

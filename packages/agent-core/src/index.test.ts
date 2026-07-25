@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { adventurexWelcomeContent } from "@tomeet/contracts";
 import { createDefaultUserModel } from "@tomeet/user-model";
 import {
   buildAgentContext,

@@ -12,7 +12,6 @@ import type {
   WebSearchMeta,
   SocialHookDraft
 } from "@tomeet/contracts";
-import { adventurexWelcomeContent } from "@tomeet/contracts";
 import type { AgentContext } from "./context.js";
 import {
   defaultMemoryExpiration,

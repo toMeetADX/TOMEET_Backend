@@ -9,9 +9,33 @@
     "20260724090000_sync_auth_users.sql": "18e75b00d66e17bb55c9548e844fb072abb35f9069eb66e3a76e0196f63d6b20"
   },
   "approvedDestructiveMigrations": {
+    "20260724180000_adventurex_live_matchmaking_v1.sql": {
+      "sha256": "3c4599e99b226afc4d9a62e32e843791ad6aab7b03e04d66897d3b77a2e0e92b",
+      "reason": "Replace check constraints and one function signature in the same transaction; DELETE statements are inside RPC bodies, and REVOKE statements restrict new objects to service_role."
+    },
+    "20260725120000_online_auction_push_pool.sql": {
+      "sha256": "492a8e794101696ad26df59107fe566b0d1accd48a81fa419dc4121c48d227d2",
+      "reason": "Replace the match phase check constraint in place and restrict new test-pool and outbound-message objects to service_role."
+    },
+    "20260725133000_confirmation_follow_up_priority.sql": {
+      "sha256": "daf0a881b38d8576290b70706d2a5476a63d5d805ec4abf8b90b79d6e0738e3e",
+      "reason": "Recreate RPC bodies with the existing signatures and explicitly restore service_role-only execution privileges."
+    },
+    "20260725143000_room_exit_reason_watching.sql": {
+      "sha256": "a3db7d79f7b962628dd6b271f909d35c8c8941f15142461428c38dd8ed710c88",
+      "reason": "Replace the withdrawal reason check constraint in place and retire the old two-argument RPC grant after adding the compatible three-argument service_role RPC."
+    },
+    "20260725150000_onboarding_language_bubbles.sql": {
+      "sha256": "7959714f2923e36213526db813d461bea2200be17a0ed122dc5903a6ec235c0a",
+      "reason": "Update onboarding RPC overloads while keeping compatibility wrappers and restoring service_role-only execution privileges."
+    },
     "20260725220000_shared_channel_data_model.sql": {
       "sha256": "78028d94efb0ca232bc587a3688b9b219b20f65000c872020d925aaa7bb156ee",
       "reason": "Backfill canonical users and channel delivery records transactionally, then replace four duplicate business tables with compatibility views."
+    },
+    "20260725223000_wechat_turn_generation_guards.sql": {
+      "sha256": "c88f5bdc9bd203dbdbd94542abfc5066da2f6beb14d56b8e8f11f87335a1d0d7",
+      "reason": "Create the response-generation guard table and RPCs, enable RLS, and restrict all access to service_role."
     }
   }
 }
