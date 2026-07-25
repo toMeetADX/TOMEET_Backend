@@ -185,7 +185,13 @@ SUPABASE_SERVICE_ROLE_KEY=<server-only secret>
 WECHAT_CREDENTIAL_ENCRYPTION_KEY=<步骤 2 的第一个值>
 TOMEET_INTERNAL_API_TOKEN=<步骤 2 的第二个值>
 FRONTEND_ORIGIN=https://<微信 Vercel 域名>
+WECHAT_WEB_REGISTRATION_URL=https://tomeet.chat/register
+WECHAT_WEB_CLAIM_TTL_SECONDS=900
 ```
+
+Supabase Auth 必须开启 Anonymous Sign-Ins。首次扫码会先创建同一 UUID 的匿名 Auth
+用户，开场白再发送一次性注册链接；注册页契约见
+[`wechat-web-registration.md`](wechat-web-registration.md)。
 
 浏览器必须使用 API 的公开 HTTPS 域名。确认 API：
 

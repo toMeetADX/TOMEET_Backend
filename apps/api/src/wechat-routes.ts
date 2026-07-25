@@ -34,7 +34,24 @@ export interface WechatApiRuntime {
 
 export interface WechatActivationContext {
   userId: string;
+  webRegistrationUrl?: string;
   deliverText?: (input: { text: string; runId: string }) => Promise<void>;
+}
+
+interface ProvisionedWechatWebAccount {
+  userId: string;
+  accessToken: string;
+  refreshToken: string;
+  sessionExpiresAt: string;
+}
+
+export interface WechatWebRegistrationRuntime {
+  registrationUrl: string;
+  claimTtlMs?: number;
+  accountProvisioner: {
+    provision(): Promise<ProvisionedWechatWebAccount>;
+    discard(userId: string): Promise<void>;
+  };
 }
 
 interface WechatActivationCredentials {
@@ -57,6 +74,7 @@ interface RegisterWechatRoutesOptions {
   rapidQrAccessTokenMatches?(accessToken: string): Promise<boolean>;
   isNewWechatIdentity?(externalUserId: string): Promise<boolean>;
   onActivated?(context: WechatActivationContext): Promise<void>;
+  webRegistration?: WechatWebRegistrationRuntime;
 }
 
 function publicSession(session: WechatConnectionSession) {
@@ -113,6 +131,51 @@ function ensureHttpsBaseUrl(value: string): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
+function webRegistrationLink(baseUrl: string, token: string): string {
+  const url = new URL(baseUrl);
+  if (
+    url.protocol !== "https:"
+    && !(url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1"))
+  ) {
+    throw new Error("微信 Web 注册地址仅允许 HTTPS 或本机 HTTP");
+  }
+  if (url.username || url.password) throw new Error("微信 Web 注册地址不能包含凭证");
+  url.hash = new URLSearchParams({ claim: token }).toString();
+  return url.toString();
+}
+
+async function createWebRegistrationClaim(
+  runtime: WechatApiRuntime,
+  account: ProvisionedWechatWebAccount,
+  registration: WechatWebRegistrationRuntime
+): Promise<string> {
+  const sessionExpiresAt = new Date(account.sessionExpiresAt).getTime();
+  const expiresAtMs = Math.min(
+    Date.now() + (registration.claimTtlMs ?? 15 * 60_000),
+    sessionExpiresAt - 5_000
+  );
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+    throw new Error("Supabase 匿名会话有效期不足，无法创建注册链接");
+  }
+  const id = randomUUID();
+  const token = randomBytes(32).toString("base64url");
+  await runtime.store.createWechatWebClaim({
+    id,
+    userId: account.userId,
+    tokenHash: hashSessionToken(token),
+    accessTokenCiphertext: runtime.cipher.encrypt(
+      account.accessToken,
+      `wechat-web-claim:${id}:access`
+    ),
+    refreshTokenCiphertext: runtime.cipher.encrypt(
+      account.refreshToken,
+      `wechat-web-claim:${id}:refresh`
+    ),
+    expiresAt: new Date(expiresAtMs).toISOString()
+  });
+  return webRegistrationLink(registration.registrationUrl, token);
+}
+
 function activationCredentials(
   result: WechatQrStatus,
   fallbackBaseUrl: string
@@ -156,7 +219,9 @@ async function activateSession(
   session: WechatConnectionSession,
   credentials: WechatActivationCredentials,
   onActivated?: (context: WechatActivationContext) => Promise<void>,
-  isNewWechatIdentity?: (externalUserId: string) => Promise<boolean>
+  isNewWechatIdentity?: (externalUserId: string) => Promise<boolean>,
+  webRegistration?: WechatWebRegistrationRuntime,
+  reportWebRegistrationError?: (error: unknown) => void
 ): Promise<WechatConnectionSession> {
   let baseUrl: string;
   try {
@@ -170,14 +235,23 @@ async function activateSession(
       ifStatusIn: NON_TERMINAL_SESSION_STATUSES
     });
   }
-  const shouldSendActivationWelcome = onActivated && isNewWechatIdentity
+  const isNewIdentity = isNewWechatIdentity
     ? await isNewWechatIdentity(credentials.ilinkUserId)
     : true;
+  const shouldSendActivationWelcome = onActivated ? isNewIdentity : false;
+  let provisionedAccount: ProvisionedWechatWebAccount | null = null;
+  if (isNewIdentity && !session.requestedUserId && webRegistration) {
+    try {
+      provisionedAccount = await webRegistration.accountProvisioner.provision();
+    } catch (error) {
+      reportWebRegistrationError?.(error);
+    }
+  }
   let activation: Awaited<ReturnType<WechatConnectionStore["activateWechatSession"]>>;
   try {
     activation = await runtime.store.activateWechatSession({
       sessionId: session.id,
-      newUserId: randomUUID(),
+      newUserId: provisionedAccount?.userId ?? randomUUID(),
       ownerIlinkUserId: credentials.ilinkUserId,
       ilinkBotId: credentials.ilinkBotId,
       botTokenCiphertext: runtime.cipher.encrypt(
@@ -198,6 +272,23 @@ async function activateSession(
     }
     throw error;
   }
+  let registrationUrl: string | undefined;
+  if (provisionedAccount) {
+    if (activation.session.userId === provisionedAccount.userId) {
+      try {
+        registrationUrl = await createWebRegistrationClaim(
+          runtime,
+          provisionedAccount,
+          webRegistration!
+        );
+      } catch (error) {
+        reportWebRegistrationError?.(error);
+      }
+    } else {
+      await webRegistration!.accountProvisioner.discard(provisionedAccount.userId)
+        .catch((error: unknown) => reportWebRegistrationError?.(error));
+    }
+  }
   if (
     activation.session.userId
     && onActivated
@@ -206,6 +297,7 @@ async function activateSession(
   ) {
     await onActivated({
       userId: activation.session.userId,
+      webRegistrationUrl: registrationUrl,
       deliverText: async ({ text, runId }) => {
         await runtime.client.sendText({
           baseUrl,
@@ -227,6 +319,8 @@ async function pollSession(
   signal?: AbortSignal,
   onActivated?: (context: WechatActivationContext) => Promise<void>,
   isNewWechatIdentity?: (externalUserId: string) => Promise<boolean>,
+  webRegistration?: WechatWebRegistrationRuntime,
+  reportWebRegistrationError?: (error: unknown) => void,
   onScanned?: ScannedSessionHandler
 ): Promise<WechatConnectionSession> {
   if (isTerminalSession(session)) return session;
@@ -268,7 +362,15 @@ async function pollSession(
         return scanned;
       }
       return credentials
-        ? activateSession(runtime, scanned, credentials, onActivated, isNewWechatIdentity)
+        ? activateSession(
+            runtime,
+            scanned,
+            credentials,
+            onActivated,
+            isNewWechatIdentity,
+            webRegistration,
+            reportWebRegistrationError
+          )
         : scanned;
     }
     case "need_verifycode":
@@ -330,7 +432,15 @@ async function pollSession(
         return scanned;
       }
       return credentials
-        ? activateSession(runtime, scanned, credentials, onActivated, isNewWechatIdentity)
+        ? activateSession(
+            runtime,
+            scanned,
+            credentials,
+            onActivated,
+            isNewWechatIdentity,
+            webRegistration,
+            reportWebRegistrationError
+          )
         : scanned;
     }
     case "confirmed": {
@@ -349,7 +459,9 @@ async function pollSession(
         session,
         credentials,
         onActivated,
-        isNewWechatIdentity
+        isNewWechatIdentity,
+        webRegistration,
+        reportWebRegistrationError
       );
     }
   }
@@ -363,6 +475,12 @@ export function registerWechatRoutes(
     controller: AbortController;
     task: Promise<void>;
   }>();
+  const reportWebRegistrationError = (error: unknown) => {
+    app.log.error({
+      err: error,
+      event: "wechat_web_registration_failed"
+    });
+  };
 
   const monitorScannedSession: ScannedSessionHandler = (session, credentials) => {
     const runtime = options.runtime;
@@ -381,7 +499,9 @@ export function registerWechatRoutes(
           current,
           credentials,
           options.onActivated,
-          options.isNewWechatIdentity
+          options.isNewWechatIdentity,
+          options.webRegistration,
+          reportWebRegistrationError
         );
       }
       while (!controller.signal.aborted && current.status === "scanned") {
@@ -391,7 +511,9 @@ export function registerWechatRoutes(
           undefined,
           controller.signal,
           options.onActivated,
-          options.isNewWechatIdentity
+          options.isNewWechatIdentity,
+          options.webRegistration,
+          reportWebRegistrationError
         );
       }
     }).catch((error: unknown) => {
@@ -413,6 +535,57 @@ export function registerWechatRoutes(
     for (const monitor of monitors) monitor.controller.abort();
     await Promise.allSettled(monitors.map((monitor) => monitor.task));
   });
+
+  app.post(
+    "/auth/wechat/claim",
+    {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "10 minutes"
+        }
+      }
+    },
+    async (request, reply) => {
+      reply.header("Cache-Control", "no-store");
+      reply.header("Referrer-Policy", "no-referrer");
+      const runtime = options.runtime;
+      if (!runtime || !options.webRegistration) {
+        return reply.code(503).send({
+          error: "wechat_web_registration_disabled",
+          message: "微信 Web 注册尚未配置"
+        });
+      }
+      const { token } = z.object({
+        token: z.string().regex(/^[A-Za-z0-9_-]{43}$/u)
+      }).parse(request.body ?? {});
+      const claim = await runtime.store.consumeWechatWebClaim(hashSessionToken(token));
+      if (!claim) {
+        return reply.code(401).send({
+          error: "wechat_web_claim_invalid",
+          message: "注册链接无效、已使用或已过期"
+        });
+      }
+      return {
+        userId: claim.userId,
+        session: {
+          accessToken: runtime.cipher.decrypt(
+            claim.accessTokenCiphertext,
+            `wechat-web-claim:${claim.id}:access`
+          ),
+          refreshToken: runtime.cipher.decrypt(
+            claim.refreshTokenCiphertext,
+            `wechat-web-claim:${claim.id}:refresh`
+          )
+        },
+        registrationMethods: [
+          "email_password",
+          "phone_password",
+          "google"
+        ]
+      };
+    }
+  );
 
   async function createSession(requestedUserId?: string) {
     const runtime = options.runtime;
@@ -564,6 +737,8 @@ export function registerWechatRoutes(
         undefined,
         options.onActivated,
         options.isNewWechatIdentity,
+        options.webRegistration,
+        reportWebRegistrationError,
         monitorScannedSession
       );
     }
@@ -636,6 +811,8 @@ export function registerWechatRoutes(
             controller.signal,
             options.onActivated,
             options.isNewWechatIdentity,
+            options.webRegistration,
+            reportWebRegistrationError,
             monitorScannedSession
           );
         }
@@ -677,6 +854,8 @@ export function registerWechatRoutes(
       undefined,
       options.onActivated,
       options.isNewWechatIdentity,
+      options.webRegistration,
+      reportWebRegistrationError,
       monitorScannedSession
     );
     reply.header("Cache-Control", "no-store");

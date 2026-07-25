@@ -127,6 +127,26 @@ export interface WechatOutboundDelivery {
   connection: WechatConnection;
 }
 
+export interface WechatWebClaim {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  accessTokenCiphertext: string;
+  refreshTokenCiphertext: string;
+  expiresAt: string;
+  consumedAt: string | null;
+  createdAt: string;
+}
+
+export interface CreateWechatWebClaimInput {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  accessTokenCiphertext: string;
+  refreshTokenCiphertext: string;
+  expiresAt: string;
+}
+
 export interface ActivateWechatSessionInput {
   sessionId: string;
   newUserId: string;

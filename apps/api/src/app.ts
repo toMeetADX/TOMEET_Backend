@@ -33,7 +33,11 @@ import {
   type AccessTokenVerifier,
   type EmailAccessTokenMatcher
 } from "./auth.js";
-import { registerWechatRoutes, type WechatApiRuntime } from "./wechat-routes.js";
+import {
+  registerWechatRoutes,
+  type WechatApiRuntime,
+  type WechatWebRegistrationRuntime
+} from "./wechat-routes.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -48,6 +52,7 @@ export interface BuildAppOptions {
   internalApiToken?: string;
   autoProvisionChannelUsers?: boolean;
   wechat?: WechatApiRuntime;
+  wechatWebRegistration?: WechatWebRegistrationRuntime;
   logger?: boolean;
   verifyAccessToken?: AccessTokenVerifier;
   trustProxy?: boolean;
@@ -156,6 +161,7 @@ export async function buildApp(options: BuildAppOptions) {
     if (
       path === "/health"
       || path === "/ready"
+      || path === "/auth/wechat/claim"
       || path?.startsWith("/internal/")
       || (path?.startsWith("/wechat/connect/sessions") && !isWechatSessionCreation)
       || (isWechatSessionCreation && !request.headers.authorization)
@@ -300,10 +306,11 @@ export async function buildApp(options: BuildAppOptions) {
     internalTokenMatches,
     publicSessionRateLimitMax: options.wechatQrRateLimitMax,
     rapidQrAccessTokenMatches: options.wechatRapidQrAccessTokenMatches,
+    webRegistration: options.wechatWebRegistration,
     isNewWechatIdentity: async (externalUserId) => (
       (await options.store.resolveChannelIdentity("wechat", externalUserId)) === null
     ),
-    onActivated: async ({ userId, deliverText }) => {
+    onActivated: async ({ userId, deliverText, webRegistrationUrl }) => {
       const onboardingState = await options.store.ensureAdventurexOnboardingState(userId);
       if (onboardingState.welcomeDeliveredAt) return;
       const message = await options.store.startAdventurexOnboarding(userId, "zh");
@@ -311,6 +318,16 @@ export async function buildApp(options: BuildAppOptions) {
       const bubbles = message.content.split(/\n\s*\n+/u).filter(Boolean);
       for (const [index, text] of bubbles.entries()) {
         await deliverText({ text, runId: `activation-welcome-${userId}-${index + 1}` });
+      }
+      if (webRegistrationUrl) {
+        await deliverText({
+          text: "想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！",
+          runId: `activation-welcome-${userId}-web-register-intro`
+        });
+        await deliverText({
+          text: `点这里完成注册：${webRegistrationUrl}`,
+          runId: `activation-welcome-${userId}-web-register-link`
+        });
       }
       await options.store.markAdventurexWelcomeDelivered(userId);
     }

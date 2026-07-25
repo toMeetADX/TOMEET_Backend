@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type {
   ActivateWechatSessionInput,
+  CreateWechatWebClaimInput,
   CreateWechatSessionInput,
   WechatConnection,
   WechatConnectionSession,
   WechatOutboundDelivery,
+  WechatWebClaim,
   WechatSessionUpdate
 } from "@tomeet/wechat-ilink";
 import type { DataStore } from "./store.js";
@@ -19,8 +21,36 @@ export class MemoryWechatStore implements WechatConnectionStore {
   private readonly connectionByUser = new Map<string, string>();
   private readonly receipts = new Map<string, ReceiptStatus>();
   private readonly claimedActivationCallbacks = new Set<string>();
+  private readonly webClaims = new Map<string, WechatWebClaim>();
 
   constructor(private readonly userStore: DataStore) {}
+
+  async createWechatWebClaim(input: CreateWechatWebClaimInput): Promise<WechatWebClaim> {
+    if ([...this.webClaims.values()].some((claim) => claim.tokenHash === input.tokenHash)) {
+      throw new StoreConflictError("微信 Web 注册凭证已存在");
+    }
+    const claim: WechatWebClaim = {
+      ...input,
+      consumedAt: null,
+      createdAt: new Date().toISOString()
+    };
+    this.webClaims.set(claim.id, claim);
+    return structuredClone(claim);
+  }
+
+  async consumeWechatWebClaim(tokenHash: string): Promise<WechatWebClaim | null> {
+    const claim = [...this.webClaims.values()].find((item) => item.tokenHash === tokenHash);
+    if (!claim || claim.consumedAt) {
+      return null;
+    }
+    if (new Date(claim.expiresAt).getTime() <= Date.now()) {
+      this.webClaims.delete(claim.id);
+      return null;
+    }
+    claim.consumedAt = new Date().toISOString();
+    this.webClaims.delete(claim.id);
+    return structuredClone(claim);
+  }
 
   async createWechatSession(
     input: CreateWechatSessionInput

@@ -107,6 +107,7 @@ AdventureX 冷启动匹配使用在线贪心竞价：当前 `waiting` 用户优�
 - 环境变量：`NODE_ENV=production`、`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`FRONTEND_ORIGIN`、`DEMO_MODE=false`、`ADVENTUREX_MATCHING_V1=true`
 - `FRONTEND_ORIGIN` 支持逗号分隔多个来源，例如本地测试台和现有 Vercel 域名。
 - Agent 等用户接口要求 `Authorization: Bearer <Supabase access token>`；公开微信扫码接口改用一次性 `X-WeChat-Session-Token`，详见 [`docs/wechat-qr-api.md`](docs/wechat-qr-api.md)。
+- 新微信用户会收到一次性 Web 注册链接；注册页领取同一个匿名 Supabase 用户后，可升级为邮箱＋密码、手机号＋密码或 Google 登录，详见 [`docs/wechat-web-registration.md`](docs/wechat-web-registration.md)。
 - Railway 通过 `/health` 做存活检查，通过 `/ready` 检查 Supabase 连接。
 
 ### Intelligence Worker Service

@@ -23,6 +23,8 @@ async function setup(
     processJobsInline?: boolean;
     userByToken?: Record<string, string>;
     rapidQrTokens?: string[];
+    webRegistration?: boolean;
+    provisionedUserId?: string;
   }
 ) {
   let qrIndex = 0;
@@ -54,8 +56,18 @@ async function setup(
         store,
         new MockAgentIntelligence(),
         new MockMatchmakingIntelligence()
-      )
+    )
     : undefined;
+  const provisionedUserId = integration?.provisionedUserId ?? randomUUID();
+  const accountProvisioner = {
+    provision: vi.fn(async () => ({
+      userId: provisionedUserId,
+      accessToken: "anonymous-access-token",
+      refreshToken: "anonymous-refresh-token",
+      sessionExpiresAt: new Date(Date.now() + 60 * 60_000).toISOString()
+    })),
+    discard: vi.fn(async () => undefined)
+  };
   const app = await buildApp({
     store,
     inlineProcessor,
@@ -73,10 +85,26 @@ async function setup(
       }),
       cipher: new CredentialCipher(randomBytes(32).toString("base64")),
       sessionTtlMs
-    }
+    },
+    wechatWebRegistration: integration?.webRegistration
+      ? {
+          registrationUrl: "https://tomeet.chat/register",
+          claimTtlMs: 15 * 60_000,
+          accountProvisioner
+        }
+      : undefined
   });
   apps.push(app);
-  return { app, store, wechatStore, fetchMock, verifyAccessToken, sentMessages };
+  return {
+    app,
+    store,
+    wechatStore,
+    fetchMock,
+    verifyAccessToken,
+    sentMessages,
+    accountProvisioner,
+    provisionedUserId
+  };
 }
 
 function sentMessageTexts(messages: Array<Record<string, unknown>>): string[] {
@@ -87,6 +115,82 @@ function sentMessageTexts(messages: Array<Record<string, unknown>>): string[] {
 }
 
 describe("WeChat one-time QR onboarding", () => {
+  it("creates a claimable Web account and sends a one-time registration link", async () => {
+    const provisionedUserId = randomUUID();
+    const owner = "wechat-owner-web-registration";
+    const {
+      app,
+      store,
+      sentMessages,
+      accountProvisioner
+    } = await setup([{
+      status: "confirmed",
+      bot_token: "web-registration-bot-secret",
+      ilink_bot_id: "web-registration-bot",
+      baseurl: "https://ilink-api.example.com",
+      ilink_user_id: owner
+    }], undefined, undefined, undefined, {
+      webRegistration: true,
+      provisionedUserId
+    });
+
+    const createdResponse = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    const created = createdResponse.json();
+    const activated = await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${created.sessionId}`,
+      headers: { "x-wechat-session-token": created.sessionToken }
+    });
+
+    expect(activated.statusCode).toBe(200);
+    expect(activated.json()).toMatchObject({ status: "active" });
+    expect(await store.resolveChannelIdentity("wechat", owner))
+      .toMatchObject({ userId: provisionedUserId });
+    expect(accountProvisioner.provision).toHaveBeenCalledTimes(1);
+    expect(accountProvisioner.discard).not.toHaveBeenCalled();
+
+    const texts = sentMessageTexts(sentMessages);
+    expect(texts.slice(0, 4)).toEqual(adventurexWelcomeBubbles.zh);
+    expect(texts[4]).toBe("想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！");
+    expect(texts[5]).toMatch(
+      /^点这里完成注册：https:\/\/tomeet\.chat\/register#claim=[A-Za-z0-9_-]{43}$/u
+    );
+    const token = texts[5]?.match(/#claim=([A-Za-z0-9_-]{43})$/u)?.[1];
+    expect(token).toEqual(expect.any(String));
+
+    const claim = await app.inject({
+      method: "POST",
+      url: "/auth/wechat/claim",
+      payload: { token }
+    });
+    expect(claim.statusCode).toBe(200);
+    expect(claim.headers["cache-control"]).toContain("no-store");
+    expect(claim.headers["referrer-policy"]).toBe("no-referrer");
+    expect(claim.json()).toEqual({
+      userId: provisionedUserId,
+      session: {
+        accessToken: "anonymous-access-token",
+        refreshToken: "anonymous-refresh-token"
+      },
+      registrationMethods: ["email_password", "phone_password", "google"]
+    });
+
+    const repeated = await app.inject({
+      method: "POST",
+      url: "/auth/wechat/claim",
+      payload: { token }
+    });
+    expect(repeated.statusCode).toBe(401);
+    expect(repeated.headers["cache-control"]).toContain("no-store");
+    expect(repeated.headers["referrer-policy"]).toBe("no-referrer");
+    expect(JSON.stringify(sentMessages)).not.toContain("anonymous-access-token");
+    expect(JSON.stringify(sentMessages)).not.toContain("anonymous-refresh-token");
+  });
+
   it("returns QR creation secrets once and never exposes them from status or SSE", async () => {
     const { app } = await setup([{
       status: "confirmed",

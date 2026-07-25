@@ -12,6 +12,7 @@ import { buildApp } from "./app.js";
 import {
   createSupabaseAccessTokenVerifier,
   createSupabaseEmailAccessTokenMatcher,
+  createSupabaseWechatWebAccountProvisioner,
   type AccessTokenVerifier,
   type EmailAccessTokenMatcher
 } from "./auth.js";
@@ -87,6 +88,22 @@ const wechat = wechatEncryptionKey
     }
   : undefined;
 
+const wechatWebRegistration = wechat && !demoMode
+  ? {
+      registrationUrl:
+        process.env.WECHAT_WEB_REGISTRATION_URL ?? "https://tomeet.chat/register",
+      claimTtlMs: parsePositiveInteger(
+        process.env.WECHAT_WEB_CLAIM_TTL_SECONDS,
+        15 * 60,
+        "WECHAT_WEB_CLAIM_TTL_SECONDS"
+      ) * 1000,
+      accountProvisioner: createSupabaseWechatWebAccountProvisioner(
+        process.env.SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!
+      )
+    }
+  : undefined;
+
 let inlineProcessor: JobProcessor | undefined;
 if (demoMode) {
   const apiKey = process.env.LLM_API_KEY;
@@ -120,6 +137,7 @@ const app = await buildApp({
   autoProvisionChannelUsers:
     demoMode && process.env.WECHAT_AUTO_PROVISION === "true",
   wechat,
+  wechatWebRegistration,
   logger: true,
   verifyAccessToken,
   trustProxy: isProduction,

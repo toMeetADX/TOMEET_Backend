@@ -41,6 +41,8 @@ DEMO_MODE=false
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<secret>
 FRONTEND_ORIGIN=https://<vercel-production-domain>
+WECHAT_WEB_REGISTRATION_URL=https://tomeet.chat/register
+WECHAT_WEB_CLAIM_TTL_SECONDS=900
 RATE_LIMIT_MAX=120
 ADVENTUREX_MATCHING_V1=true
 ADVENTUREX_TEST_POOL_ENABLED=false
@@ -48,6 +50,10 @@ ADVENTUREX_TEST_POOL_EMAIL=andy4fe0119@gmail.com
 ```
 
 `RATE_LIMIT_MAX` 是每个客户端 IP 每分钟允许的请求数；Railway 代理地址通过 Fastify `trustProxy` 正确还原。
+
+`WECHAT_WEB_REGISTRATION_URL` 是首次微信开场白中的个性化注册链接。API 会先创建
+同一 UUID 的 Supabase 匿名账号，再生成默认 15 分钟有效的一次性 claim。生产 Supabase
+必须开启 Anonymous Sign-Ins；前端接入见 [`wechat-web-registration.md`](wechat-web-registration.md)。
 
 预览域名或多个正式域名使用英文逗号分隔：
 
