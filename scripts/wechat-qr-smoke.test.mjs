@@ -85,7 +85,7 @@ function splitSseFetch() {
     if (!url.pathname.endsWith("/events")) {
       return fetchImpl(input, init);
     }
-    const event = `event: session\ndata: ${JSON.stringify({
+    const event = `retry: 1000\n\nevent: session\ndata: ${JSON.stringify({
       sessionId,
       status: "pending",
       expiresAt: "2026-07-25T10:00:00.000Z",
@@ -131,6 +131,36 @@ test("accepts an SSE first event split across network chunks", async () => {
     apiBaseUrl: "https://api.example.com",
     frontendOrigin: origin,
     fetchImpl: splitSseFetch()
+  });
+  assert.equal(result.status, "pending");
+});
+
+test("skips SSE retry and comment preamble frames", async () => {
+  const fetchImpl = successfulFetch();
+  const result = await runWechatQrSmoke({
+    apiBaseUrl: "https://api.example.com",
+    frontendOrigin: origin,
+    fetchImpl: async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/events")) {
+        const sessionEvent = `event: session\ndata: ${JSON.stringify({
+          sessionId,
+          status: "pending",
+          expiresAt: "2026-07-25T10:00:00.000Z",
+          confirmedAt: null,
+          errorCode: null,
+          errorMessage: null
+        })}\n\n`;
+        return new Response(`retry: 1000\n\n: connected\n\n${sessionEvent}`, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "access-control-allow-origin": origin
+          }
+        });
+      }
+      return fetchImpl(input, init);
+    }
   });
   assert.equal(result.status, "pending");
 });
