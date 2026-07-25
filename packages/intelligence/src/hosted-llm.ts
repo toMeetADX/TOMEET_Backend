@@ -203,6 +203,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function normalizeMatchRoundProposalOutput(value: unknown): unknown {
+  if (!isRecord(value) || !Array.isArray(value.drafts)) return value;
+  return {
+    ...value,
+    drafts: value.drafts.map((draft) => {
+      if (!isRecord(draft) || !Array.isArray(draft.candidateRequestIds)) return draft;
+      const candidateCount = new Set(
+        draft.candidateRequestIds.filter((requestId): requestId is string => typeof requestId === "string")
+      ).size;
+      if (Number.isInteger(draft.targetPlayers)) return draft;
+      const arrayValue = Array.isArray(draft.targetPlayers) && draft.targetPlayers.length === 1
+        ? draft.targetPlayers[0]
+        : undefined;
+      const numericValue = typeof arrayValue === "number"
+        ? arrayValue
+        : typeof draft.targetPlayers === "string"
+          ? Number(draft.targetPlayers)
+          : undefined;
+      return {
+        ...draft,
+        targetPlayers: Number.isInteger(numericValue) ? numericValue : candidateCount
+      };
+    })
+  };
+}
+
 function normalizeTextValue(value: unknown, joiner = "\n\n"): unknown {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) {
@@ -478,13 +504,17 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
     temperature = 0.3,
     stage = "unknown"
   ): Promise<unknown> {
+    const jsonSystem = `${system}\nReturn only a valid json object.`;
+    const jsonContent = Array.isArray(content)
+      ? [{ type: "text", text: "Return only a valid json object." }, ...content]
+      : `Return only a valid json object.\n${typeof content === "string" ? content : JSON.stringify(content)}`;
     const requestBody = JSON.stringify({
       model,
       temperature,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: system },
-        { role: "user", content }
+        { role: "system", content: jsonSystem },
+        { role: "user", content: jsonContent }
       ]
     });
     const startedAt = Date.now();
@@ -1155,6 +1185,12 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
           .map((option) => Number(option.optionNumber))
           .filter((number) => Number.isInteger(number) && number >= 1 && number <= 3)
       : [];
+    const normalizeProductMessage = (candidate: unknown): unknown => {
+      const normalized = normalizeReplyCandidate(candidate);
+      return event.kind !== "match_options" && isRecord(normalized)
+        ? { ...normalized, optionPreviews: [] }
+        : normalized;
+    };
     const draft = await this.parseOrRepair(
       agentProductMessageSchema,
       await this.chatJson(
@@ -1191,7 +1227,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       ),
       "只使用输入事实，返回可直接发送的个性化 content；match_options 的 optionPreviews 编号必须与输入完全一致。",
       { eventKind: event.kind, expectedOptionNumbers },
-      { stage: "agent_event.draft", normalize: normalizeReplyCandidate }
+      { stage: "agent_event.draft", normalize: normalizeProductMessage }
     );
     const result = await this.parseOrRepair(
       agentProductMessageSchema,
@@ -1220,7 +1256,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       ),
       "发布前移除无事实依据的内容；候选编号必须完整且唯一，非候选事件 optionPreviews=[]。",
       { eventKind: event.kind, expectedOptionNumbers },
-      { stage: "agent_event.verification", normalize: normalizeReplyCandidate }
+      { stage: "agent_event.verification", normalize: normalizeProductMessage }
     );
     if (event.kind === "match_options") {
       const actual = result.optionPreviews.map((option) => option.optionNumber).sort();
@@ -1523,6 +1559,29 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
 
   async proposeMatchRound(candidates: MatchCandidate[], games: OfflineGame[]): Promise<MatchRoundProposal | null> {
     if (candidates.length < Math.min(...games.map((game) => game.minPlayers))) return null;
+    const eligibleCandidates = candidates.filter(({ request }) =>
+      request.status === "matching" && ["waiting", "watching"].includes(request.phase ?? "waiting")
+    );
+    const compatibleGames = games.filter((game) =>
+      eligibleCandidates.length >= game.minPlayers && eligibleCandidates.length <= game.maxPlayers
+    );
+    if (eligibleCandidates.length === 2 && compatibleGames.length === 1) {
+      const game = compatibleGames[0]!;
+      const requestIds = eligibleCandidates.map(({ request }) => request.requestId);
+      return matchRoundProposalSchema.parse({
+        drafts: [{
+          tempDraftId: "two-person-draft",
+          offlineGameId: game.id,
+          targetPlayers: 2,
+          candidateRequestIds: requestIds,
+          rationale: `${game.name} supports a guided two-person interaction for the only currently eligible pair.`
+        }],
+        userOptions: requestIds.map((requestId) => ({
+          requestId,
+          tempDraftIds: ["two-person-draft"]
+        }))
+      });
+    }
     const input = {
       candidates: candidates.slice(0, 24).map(({ request, userModel, matchingNarrative, socialHooks, matchingPriority }) => ({
         requestId: request.requestId,
@@ -1562,7 +1621,12 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       result,
       "只输出 drafts 和 userOptions；所有 ID 必须来自输入。",
       input,
-      { stage: "match_round.proposal", model: this.options.textModel, temperature: 0.1 }
+      {
+        stage: "match_round.proposal",
+        model: this.options.textModel,
+        temperature: 0.1,
+        normalize: normalizeMatchRoundProposalOutput
+      }
     );
   }
 
