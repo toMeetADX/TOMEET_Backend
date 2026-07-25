@@ -48,6 +48,10 @@
     "20260726010000_end_to_end_delivery_guards.sql": {
       "sha256": "ef70495c73d7f64ea8d3ddc054db4ede9afcdb71edc52c516356cf31f1f694a5",
       "reason": "Replace the LLM job type constraint, recreate transactional matchmaking RPC bodies, and restrict new delivery/window RPCs to service_role; DELETE only replaces a user's choices atomically."
+    },
+    "20260726020000_event_plan_and_wechat_outbox.sql": {
+      "sha256": "f2b544aa19a00904659b139a68026f950a68b82e3a6ae403dd05b63312ddfece",
+      "reason": "Recreate matchmaking and WeChat completion RPC bodies to enforce founder-approved event-plan gating, extend delivery retries to eight attempts, and restrict all new plan tables and RPCs to service_role."
     }
   }
 }

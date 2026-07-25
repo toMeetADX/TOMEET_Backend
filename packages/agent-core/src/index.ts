@@ -4,6 +4,7 @@ import type {
   AgentProductMessage,
   MemoryExtractionResult,
   MemoryProfileDraft,
+  EventPlanPatch,
   PostEventFeedback,
   UserMemory,
   UserMemoryProfile,
@@ -44,6 +45,15 @@ export type AgentAction =
   | { type: "leave_room"; reason?: string }
   | { type: "confirm_room" }
   | { type: "complete_room" }
+  | {
+      type: "update_event_plan";
+      expectedVersion: number;
+      patch: EventPlanPatch;
+    }
+  | {
+      type: "confirm_event_plan";
+      version: number;
+    }
   | {
       type: "submit_feedback";
       peopleFeedback: string;
@@ -225,6 +235,14 @@ export class MockAgentIntelligence implements AgentIntelligence {
       && /退出/u.test(previousAssistantMessage.content)
       && /(原因|理由)/u.test(previousAssistantMessage.content)
     );
+    const draftPlan = context.room?.eventPlans.draft;
+    const editablePlan = draftPlan ?? context.room?.eventPlans.published;
+    const currentMember = context.room?.members.find((member) => member.userId === context.userId);
+    const isFounder = currentMember?.role === "founder";
+    const confirmPlanRequested = /(确认|同意).{0,8}(清单|方案)|(清单|方案).{0,8}(没问题|可以|确认)/u.test(normalized);
+    const locationChange = /(?:地点|地址)(?:改成|换成|改到|换到|是|：|:)\s*(.{2,120})/u.exec(normalized)?.[1]?.trim();
+    const timeChange = /(?:时间)?(?:改成|改到|换成|换到)\s*(.{2,80})/u.exec(normalized)?.[1]?.trim();
+    const mentionedGames = context.availableGames.filter((game) => normalized.includes(game.name));
     let reply = socialIntentDetected
       ? "我听到你现在确实想认识一些合适的人。我会根据你持续表达出来的整体感受开始寻找小组。"
       : "我在听。你可以继续告诉我最近的状态、经历和当下的感觉。";
@@ -370,7 +388,63 @@ export class MockAgentIntelligence implements AgentIntelligence {
       });
     }
 
-    if (actions.length === 0 && context.room?.status === "completed" && /(感觉|反馈|聊得|喜欢|不喜欢|下次|尴尬|开心|一般)/u.test(normalized)) {
+    if (
+      actions.length === 0
+      && editablePlan
+      && (confirmPlanRequested || locationChange || timeChange || mentionedGames.length)
+    ) {
+      if (!isFounder) {
+        reply = "活动清单只有最初匹配的两位创始成员可以修改或确认；你可以查阅当前已发布版本。";
+      } else if (confirmPlanRequested && draftPlan) {
+        actions.push({ type: "confirm_event_plan", version: draftPlan.version });
+        reply = "收到，我会确认当前版本的活动清单。";
+      } else if (confirmPlanRequested) {
+        reply = "当前活动清单已经发布，无需重复确认；如果要调整，请明确告诉我新的时间、地点或游戏。";
+      } else {
+        const existingGameIds = editablePlan.games.map((item) => item.game.id);
+        const replaceGames = /(替换|换成|改成).{0,8}(游戏)?/u.test(normalized);
+        const gameIds = mentionedGames.length
+          ? replaceGames
+            ? mentionedGames.map((game) => game.id)
+            : [...new Set([...existingGameIds, ...mentionedGames.map((game) => game.id)])]
+          : undefined;
+        actions.push({
+          type: "update_event_plan",
+          expectedVersion: editablePlan.version,
+          patch: {
+            ...(timeChange ? {
+              time: {
+                startsAt: null,
+                endsAt: null,
+                timeZone: editablePlan.time.timeZone,
+                note: timeChange
+              }
+            } : {}),
+            ...(locationChange ? {
+              location: {
+                name: locationChange,
+                address: null,
+                url: null,
+                note: locationChange
+              }
+            } : {}),
+            ...(gameIds ? { gameIds } : {})
+          }
+        });
+        reply = "收到，我会创建一个新的清单版本，并请另一位创始成员确认。";
+      }
+    } else if (
+      actions.length === 0
+      && editablePlan
+      && isFounder
+      && /(修改|改一下|调整).{0,6}(清单|方案)?/u.test(normalized)
+    ) {
+      reply = "可以，请明确告诉我想改时间、地点还是游戏，以及新的内容；在信息明确前我不会改动清单。";
+    } else if (
+      actions.length === 0
+      && context.room?.status === "completed"
+      && /(感觉|反馈|聊得|喜欢|不喜欢|下次|尴尬|开心|一般)/u.test(normalized)
+    ) {
       actions.push({
         type: "submit_feedback",
         peopleFeedback: normalized,

@@ -610,6 +610,62 @@ paths:
           $ref: "#/components/responses/Unauthenticated"
         "404":
           $ref: "#/components/responses/NotFound"
+  /rooms/{id}/event-plan:
+    patch:
+      tags: [Rooms]
+      summary: 创建活动清单的新草稿版本
+      description: 仅初始两位 founder 可调用；expectedVersion 用于防止并发覆盖。
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateEventPlanInput"
+      responses:
+        "200":
+          description: 新草稿及更新后的房间
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventPlanMutationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /rooms/{id}/event-plan/confirm:
+    post:
+      tags: [Rooms]
+      summary: 确认指定活动清单版本
+      description: 仅 founder 可确认；两位 founder 确认同一版本后原子发布。
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmEventPlanInput"
+      responses:
+        "200":
+          description: 确认进度或发布结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventPlanMutationResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /rooms/{id}/confirm:
     post:
       tags: [Rooms]
@@ -1364,9 +1420,96 @@ components:
           type: string
         accepted:
           type: boolean
+    EventPlanTime:
+      type: object
+      required: [startsAt, endsAt, timeZone, note]
+      properties:
+        startsAt:
+          type: [string, "null"]
+          format: date-time
+        endsAt:
+          type: [string, "null"]
+          format: date-time
+        timeZone:
+          type: string
+        note:
+          type: string
+    EventPlanLocation:
+      type: object
+      required: [name, address, url, note]
+      properties:
+        name:
+          type: [string, "null"]
+        address:
+          type: [string, "null"]
+        url:
+          type: [string, "null"]
+          format: uri
+        note:
+          type: string
+    EventPlanGame:
+      type: object
+      required: [game, primary, position]
+      properties:
+        game:
+          $ref: "#/components/schemas/OfflineGame"
+        primary:
+          type: boolean
+        position:
+          type: integer
+          minimum: 0
+    EventPlanConfirmation:
+      type: object
+      required: [userId, displayName, confirmedAt]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        displayName:
+          type: string
+        confirmedAt:
+          type: string
+          format: date-time
+    RoomEventPlan:
+      type: object
+      required: [planId, roomId, version, status, time, location, games, confirmations, createdBy, createdAt, publishedAt]
+      properties:
+        planId:
+          $ref: "#/components/schemas/Uuid"
+        roomId:
+          $ref: "#/components/schemas/Uuid"
+        version:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [draft, published, superseded]
+        time:
+          $ref: "#/components/schemas/EventPlanTime"
+        location:
+          $ref: "#/components/schemas/EventPlanLocation"
+        games:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/EventPlanGame"
+        confirmations:
+          type: array
+          maxItems: 2
+          items:
+            $ref: "#/components/schemas/EventPlanConfirmation"
+        createdBy:
+          type: [string, "null"]
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        publishedAt:
+          type: [string, "null"]
+          format: date-time
     MatchInvite:
       type: object
-      required: [inviteId, kind, roomId, participants, offlineGameId, matchSummary, status, createdAt, resolvedAt]
+      required: [inviteId, kind, roomId, participants, offlineGameId, matchSummary, eventPlan, status, createdAt, resolvedAt]
       properties:
         inviteId:
           $ref: "#/components/schemas/Uuid"
@@ -1386,6 +1529,10 @@ components:
           type: string
         matchSummary:
           type: string
+        eventPlan:
+          oneOf:
+            - $ref: "#/components/schemas/RoomEventPlan"
+            - type: "null"
         status:
           type: string
           enum: [pending, accepted, declined, cancelled]
@@ -1411,7 +1558,7 @@ components:
             $ref: "#/components/schemas/Uuid"
     RoomMember:
       type: object
-      required: [userId, displayName, confirmed, participationStatus]
+      required: [userId, displayName, confirmed, participationStatus, role]
       properties:
         userId:
           $ref: "#/components/schemas/Uuid"
@@ -1422,9 +1569,12 @@ components:
         participationStatus:
           type: string
           enum: [invited, confirmed, withdrawn]
+        role:
+          type: string
+          enum: [founder, member]
     MatchRoom:
       type: object
-      required: [roomId, members, offlineGame, matchSummary, status, sourceDraftId, targetPlayers, recruitmentStatus, version, meetingPoint, matchingStatus, capacity, createdAt, completedAt]
+      required: [roomId, members, offlineGame, matchSummary, status, sourceDraftId, targetPlayers, recruitmentStatus, version, meetingPoint, matchingStatus, capacity, eventPlans, createdAt, completedAt]
       properties:
         roomId:
           $ref: "#/components/schemas/Uuid"
@@ -1463,6 +1613,18 @@ components:
           type: integer
           minimum: 2
           maximum: 10
+        eventPlans:
+          type: object
+          required: [draft, published]
+          properties:
+            draft:
+              oneOf:
+                - $ref: "#/components/schemas/RoomEventPlan"
+                - type: "null"
+            published:
+              oneOf:
+                - $ref: "#/components/schemas/RoomEventPlan"
+                - type: "null"
         createdAt:
           type: string
           format: date-time
@@ -1716,6 +1878,77 @@ components:
           minLength: 1
           maxLength: 500
           description: 正式成局后必填的简单理由；确认前可省略。仅内部保存，不发送给其他成员
+    EventPlanPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        time:
+          type: object
+          additionalProperties: false
+          properties:
+            startsAt:
+              type: [string, "null"]
+              format: date-time
+            endsAt:
+              type: [string, "null"]
+              format: date-time
+            timeZone:
+              type: string
+            note:
+              type: string
+        location:
+          type: object
+          additionalProperties: false
+          properties:
+            name:
+              type: [string, "null"]
+            address:
+              type: [string, "null"]
+            url:
+              type: [string, "null"]
+              format: uri
+            note:
+              type: string
+        gameIds:
+          type: array
+          minItems: 1
+          maxItems: 5
+          uniqueItems: true
+          items:
+            type: string
+    UpdateEventPlanInput:
+      type: object
+      additionalProperties: false
+      required: [userId, expectedVersion, patch]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        expectedVersion:
+          type: integer
+          minimum: 1
+        patch:
+          $ref: "#/components/schemas/EventPlanPatch"
+    ConfirmEventPlanInput:
+      type: object
+      additionalProperties: false
+      required: [userId, version]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        version:
+          type: integer
+          minimum: 1
+    EventPlanMutationResult:
+      type: object
+      required: [room, eventPlan, published]
+      properties:
+        room:
+          $ref: "#/components/schemas/MatchRoom"
+        eventPlan:
+          $ref: "#/components/schemas/RoomEventPlan"
+        published:
+          type: boolean
     PostEventFeedbackInput:
       type: object
       additionalProperties: false

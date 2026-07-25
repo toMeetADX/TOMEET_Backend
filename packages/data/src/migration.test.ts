@@ -754,11 +754,22 @@ describe("Supabase migration", () => {
       }])]
     );
     expect(settled.rows).toHaveLength(1);
-    const room = await db.query<{ get_match_room: { recruitmentStatus: string; members: unknown[] } }>(
+    const room = await db.query<{
+      get_match_room: {
+        recruitmentStatus: string;
+        matchingStatus: string;
+        members: unknown[];
+        eventPlans: { draft: { version: number }; published: null };
+      };
+    }>(
       "select get_match_room($1::uuid)",
       [settled.rows[0]!.settle_match_round]
     );
-    expect(room.rows[0]?.get_match_room.recruitmentStatus).toBe("full");
+    expect(room.rows[0]?.get_match_room).toMatchObject({
+      recruitmentStatus: "closed",
+      matchingStatus: "stopped",
+      eventPlans: { draft: { version: 1 }, published: null }
+    });
     expect(room.rows[0]?.get_match_room.members).toHaveLength(3);
 
     const roomId = settled.rows[0]!.settle_match_round;
@@ -1203,6 +1214,48 @@ describe("Supabase migration", () => {
     });
   });
 
+  it("keeps event plans and proactive outbox service-role only", async () => {
+    const privileges = await db.query<{
+      plan_rls: boolean;
+      outbox_rls: boolean;
+      anon_plan: boolean;
+      authenticated_outbox: boolean;
+      anon_update: boolean;
+      authenticated_claim: boolean;
+      service_confirm: boolean;
+    }>(`
+      select
+        (select relrowsecurity from pg_class where oid = 'public.room_event_plans'::regclass) as plan_rls,
+        (select relrowsecurity from pg_class where oid = 'public.channel_message_deliveries'::regclass) as outbox_rls,
+        has_table_privilege('anon', 'public.room_event_plans', 'select') as anon_plan,
+        has_table_privilege('authenticated', 'public.channel_message_deliveries', 'select') as authenticated_outbox,
+        has_function_privilege(
+          'anon',
+          'public.create_room_event_plan_revision(uuid,uuid,integer,jsonb)',
+          'execute'
+        ) as anon_update,
+        has_function_privilege(
+          'authenticated',
+          'public.claim_wechat_outbound_messages(text,integer)',
+          'execute'
+        ) as authenticated_claim,
+        has_function_privilege(
+          'service_role',
+          'public.confirm_room_event_plan(uuid,uuid,integer)',
+          'execute'
+        ) as service_confirm
+    `);
+    expect(privileges.rows[0]).toEqual({
+      plan_rls: true,
+      outbox_rls: true,
+      anon_plan: false,
+      authenticated_outbox: false,
+      anon_update: false,
+      authenticated_claim: false,
+      service_confirm: true
+    });
+  });
+
   it("enforces the aligned match, room, history, and feedback lifecycle", async () => {
     const userIds = [
       "60000000-0000-4000-8000-000000000001",
@@ -1317,8 +1370,16 @@ describe("Supabase migration", () => {
     }>("select accept_match_invite($1::uuid, $2::uuid)", [inviteId, userIds[1]]);
     const initialRoom = secondAccepted.rows[0]!.accept_match_invite.room;
     expect(initialRoom.members).toHaveLength(2);
-    expect(initialRoom.matchingStatus).toBe("active");
+    expect(initialRoom.matchingStatus).toBe("stopped");
     expect(initialRoom.capacity).toBe(6);
+    await db.query(
+      "select confirm_room_event_plan($1::uuid, $2::uuid, 1)",
+      [initialRoom.roomId, userIds[0]]
+    );
+    await db.query(
+      "select confirm_room_event_plan($1::uuid, $2::uuid, 1)",
+      [initialRoom.roomId, userIds[1]]
+    );
 
     let latestRoom = initialRoom;
     for (const [offset, userId] of userIds.slice(2, 6).entries()) {
@@ -1361,6 +1422,252 @@ describe("Supabase migration", () => {
     })])).rejects.toThrow("停止匹配");
   });
 
+  it("versions founder-owned event plans and exposes only the published plan to invitees", async () => {
+    const founders = [
+      "73000000-0000-4000-8000-000000000001",
+      "73000000-0000-4000-8000-000000000002"
+    ];
+    const inviteeId = "73000000-0000-4000-8000-000000000003";
+    const requestIds: string[] = [];
+    for (const [index, userId] of founders.entries()) {
+      await db.query("select ensure_tomeet_user($1::uuid, $2)", [userId, `清单创始人${index + 1}`]);
+      const request = await db.query<{ create_match_request: { id: string } }>(
+        "select create_match_request($1::uuid, $2::jsonb)",
+        [userId, JSON.stringify({ rawText: index === 0 ? "周六下午见" : "地点待商定" })]
+      );
+      requestIds.push(request.rows[0]!.create_match_request.id);
+    }
+    const pair = await db.query<{ create_initial_match_invite: { inviteId: string } }>(
+      "select create_initial_match_invite($1::jsonb, null)",
+      [JSON.stringify({
+        memberIds: founders,
+        requestIds,
+        offlineGameId: "game-story-table",
+        summary: "清单状态机测试",
+        eventPlanSeed: {
+          time: {
+            startsAt: null,
+            endsAt: null,
+            timeZone: "Asia/Shanghai",
+            note: "周六下午"
+          },
+          location: {
+            name: null,
+            address: null,
+            url: null,
+            note: "待商定"
+          },
+          gameIds: ["game-story-table"]
+        }
+      })]
+    );
+    const pairId = pair.rows[0]!.create_initial_match_invite.inviteId;
+    await db.query("select accept_match_invite($1::uuid, $2::uuid)", [pairId, founders[0]]);
+    const accepted = await db.query<{
+      accept_match_invite: {
+        room: {
+          roomId: string;
+          members: Array<{ userId: string; role: string }>;
+          eventPlans: { draft: { version: number }; published: null };
+        };
+      };
+    }>("select accept_match_invite($1::uuid, $2::uuid)", [pairId, founders[1]]);
+    const room = accepted.rows[0]!.accept_match_invite.room;
+    expect(room.members.map((member) => member.role)).toEqual(["founder", "founder"]);
+    expect(room.eventPlans).toMatchObject({ draft: { version: 1 }, published: null });
+
+    const closed = await db.query<{ list_open_match_rooms: unknown }>(
+      "select list_open_match_rooms(20)"
+    );
+    expect(closed.rows.some((row) =>
+      JSON.stringify(row.list_open_match_rooms).includes(room.roomId)
+    )).toBe(false);
+
+    const revised = await db.query<{
+      create_room_event_plan_revision: {
+        eventPlan: {
+          version: number;
+          location: { name: string };
+          confirmations: unknown[];
+        };
+      };
+    }>(
+      "select create_room_event_plan_revision($1::uuid, $2::uuid, 1, $3::jsonb)",
+      [room.roomId, founders[0], JSON.stringify({
+        location: {
+          name: "人民公园",
+          address: null,
+          url: null,
+          note: "用户明确指定"
+        }
+      })]
+    );
+    expect(revised.rows[0]!.create_room_event_plan_revision.eventPlan).toMatchObject({
+      version: 2,
+      location: { name: "人民公园" },
+      confirmations: []
+    });
+    await expect(db.query(
+      "select create_room_event_plan_revision($1::uuid, $2::uuid, 1, $3::jsonb)",
+      [room.roomId, founders[1], JSON.stringify({ time: { note: "旧版本覆盖" } })]
+    )).rejects.toThrow("基于最新版本");
+    await expect(db.query(
+      "select confirm_room_event_plan($1::uuid, $2::uuid, 2)",
+      [room.roomId, inviteeId]
+    )).rejects.toThrow("只有最初匹配");
+
+    const firstConfirmation = await db.query<{
+      confirm_room_event_plan: { published: boolean; eventPlan: { confirmations: unknown[] } };
+    }>(
+      "select confirm_room_event_plan($1::uuid, $2::uuid, 2)",
+      [room.roomId, founders[0]]
+    );
+    expect(firstConfirmation.rows[0]!.confirm_room_event_plan).toMatchObject({
+      published: false,
+      eventPlan: { confirmations: [expect.anything()] }
+    });
+    const publication = await db.query<{
+      confirm_room_event_plan: {
+        published: boolean;
+        eventPlan: { version: number; status: string };
+      };
+    }>(
+      "select confirm_room_event_plan($1::uuid, $2::uuid, 2)",
+      [room.roomId, founders[1]]
+    );
+    expect(publication.rows[0]!.confirm_room_event_plan).toMatchObject({
+      published: true,
+      eventPlan: { version: 2, status: "published" }
+    });
+
+    await db.query("select ensure_tomeet_user($1::uuid, $2)", [inviteeId, "待接受用户"]);
+    const inviteeRequest = await db.query<{ create_match_request: { id: string } }>(
+      "select create_match_request($1::uuid, $2::jsonb)",
+      [inviteeId, JSON.stringify({ rawText: "想加入现有房间" })]
+    );
+    const join = await db.query<{
+      create_room_join_invite: {
+        inviteId: string;
+        eventPlan: { version: number; location: { name: string } };
+      };
+    }>(
+      "select create_room_join_invite($1::jsonb, null)",
+      [JSON.stringify({
+        roomId: room.roomId,
+        userId: inviteeId,
+        requestId: inviteeRequest.rows[0]!.create_match_request.id,
+        summary: "新用户能看到发布清单"
+      })]
+    );
+    expect(join.rows[0]!.create_room_join_invite.eventPlan).toMatchObject({
+      version: 2,
+      location: { name: "人民公园" }
+    });
+
+    const laterDraft = await db.query<{
+      create_room_event_plan_revision: {
+        room: {
+          eventPlans: {
+            draft: { version: number };
+            published: { version: number; status: string };
+          };
+        };
+      };
+    }>(
+      "select create_room_event_plan_revision($1::uuid, $2::uuid, 2, $3::jsonb)",
+      [room.roomId, founders[1], JSON.stringify({
+        time: {
+          startsAt: null,
+          endsAt: null,
+          timeZone: "Asia/Shanghai",
+          note: "改到下周日下午"
+        }
+      })]
+    );
+    expect(laterDraft.rows[0]!.create_room_event_plan_revision.room.eventPlans).toMatchObject({
+      draft: { version: 3 },
+      published: { version: 2, status: "published" }
+    });
+  });
+
+  it("atomically appends and reliably claims proactive WeChat messages", async () => {
+    const userId = "72000000-0000-4000-8000-000000000001";
+    await db.query("select ensure_tomeet_user($1::uuid, $2)", [userId, "主动消息用户"]);
+    await db.query(`
+      insert into wechat_ilink_connections (
+        user_id, ilink_bot_id, owner_ilink_user_id, bot_token_ciphertext, base_url
+      ) values ($1::uuid, 'outbound-bot-1', 'outbound-owner-1', repeat('x', 32), 'https://ilink.example.com')
+    `, [userId]);
+    const first = await db.query<{ append_proactive_agent_message: { id: string } }>(
+      "select append_proactive_agent_message($1::uuid, $2, $3)",
+      [userId, "主动活动清单", "event-plan-outbound-test"]
+    );
+    const duplicate = await db.query<{ append_proactive_agent_message: { id: string } }>(
+      "select append_proactive_agent_message($1::uuid, $2, $3)",
+      [userId, "主动活动清单", "event-plan-outbound-test"]
+    );
+    expect(duplicate.rows[0]!.append_proactive_agent_message.id)
+      .toBe(first.rows[0]!.append_proactive_agent_message.id);
+    const persisted = await db.query<{ message_count: number; outbound_count: number }>(`
+      select
+        (select count(*)::integer from messages where user_id = $1::uuid) as message_count,
+        (
+          select count(*)::integer
+          from channel_message_deliveries delivery
+          join messages message on message.id = delivery.message_id
+          where message.user_id = $1::uuid
+            and delivery.provider = 'wechat'
+            and delivery.direction = 'outbound'
+        ) as outbound_count
+    `, [userId]);
+    expect(persisted.rows[0]).toEqual({ message_count: 1, outbound_count: 1 });
+
+    const claimed = await db.query<{
+      delivery: { id: string; attempts: number; content: string };
+    }>(
+      "select claim_wechat_outbound_messages('outbound-worker', 8) as delivery"
+    );
+    expect(claimed.rows[0]!.delivery).toMatchObject({
+      attempts: 1,
+      content: "主动活动清单"
+    });
+    const outboundId = claimed.rows[0]!.delivery.id;
+    const concurrentlyClaimed = await db.query(
+      "select claim_wechat_outbound_messages('other-worker', 8)"
+    );
+    expect(concurrentlyClaimed.rows).toHaveLength(0);
+
+    await db.query(
+      "select complete_wechat_outbound_message($1::uuid, 'outbound-worker', 'temporary')",
+      [outboundId]
+    );
+    await db.query(
+      "update channel_message_deliveries set run_at = now() where id = $1::uuid",
+      [outboundId]
+    );
+    const retried = await db.query<{ delivery: { attempts: number } }>(
+      "select claim_wechat_outbound_messages('outbound-worker', 8) as delivery"
+    );
+    expect(retried.rows[0]!.delivery.attempts).toBe(2);
+    await db.query(
+      "select complete_wechat_outbound_message($1::uuid, 'outbound-worker', null)",
+      [outboundId]
+    );
+    const status = await db.query<{ status: string; attempts: number; completed: boolean }>(
+      `
+        select status, attempts, completed_at is not null as completed
+        from channel_message_deliveries
+        where id = $1::uuid
+      `,
+      [outboundId]
+    );
+    expect(status.rows[0]).toEqual({
+      status: "sent",
+      attempts: 2,
+      completed: true
+    });
+  });
+
   it("lets any room member stop matching and requeues a pending invitee", async () => {
     const userIds = [
       "80000000-0000-4000-8000-000000000001",
@@ -1391,6 +1698,14 @@ describe("Supabase migration", () => {
       accept_match_invite: { room: { roomId: string } };
     }>("select accept_match_invite($1::uuid, $2::uuid)", [pairInviteId, userIds[1]]);
     const roomId = accepted.rows[0]!.accept_match_invite.room.roomId;
+    await db.query(
+      "select confirm_room_event_plan($1::uuid, $2::uuid, 1)",
+      [roomId, userIds[0]]
+    );
+    await db.query(
+      "select confirm_room_event_plan($1::uuid, $2::uuid, 1)",
+      [roomId, userIds[1]]
+    );
 
     const joinInvite = await db.query<{ create_room_join_invite: { inviteId: string } }>(
       "select create_room_join_invite($1::jsonb, null)",

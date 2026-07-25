@@ -583,6 +583,18 @@ describe("WeChat one-time QR onboarding", () => {
       });
       expect(accepted.statusCode).toBe(200);
     }
+    const founderRoom = await store.getLatestRoomForUser(webUsers[0]!.userId);
+    expect(founderRoom?.eventPlans.draft?.version).toBe(1);
+    await store.confirmEventPlan(
+      founderRoom!.roomId,
+      founderRoom!.members[0]!.userId,
+      1
+    );
+    await store.confirmEventPlan(
+      founderRoom!.roomId,
+      founderRoom!.members[1]!.userId,
+      1
+    );
 
     const wechatResponse = await app.inject({
       method: "POST",
@@ -596,6 +608,12 @@ describe("WeChat one-time QR onboarding", () => {
       }
     });
     expect(wechatResponse.statusCode).toBe(200);
+    const pendingWechatInvite = await store.getLatestMatchInviteForUser(wechatUserId);
+    expect(pendingWechatInvite).toMatchObject({
+      kind: "room_join",
+      status: "pending",
+      eventPlan: { version: 1, status: "published" }
+    });
 
     const wechatAccepted = await app.inject({
       method: "POST",
@@ -627,7 +645,7 @@ describe("WeChat one-time QR onboarding", () => {
       });
       expect(history.statusCode).toBe(200);
       expect(history.json().messages.some(
-        (message: { content: string }) => message.content.includes("房间已建立")
+        (message: { content: string }) => message.content.includes("活动清单")
       )).toBe(true);
     }
 
@@ -638,7 +656,7 @@ describe("WeChat one-time QR onboarding", () => {
     });
     expect(wechatHistory.statusCode).toBe(200);
     expect(wechatHistory.json().messages.some(
-      (message: { content: string }) => message.content.includes("已接受邀请并进入房间")
+      (message: { content: string }) => message.content.includes("活动清单")
     )).toBe(true);
   });
 

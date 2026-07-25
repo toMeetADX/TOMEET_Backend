@@ -37,7 +37,8 @@ function confirmedRoomContext(proactivePushEnabled: boolean): AgentContext {
         userId,
         displayName: userId,
         confirmed: true,
-        participationStatus: "confirmed" as const
+        participationStatus: "confirmed" as const,
+        role: userId === "u1" || userId === "u2" ? "founder" as const : "member" as const
       })),
       offlineGame: {
         id: "game-story-table",
@@ -59,6 +60,7 @@ function confirmedRoomContext(proactivePushEnabled: boolean): AgentContext {
       meetingPoint: null,
       matchingStatus: "full",
       capacity: 3,
+      eventPlans: { draft: null, published: null },
       createdAt: now,
       completedAt: null
     }
@@ -952,7 +954,22 @@ describe("hosted vibe matchmaking", () => {
           memberIds: ["u1", "u2"],
           requestIds: ["r1", "r2"],
           offlineGameId: "game-1",
-          summary: "两个人的表达节奏和相处空间能自然形成流动。"
+          summary: "两个人的表达节奏和相处空间能自然形成流动。",
+          eventPlanSeed: {
+            time: {
+              startsAt: null,
+              endsAt: null,
+              timeZone: "Asia/Shanghai",
+              note: "待商定"
+            },
+            location: {
+              name: null,
+              address: null,
+              url: null,
+              note: "待商定"
+            },
+            gameIds: ["game-1"]
+          }
         }) } }]
       }), { status: 200, headers: { "Content-Type": "application/json" } });
     }));

@@ -510,7 +510,7 @@ describe("TOMEET core flow", () => {
   });
 
   it("runs the complete social flow using conversation only", async () => {
-    const { app } = await setup();
+    const { app, store } = await setup();
     const userId = randomUUID();
     const send = (content: string) => app.inject({
       method: "POST",
@@ -534,6 +534,72 @@ describe("TOMEET core flow", () => {
     expect(acceptResponse.json().job.result.actions[0].type).toBe("accept_match");
     expect(acceptResponse.json().job.result.actions[0].room.status).toBe("confirmed");
     const roomId = acceptResponse.json().job.result.actions[0].room.roomId as string;
+    const initialRoom = acceptResponse.json().job.result.actions[0].room;
+    expect(initialRoom.eventPlans.draft.version).toBe(1);
+    expect(initialRoom.eventPlans.published).toBeNull();
+
+    const changeResponse = await send("地点改成人民公园");
+    expect(changeResponse.json().job.result.actions[0]).toMatchObject({
+      type: "update_event_plan",
+      eventPlan: {
+        version: 2,
+        location: { name: "人民公园" }
+      }
+    });
+    const firstPlanConfirmation = await send("确认这个清单");
+    expect(firstPlanConfirmation.json().job.result.actions[0]).toMatchObject({
+      type: "confirm_event_plan",
+      published: false,
+      eventPlan: { version: 2 }
+    });
+    const otherFounderId = initialRoom.members.find(
+      (member: { userId: string }) => member.userId !== userId
+    ).userId as string;
+    const secondPlanConfirmation = await store.confirmEventPlan(
+      roomId,
+      otherFounderId,
+      2
+    );
+    expect(secondPlanConfirmation).toMatchObject({
+      published: true,
+      eventPlan: { version: 2, status: "published" }
+    });
+    const publishedRoom = await app.inject({ method: "GET", url: `/rooms/${roomId}` });
+    expect(publishedRoom.json().room.eventPlans.published).toMatchObject({
+      version: 2,
+      location: { name: "人民公园" }
+    });
+    const laterDraft = await app.inject({
+      method: "PATCH",
+      url: `/rooms/${roomId}/event-plan`,
+      payload: {
+        userId,
+        expectedVersion: 2,
+        patch: {
+          time: {
+            startsAt: null,
+            endsAt: null,
+            timeZone: "Asia/Shanghai",
+            note: "改到下周日下午"
+          }
+        }
+      }
+    });
+    expect(laterDraft.statusCode).toBe(200);
+    expect(laterDraft.json().room.eventPlans).toMatchObject({
+      draft: { version: 3 },
+      published: { version: 2 }
+    });
+    const apiConfirmation = await app.inject({
+      method: "POST",
+      url: `/rooms/${roomId}/event-plan/confirm`,
+      payload: { userId, version: 3 }
+    });
+    expect(apiConfirmation.statusCode).toBe(200);
+    expect(apiConfirmation.json()).toMatchObject({
+      published: false,
+      eventPlan: { version: 3 }
+    });
 
     const duplicateRoomMatch = await app.inject({
       method: "POST",
@@ -544,7 +610,7 @@ describe("TOMEET core flow", () => {
 
     const historyResponse = await app.inject({ method: "GET", url: `/agent/messages/${userId}` });
     expect(historyResponse.json().messages.some(
-      (message: { content: string }) => message.content.includes("房间已建立")
+      (message: { content: string }) => message.content.includes("活动清单")
     )).toBe(true);
 
     const stopResponse = await send("停止匹配，不要再往房间里加人了");

@@ -14,7 +14,22 @@ describe("match decision validation", () => {
       memberIds: ["u1", "u1"],
       requestIds: ["r1", "r2"],
       offlineGameId: "game-story-table",
-      summary: "test"
+      summary: "test",
+      eventPlanSeed: {
+        time: {
+          startsAt: null,
+          endsAt: null,
+          timeZone: "Asia/Shanghai",
+          note: "待商定"
+        },
+        location: {
+          name: null,
+          address: null,
+          url: null,
+          note: "待商定"
+        },
+        gameIds: ["game-story-table"]
+      }
     }, [], curatedGames[1])).toThrow("不能重复");
   });
 

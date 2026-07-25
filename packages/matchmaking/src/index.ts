@@ -63,7 +63,22 @@ export class MockMatchmakingIntelligence implements MatchmakingIntelligence {
       memberIds: selected.map(({ request }) => request.userId),
       requestIds: selected.map(({ request }) => request.requestId),
       offlineGameId: game.id,
-      summary: `先邀请当前最合适的两位用户建立房间，再按相同匹配机制逐位扩充至 ${game.maxPlayers} 人。`
+      summary: `先邀请当前最合适的两位用户建立房间，再按相同匹配机制逐位扩充至 ${game.maxPlayers} 人。`,
+      eventPlanSeed: {
+        time: {
+          startsAt: null,
+          endsAt: null,
+          timeZone: "Asia/Shanghai",
+          note: "待商定"
+        },
+        location: {
+          name: null,
+          address: null,
+          url: null,
+          note: "待商定"
+        },
+        gameIds: [game.id]
+      }
     };
   }
 
@@ -162,6 +177,9 @@ export function validateMatchDecision(
   });
 
   if (!game || game.id !== decision.offlineGameId) throw new Error("只能选择目录中的线下游戏");
+  if (decision.eventPlanSeed.gameIds[0] !== decision.offlineGameId) {
+    throw new Error("活动清单的主游戏必须与匹配结果一致");
+  }
   if (game.maxPlayers < decision.memberIds.length) {
     throw new Error("线下游戏房间上限小于初始匹配人数");
   }

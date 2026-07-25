@@ -326,11 +326,38 @@ export const finalRoomDecisionSchema = z.object({
 });
 export type FinalRoomDecision = z.infer<typeof finalRoomDecisionSchema>;
 
+export const eventPlanTimeSchema = z.object({
+  startsAt: z.string().datetime().nullable(),
+  endsAt: z.string().datetime().nullable(),
+  timeZone: z.string().trim().min(1).max(64),
+  note: z.string().trim().min(1).max(500)
+});
+export type EventPlanTime = z.infer<typeof eventPlanTimeSchema>;
+
+export const eventPlanLocationSchema = z.object({
+  name: z.string().trim().min(1).max(300).nullable(),
+  address: z.string().trim().min(1).max(500).nullable(),
+  url: z.string().url().max(2_000).nullable(),
+  note: z.string().trim().min(1).max(500)
+});
+export type EventPlanLocation = z.infer<typeof eventPlanLocationSchema>;
+
+export const eventPlanSeedSchema = z.object({
+  time: eventPlanTimeSchema,
+  location: eventPlanLocationSchema,
+  gameIds: z.array(idSchema).min(1).max(5).refine(
+    (gameIds) => new Set(gameIds).size === gameIds.length,
+    "活动清单中的游戏不能重复"
+  )
+});
+export type EventPlanSeed = z.infer<typeof eventPlanSeedSchema>;
+
 export const matchDecisionSchema = z.object({
   memberIds: z.array(idSchema).length(2),
   requestIds: z.array(idSchema).length(2),
   offlineGameId: idSchema,
-  summary: z.string().min(1).max(2_000)
+  summary: z.string().min(1).max(2_000),
+  eventPlanSeed: eventPlanSeedSchema
 });
 export type MatchDecision = z.infer<typeof matchDecisionSchema>;
 
@@ -350,19 +377,6 @@ export const matchInviteParticipantSchema = z.object({
 });
 export type MatchInviteParticipant = z.infer<typeof matchInviteParticipantSchema>;
 
-export const matchInviteSchema = z.object({
-  inviteId: idSchema,
-  kind: z.enum(["initial_pair", "room_join"]),
-  roomId: idSchema.nullable(),
-  participants: z.array(matchInviteParticipantSchema).min(1).max(2),
-  offlineGameId: idSchema,
-  matchSummary: z.string(),
-  status: z.enum(["pending", "accepted", "declined", "cancelled"]),
-  createdAt: z.string().datetime(),
-  resolvedAt: z.string().datetime().nullable()
-});
-export type MatchInvite = z.infer<typeof matchInviteSchema>;
-
 export const offlineGameSchema = z.object({
   id: idSchema,
   name: z.string(),
@@ -376,11 +390,55 @@ export const offlineGameSchema = z.object({
 });
 export type OfflineGame = z.infer<typeof offlineGameSchema>;
 
+export const eventPlanConfirmationSchema = z.object({
+  userId: idSchema,
+  displayName: z.string(),
+  confirmedAt: z.string().datetime()
+});
+export type EventPlanConfirmation = z.infer<typeof eventPlanConfirmationSchema>;
+
+export const eventPlanGameSchema = z.object({
+  game: offlineGameSchema,
+  primary: z.boolean(),
+  position: z.number().int().nonnegative()
+});
+export type EventPlanGame = z.infer<typeof eventPlanGameSchema>;
+
+export const roomEventPlanSchema = z.object({
+  planId: idSchema,
+  roomId: idSchema,
+  version: z.number().int().positive(),
+  status: z.enum(["draft", "published", "superseded"]),
+  time: eventPlanTimeSchema,
+  location: eventPlanLocationSchema,
+  games: z.array(eventPlanGameSchema).min(1).max(5),
+  confirmations: z.array(eventPlanConfirmationSchema).max(2),
+  createdBy: idSchema.nullable(),
+  createdAt: z.string().datetime(),
+  publishedAt: z.string().datetime().nullable()
+});
+export type RoomEventPlan = z.infer<typeof roomEventPlanSchema>;
+
+export const matchInviteSchema = z.object({
+  inviteId: idSchema,
+  kind: z.enum(["initial_pair", "room_join"]),
+  roomId: idSchema.nullable(),
+  participants: z.array(matchInviteParticipantSchema).min(1).max(2),
+  offlineGameId: idSchema,
+  matchSummary: z.string(),
+  eventPlan: roomEventPlanSchema.nullable(),
+  status: z.enum(["pending", "accepted", "declined", "cancelled"]),
+  createdAt: z.string().datetime(),
+  resolvedAt: z.string().datetime().nullable()
+});
+export type MatchInvite = z.infer<typeof matchInviteSchema>;
+
 export const roomMemberSchema = z.object({
   userId: idSchema,
   displayName: z.string(),
   confirmed: z.boolean(),
-  participationStatus: z.enum(["invited", "confirmed", "withdrawn"]).default("confirmed")
+  participationStatus: z.enum(["invited", "confirmed", "withdrawn"]).default("confirmed"),
+  role: z.enum(["founder", "member"])
 });
 export type RoomMember = z.infer<typeof roomMemberSchema>;
 
@@ -397,6 +455,10 @@ export const matchRoomSchema = z.object({
   meetingPoint: z.string().max(500).nullable().default(null),
   matchingStatus: z.enum(["active", "stopped", "full"]),
   capacity: z.number().int().min(2).max(10),
+  eventPlans: z.object({
+    draft: roomEventPlanSchema.nullable(),
+    published: roomEventPlanSchema.nullable()
+  }),
   createdAt: z.string().datetime(),
   completedAt: z.string().datetime().nullable()
 });
@@ -408,6 +470,37 @@ export const matchInviteResolutionSchema = z.object({
   requeuedRequestIds: z.array(idSchema)
 });
 export type MatchInviteResolution = z.infer<typeof matchInviteResolutionSchema>;
+
+export const eventPlanPatchSchema = z.object({
+  time: eventPlanTimeSchema.partial().optional(),
+  location: eventPlanLocationSchema.partial().optional(),
+  gameIds: z.array(idSchema).min(1).max(5).refine(
+    (gameIds) => new Set(gameIds).size === gameIds.length,
+    "活动清单中的游戏不能重复"
+  ).optional()
+}).refine(
+  (patch) => patch.time !== undefined || patch.location !== undefined || patch.gameIds !== undefined,
+  "活动清单修改不能为空"
+);
+export type EventPlanPatch = z.infer<typeof eventPlanPatchSchema>;
+
+export const eventPlanMutationResultSchema = z.object({
+  room: matchRoomSchema,
+  eventPlan: roomEventPlanSchema,
+  published: z.boolean()
+});
+export type EventPlanMutationResult = z.infer<typeof eventPlanMutationResultSchema>;
+
+export const updateEventPlanInputSchema = z.object({
+  userId: uuidSchema,
+  expectedVersion: z.number().int().positive(),
+  patch: eventPlanPatchSchema
+});
+
+export const confirmEventPlanInputSchema = z.object({
+  userId: uuidSchema,
+  version: z.number().int().positive()
+});
 
 export const postEventFeedbackSchema = z.object({
   userId: idSchema,

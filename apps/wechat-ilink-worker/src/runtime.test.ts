@@ -50,6 +50,7 @@ function setup() {
   const store = {
     beginWechatMessage: vi.fn(async () => true),
     completeWechatMessage: vi.fn(async () => undefined),
+    completeWechatOutboundMessage: vi.fn(async () => undefined),
     markWechatConnectionError: vi.fn(async () => undefined),
     releaseWechatConnection: vi.fn(async () => undefined),
     renewWechatConnectionLease: vi.fn(async () => true),
@@ -139,7 +140,8 @@ describe("WeChat worker runtime", () => {
       botToken: "bot-secret",
       toUserId: activeConnection.ownerIlinkUserId,
       text: delivery.content,
-      runId: `outbound-${delivery.id}-bubble-1`
+      runId: `outbound-${delivery.id}-bubble-1`,
+      clientId: `tomeet:outbound:${delivery.id}:bubble:1`
     });
     expect(completeWechatOutboundMessage).toHaveBeenCalledWith(delivery.id, "worker-1");
     expect(JSON.stringify(runtime.logger.info.mock.calls)).not.toContain(delivery.content);
@@ -174,6 +176,12 @@ describe("WeChat worker runtime", () => {
       `outbound-${delivery.id}-bubble-2`,
       `outbound-${delivery.id}-bubble-3`,
       `outbound-${delivery.id}-bubble-4`
+    ]);
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.clientId)).toEqual([
+      `tomeet:outbound:${delivery.id}:bubble:1`,
+      `tomeet:outbound:${delivery.id}:bubble:2`,
+      `tomeet:outbound:${delivery.id}:bubble:3`,
+      `tomeet:outbound:${delivery.id}:bubble:4`
     ]);
     expect(completeWechatOutboundMessage).toHaveBeenCalledTimes(1);
   });

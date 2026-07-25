@@ -46,9 +46,17 @@ import {
   filterSocialHooksByTextEvidence,
   type OutboundDeliveryClass
 } from "./agent-policy.js";
+import {
+  formatEventPlan,
+  notifyEventPlanDraft,
+  notifyEventPlanPublished,
+  notifyMatchInvite as sendMatchInviteNotification,
+  notifyRoomUpdate as sendRoomUpdateNotification
+} from "./notifications.js";
 
 export * from "./agent-policy.js";
 export * from "./hosted-llm.js";
+export * from "./notifications.js";
 export * from "./web-search.js";
 export { buildAgentContext } from "@tomeet/agent-core";
 
@@ -445,7 +453,8 @@ export class JobProcessor {
       memoryProfile,
       matchOptions,
       onboardingState,
-      socialHooks
+      socialHooks,
+      availableGames
     ] = await Promise.all([
       this.store.getUserModel(userId),
       this.store.getLatestMatchRequestForUser(userId),
@@ -454,7 +463,8 @@ export class JobProcessor {
       this.store.getMemoryProfile(userId),
       this.store.listCurrentMatchOptions(userId),
       this.store.ensureAdventurexOnboardingState(userId),
-      this.store.listActiveSocialHooks(userId, 16)
+      this.store.listActiveSocialHooks(userId, 16),
+      this.store.listOfflineGames()
     ]);
     const [messages, checkpoint] = await Promise.all([
       this.store.listRecentMessages(userId, 32),
@@ -464,6 +474,7 @@ export class JobProcessor {
       matchRequest: initialMatchRequest,
       matchInvite: initialMatchInvite,
       room: initialRoom,
+      availableGames,
       checkpoint,
       memoryProfile,
       matchOptions,
@@ -512,6 +523,7 @@ export class JobProcessor {
       })
     );
     const actionResults: Array<Record<string, unknown>> = [];
+    const replySuffixes: string[] = [];
     let matchRequest = initialMatchRequest;
     let matchInvite = initialMatchInvite;
     let room = initialRoom;
@@ -527,7 +539,13 @@ export class JobProcessor {
           matchInvite,
           room
         );
-        actionResults.push({ type: action.type, ok: true, ...result.result, replyOverride: result.replyOverride });
+        actionResults.push({
+          type: action.type,
+          ok: true,
+          ...result.result,
+          replyOverride: result.replyOverride
+        });
+        if (result.replySuffix) replySuffixes.push(result.replySuffix);
         matchRequest = result.matchRequest;
         if (result.matchInvite !== undefined) matchInvite = result.matchInvite;
         room = result.room;
@@ -561,6 +579,7 @@ export class JobProcessor {
       });
       replyContent = failureMessage.content;
     }
+    replyContent = [replyContent, ...replySuffixes].filter(Boolean).join("\n\n");
     const message = await this.appendAssistantReply(job, {
       userId,
       content: replyContent,
@@ -645,6 +664,7 @@ export class JobProcessor {
     matchInvite?: MatchInvite | null;
     room: MatchRoom | null;
     replyOverride?: string;
+    replySuffix?: string;
   }> {
     switch (action.type) {
       case "start_match": {
@@ -687,15 +707,21 @@ export class JobProcessor {
         }
         const resolution = await this.store.acceptMatchInvite(currentMatchInvite.inviteId, userId);
         const matchRequest = await this.store.getLatestMatchRequestForUser(userId);
+        let replySuffix: string | undefined;
         if (resolution.room) {
-          await this.notifyRoomUpdate(resolution.room, resolution.invite);
+          await sendRoomUpdateNotification(this.store, resolution.room, resolution.invite, {
+            excludeUserId: userId
+          });
           await this.enqueueRoomContinuation(resolution.room, `accepted:${resolution.invite.inviteId}`);
+          const plan = resolution.room.eventPlans.draft ?? resolution.room.eventPlans.published;
+          if (plan) replySuffix = formatEventPlan(plan, resolution.room);
         }
         return {
           result: resolution,
           matchRequest,
           matchInvite: resolution.invite,
-          room: resolution.room ?? currentRoom
+          room: resolution.room ?? currentRoom,
+          replySuffix
         };
       }
       case "decline_match": {
@@ -939,6 +965,59 @@ export class JobProcessor {
         const room = await this.store.completeRoom(currentRoom.roomId);
         return { result: { room }, matchRequest: currentMatchRequest, room };
       }
+      case "update_event_plan": {
+        if (!currentRoom) throw new StoreNotFoundError("当前没有可以修改清单的房间");
+        const mutation = await this.store.updateEventPlan(
+          currentRoom.roomId,
+          userId,
+          action.expectedVersion,
+          action.patch
+        );
+        const actor = mutation.room.members.find((member) => member.userId === userId);
+        await notifyEventPlanDraft(this.store, mutation.room, {
+          reason: "updated",
+          actorName: actor?.displayName,
+          excludeUserId: userId
+        });
+        return {
+          result: mutation,
+          matchRequest: currentMatchRequest,
+          matchInvite: currentMatchInvite,
+          room: mutation.room,
+          replySuffix: formatEventPlan(mutation.eventPlan, mutation.room)
+        };
+      }
+      case "confirm_event_plan": {
+        if (!currentRoom) throw new StoreNotFoundError("当前没有可以确认清单的房间");
+        const mutation = await this.store.confirmEventPlan(
+          currentRoom.roomId,
+          userId,
+          action.version
+        );
+        if (mutation.published) {
+          await notifyEventPlanPublished(this.store, mutation.room, {
+            excludeUserId: userId
+          });
+          await this.enqueueRoomContinuation(
+            mutation.room,
+            `event-plan-published:${mutation.eventPlan.version}`
+          );
+        } else {
+          const actor = mutation.room.members.find((member) => member.userId === userId);
+          await notifyEventPlanDraft(this.store, mutation.room, {
+            reason: "confirmed",
+            actorName: actor?.displayName,
+            excludeUserId: userId
+          });
+        }
+        return {
+          result: mutation,
+          matchRequest: currentMatchRequest,
+          matchInvite: currentMatchInvite,
+          room: mutation.room,
+          replySuffix: formatEventPlan(mutation.eventPlan, mutation.room)
+        };
+      }
       case "submit_feedback": {
         if (!currentRoom) throw new StoreNotFoundError("当前没有可以反馈的房间");
         const feedback = postEventFeedbackSchema.parse({
@@ -983,6 +1062,7 @@ export class JobProcessor {
       room.status === "completed"
       || room.matchingStatus !== "active"
       || room.members.length >= room.capacity
+      || !room.eventPlans.published
     ) return;
     await this.store.enqueueJob({
       type: "matchmaking",
@@ -993,47 +1073,11 @@ export class JobProcessor {
   }
 
   private async notifyRoomUpdate(room: MatchRoom, invite: MatchInvite): Promise<void> {
-    const joinedParticipant = invite.kind === "room_join" ? invite.participants[0] : null;
-    const content = invite.kind === "initial_pair"
-      ? [
-          `双方已经接受匹配，房间已建立：${room.members.map((member) => member.displayName).join("、")}。`,
-          `当前 ${room.members.length}/${room.capacity} 人，系统会继续按贪心匹配寻找下一位成员。`,
-          "达到人数上限会自动停止；任一成员也可以直接说“停止匹配”。"
-        ].join("\n\n")
-      : [
-          `${joinedParticipant?.displayName ?? "新成员"} 已接受邀请并进入房间。`,
-          `当前 ${room.members.length}/${room.capacity} 人。`,
-          room.matchingStatus === "full"
-            ? "房间已达到人数上限，匹配已自动停止。"
-            : "系统会继续寻找下一位最合适的成员。"
-        ].join("\n\n");
-    await Promise.all(room.members.map((member) => this.appendProactiveMessage({
-      userId: member.userId,
-      content,
-      idempotencyKey: `room-update:${invite.inviteId}:${member.userId}`
-    })));
+    await sendRoomUpdateNotification(this.store, room, invite);
   }
 
   private async notifyMatchInvite(invite: MatchInvite, room: MatchRoom | null = null): Promise<void> {
-    await Promise.all(invite.participants.map((participant) => {
-      const other = invite.participants.find((item) => item.userId !== participant.userId);
-      const content = invite.kind === "initial_pair"
-        ? [
-            `我找到了当前与你最合适的匹配对象：${other?.displayName ?? "一位新朋友"}。`,
-            `匹配考虑：${invite.matchSummary}`,
-            "你们双方都接受后才会建立房间。回复“接受匹配”或“拒绝匹配”。"
-          ].join("\n\n")
-        : [
-            `一个正在组建的房间向你发出了邀请，目前 ${room?.members.length ?? "若干"}/${room?.capacity ?? "上限"} 人。`,
-            `匹配考虑：${invite.matchSummary}`,
-            "回复“接受邀请”即可进入房间，或回复“拒绝邀请”。"
-          ].join("\n\n");
-      return this.appendProactiveMessage({
-        userId: participant.userId,
-        content,
-        idempotencyKey: `match-invite:${invite.inviteId}:${participant.userId}`
-      });
-    }));
+    await sendMatchInviteNotification(this.store, invite, room);
   }
 
   private async processMultimodal(job: LlmJob): Promise<Record<string, unknown>> {

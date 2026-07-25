@@ -3,6 +3,7 @@ import {
   adventurexOnboardingStateSchema,
   adventurexTestPoolStatusSchema,
   channelIdentitySchema,
+  eventPlanMutationResultSchema,
   llmJobSchema,
   matchChoiceSchema,
   matchDraftSchema,
@@ -27,6 +28,8 @@ import {
   type ChannelProvider,
   type FinalRoomDecision,
   type MatchChoice,
+  type EventPlanMutationResult,
+  type EventPlanPatch,
   type MatchDecision,
   type MatchInvite,
   type MatchInviteResolution,
@@ -486,6 +489,20 @@ export class SupabaseStore implements DataStore {
     if (error) this.throwError("按微信回复代次写入消息", error);
     const result = unwrapRpcData(data);
     return result ? mapMessage(result as JsonRow) : null;
+  }
+
+  async appendProactiveMessage(input: {
+    userId: string;
+    content: string;
+    idempotencyKey: string;
+  }): Promise<Message> {
+    const { data, error } = await this.client.rpc("append_proactive_agent_message", {
+      p_user_id: input.userId,
+      p_content: input.content,
+      p_idempotency_key: input.idempotencyKey
+    });
+    if (error) this.throwError("写入主动渠道消息", error);
+    return mapMessage(unwrapRpcData(data) as JsonRow);
   }
 
   async listRecentMessages(userId: string, limit = 50): Promise<Message[]> {
@@ -1005,6 +1022,20 @@ export class SupabaseStore implements DataStore {
     return data ? this.getMatchInvite(String(data.id)) : null;
   }
 
+  async getPendingRoomJoinInviteForRoom(roomId: string): Promise<MatchInvite | null> {
+    const { data, error } = await this.client
+      .from("match_invites")
+      .select("id")
+      .eq("room_id", roomId)
+      .eq("kind", "room_join")
+      .eq("status", "pending")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) this.throwError("读取房间待处理邀请", error);
+    return data ? this.getMatchInvite(String(data.id)) : null;
+  }
+
   async createInitialMatchInvite(decision: MatchDecision, sourceJobId?: string): Promise<MatchInvite> {
     const { data, error } = await this.client.rpc("create_initial_match_invite", {
       p_decision: decision,
@@ -1109,6 +1140,36 @@ export class SupabaseStore implements DataStore {
       .maybeSingle();
     if (error) this.throwError("读取用户最近房间", error);
     return data ? this.getRoom(String(data.room_id)) : null;
+  }
+
+  async updateEventPlan(
+    roomId: string,
+    userId: string,
+    expectedVersion: number,
+    patch: EventPlanPatch
+  ): Promise<EventPlanMutationResult> {
+    const { data, error } = await this.client.rpc("create_room_event_plan_revision", {
+      p_room_id: roomId,
+      p_user_id: userId,
+      p_expected_version: expectedVersion,
+      p_patch: patch
+    });
+    if (error) this.throwError("修改活动清单", error);
+    return eventPlanMutationResultSchema.parse(unwrapRpcData(data));
+  }
+
+  async confirmEventPlan(
+    roomId: string,
+    userId: string,
+    version: number
+  ): Promise<EventPlanMutationResult> {
+    const { data, error } = await this.client.rpc("confirm_room_event_plan", {
+      p_room_id: roomId,
+      p_user_id: userId,
+      p_version: version
+    });
+    if (error) this.throwError("确认活动清单", error);
+    return eventPlanMutationResultSchema.parse(unwrapRpcData(data));
   }
 
   async confirmRoom(roomId: string, userId: string): Promise<MatchRoom> {

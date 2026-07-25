@@ -82,6 +82,7 @@ export interface WechatTransport {
     text: string;
     contextToken?: string;
     runId?: string;
+    clientId?: string;
   }): Promise<string>;
 }
 
@@ -439,7 +440,8 @@ export async function deliverWechatOutboundMessage(
         botToken,
         toUserId: delivery.connection.ownerIlinkUserId,
         text: bubble,
-        runId: `outbound-${delivery.id}-bubble-${index + 1}`
+        runId: `outbound-${delivery.id}-bubble-${index + 1}`,
+        clientId: `tomeet:outbound:${delivery.id}:bubble:${index + 1}`
       });
       if (index < bubbles.length - 1) {
         await waitBetweenBubbles(dependencies.bubbleDelayMs ?? 0);
