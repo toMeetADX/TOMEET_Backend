@@ -23,9 +23,16 @@ test("GitHub Actions workflows are valid YAML with triggers and jobs", async () 
       `${file} must have jobs`
     );
     if (file === "agent-layer-sync.yml") {
-      assert.match(source, /secrets\.AGENT_SYNC_PR_TOKEN/u);
-      assert.doesNotMatch(source, /GH_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/u);
-      assert.match(source, /Validate synchronization PR credential/u);
+      assert.deepEqual(Object.keys(workflow.jobs), ["validate-pr"]);
+      assert.doesNotMatch(source, /automation\/agent-sync-main-to-wechat/u);
+      assert.doesNotMatch(source, /AGENT_SYNC_PR_TOKEN/u);
+      assert.doesNotMatch(source, /sync-main-to-wechat/u);
+    }
+    if (file === "agent-layer-release.yml") {
+      assert.match(source, /branches:\s*\n\s+- main/u);
+      assert.doesNotMatch(source, /branches:\s*\n\s+- feat\/wechat-channel/u);
+      assert.doesNotMatch(source, /agent:release:verify/u);
+      assert.match(source, /current-release/u);
     }
   }
 });

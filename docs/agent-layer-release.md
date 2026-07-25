@@ -1,28 +1,18 @@
-# Agent Layer 双渠道同步与零中断发布
+# Agent Layer 单一主干与零中断发布
 
-本仓库把 `main` 作为 Agent Layer 的唯一来源，并把 Agent 依赖闭包自动同步到
-`feat/wechat-channel`。同步 PR 合并本身不应触发 Production 部署；Production
-只能由 `Agent Layer Release` workflow 发布。
+本仓库把 `main` 作为 Web、Agent 与微信通道的唯一发布来源。四个 Railway service
+必须从同一个不可变 `main` commit 发布；Production 只能由
+`Agent Layer Release` workflow 发布。
 
 ## 1. 本地命令
 
 ```bash
-# 比较两个远端分支的 Agent tree
-pnpm agent:sync:check -- --source origin/main --target origin/feat/wechat-channel
-
-# 仅允许在 automation/agent-sync-main-to-wechat 分支执行
-pnpm agent:sync:apply -- --source origin/main
-
-# 校验同步状态文件、Agent tree 和 migration hash
-pnpm agent:release:verify -- --source origin/main --target origin/feat/wechat-channel
-
 # 检查所有已登记 migration；新 migration 只能做向前兼容扩展
 pnpm agent:migrations:check -- --all
-```
 
-`agent:sync:apply` 会同步新增、修改和删除，生成
-`.agent-sync/agent-sync-state.json`，但不会提交或推送。工作区不干净或当前分支
-不正确时会直接失败。
+# 完整代码门槛
+pnpm check
+```
 
 ## 2. GitHub Environments
 
@@ -66,22 +56,6 @@ Production 还必须设置：
 Staging 和 Production 的 Supabase URL、key、数据库密码不得交叉使用。两个环境需启用
 匿名 Auth 登录，smoke 会创建两个独立临时用户并在结束时删除。
 
-### Repository secret
-
-`Agent Layer Sync` 创建同步 PR 时必须使用仓库级 Actions secret
-`AGENT_SYNC_PR_TOKEN`。不要把它放进 `staging` 或 `production` Environment，
-因为同步 workflow 不应获得任何部署凭据。
-
-推荐创建只授权 `toMeetADX/TOMEET_Backend` 的 fine-grained personal access token：
-
-- Repository permission `Pull requests`: `Read and write`
-- Repository permission `Contents`: `Read-only`
-- 设置合理的过期时间，并在到期前轮换仓库 secret
-
-同步分支仍由受限的 `GITHUB_TOKEN` 推送；专用 token 只用于查询、创建或更新
-`automation/agent-sync-main-to-wechat -> feat/wechat-channel` PR。若 secret 缺失、
-失效或无权创建 PR，workflow 会在修改自动化分支前失败关闭，并输出明确错误。
-
 ## 3. Railway 服务配置
 
 三个配置文件已使用 `/ready` 作为部署健康检查，超时为 120 秒。Railway 只有在
@@ -114,17 +88,17 @@ Staging 也建议关闭 Autodeploy，由 release workflow 使用固定 commit SH
 ## 5. 初始化回滚基线
 
 首次启用 release workflow 前，从 Railway 当前成功 deployment 中确认 Web/Agent
-对应的 `main` SHA，以及 WeChat API/worker 对应的 `feat/wechat-channel` SHA，然后
-创建稳定 tag：
+和 WeChat API/worker 各自正在运行的 SHA，然后创建稳定 tag：
 
 ```bash
-git tag prod-web-stable <当前 Web API/Intelligence Worker 的 main SHA>
-git tag prod-wechat-stable <当前 WeChat API/worker 的 WeChat SHA>
+git tag prod-web-stable <当前 Web API/Intelligence Worker SHA>
+git tag prod-wechat-stable <当前 WeChat API/worker SHA>
 git push origin prod-web-stable prod-wechat-stable
 ```
 
-两个 tag 缺失时 Production job 会失败关闭。每次成功发布后 workflow 会把旧值保存
-为 `prod-web-previous`、`prod-wechat-previous`，再更新 stable tag。
+两个 tag 缺失时 Production job 会失败关闭。首次发布时两个 SHA 可以不同；成功后
+四个 service 会收敛到同一个 `main` commit。workflow 会把旧值保存为
+`prod-web-previous`、`prod-wechat-previous`，再更新 stable tag。
 
 ## 6. Migration 规则
 
@@ -142,12 +116,10 @@ git push origin prod-web-stable prod-wechat-stable
 
 在 GitHub branch protection 中：
 
-- `main` 和 `feat/wechat-channel` 禁止直接 push；
-- 两个分支均要求 `Agent Layer Sync / validate-pr`；
-- `feat/wechat-channel` 额外要求 Agent tree parity；
-- 同步 PR 仍需人工审核，不启用自动合并；
-- Repository Actions secret `AGENT_SYNC_PR_TOKEN` 已按第 2 节配置；
-- 默认 `GITHUB_TOKEN` 只保留同步分支所需的 `contents: write`，不用于创建 PR。
+- `main` 禁止直接 push；
+- `main` 要求 `Agent Layer Sync / validate-pr`；
+- PR 需人工审核，不启用自动合并；
+- 不再创建或依赖 `automation/agent-sync-main-to-wechat` 分支。
 
 `Production Watch` 每五分钟检查四个 Railway service 的最新 deployment 状态及两个
 API 的 `/ready`。异常时会复用一个打开状态的 GitHub incident issue，避免重复刷屏。
