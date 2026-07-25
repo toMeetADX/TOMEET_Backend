@@ -16,7 +16,7 @@
 | 候选基线 `origin/main` | `f771c7b851c1dd06d05f0c87f6a9060ca8fb5c0a` |
 | WeChat 来源分支 | `origin/feat/wechat-channel` |
 | WeChat 来源 SHA | `06e7b71a8c1519e9248696b50924d0511090bedc` |
-| 候选提交 SHA | 合并前待补 |
+| 候选源码提交 SHA | `67c97769489cbfb7a7d58d6038013a1437b4ee60` |
 | `main` 合并 SHA | 待补 |
 | Production 实际部署 SHA | 待补 |
 | 最终确认标签 | 待创建：`confirmed-main-wechat-v1` |
