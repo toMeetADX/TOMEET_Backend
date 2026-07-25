@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@nomicfoundation/hardhat-ignition':
+        specifier: 3.1.8
+        version: 3.1.8(@nomicfoundation/hardhat-verify@3.0.21(hardhat@3.11.1))(hardhat@3.11.1)
       '@nomicfoundation/hardhat-toolbox-viem':
         specifier: 5.0.7
         version: 5.0.7(aaaa45d5f9d94a05edbcaad2e2aa3e2a)

@@ -1,6 +1,6 @@
 # Railway 生产上线手册
 
-本项目在同一个 Railway Project 中部署三个 Service：`tomeet-api`、`tomeet-intelligence-worker` 和 `tomeet-wechat-ilink-worker`。数据库与私有文件存储使用 Supabase，前端继续部署在 Vercel。
+本项目在同一个 Railway Project 中部署四个 Service：`tomeet-api`、`tomeet-intelligence-worker`、`tomeet-wechat-ilink-worker` 和 `tomeet-relationship-worker`。数据库与私有文件存储使用 Supabase，前端继续部署在 Vercel。
 
 ## 上线前置条件
 
@@ -24,14 +24,14 @@ supabase db push
 
 ## 2. 创建 Railway Services
 
-在 Railway 的 production environment 中创建三个 Service，均连接仓库根目录。
+在 Railway 的 production environment 中创建四个 Service，均连接仓库根目录。
 
 ### API Service
 
 - Service 名：`tomeet-api`
 - Config file path：`/railway.api.toml`
 - Generate Domain：开启
-- Healthcheck：配置文件已设置为 `/health`
+- Healthcheck：配置文件已设置为 `/ready`
 
 环境变量：
 
@@ -120,15 +120,16 @@ WECHAT_OUTBOUND_CONCURRENCY=20
 WECHAT_WORKER_CLAIM_INTERVAL_MS=1000
 WECHAT_BUBBLE_DELAY_MS=200
 WECHAT_TURN_BATCH_WINDOW_MS=400
-WECHAT_TURN_PROGRESS_DELAY_MS=30000
+WECHAT_TURN_PROGRESS_DELAY_MS=60000
 WECHAT_TURN_PROGRESS_INTERVAL_MS=30000
+WECHAT_TURN_PROGRESS_MAX_NOTICES=1
 ```
 
 `WECHAT_BUBBLE_DELAY_MS` 控制一句话气泡之间的渐进发送间隔，允许 `0–5000` 毫秒，生产建议约 `180–220` 毫秒，测试使用 `0`。组局邀请和成局确认函字符卡片不会被拆分。
 
 `WECHAT_TURN_PROGRESS_DELAY_MS` 控制首条“Agent 正在工作”提示出现前的等待时间，
-`WECHAT_TURN_PROGRESS_INTERVAL_MS` 控制后续阶段提示间隔；默认首条等待 30 秒，之后每隔
-30 秒逐条提示，最终回复或新输入到达后会停止提示。
+`WECHAT_TURN_PROGRESS_INTERVAL_MS` 控制后续阶段提示间隔，`WECHAT_TURN_PROGRESS_MAX_NOTICES`
+限制单轮最多提示次数；生产默认首条等待 60 秒且最多提示一次，最终回复或新输入到达后会停止提示。
 
 冷启动测试时可仅在 API 设置 `ADVENTUREX_TEST_POOL_ENABLED=true`。受保护开关只允许 `ADVENTUREX_TEST_POOL_EMAIL` 对应账号使用；正式真实用户池验收前应保持关闭。微信主动消息 Worker 使用 `WECHAT_OUTBOUND_CONCURRENCY` 并发发送候选、成局、超时和房间变化等异步通知。
 

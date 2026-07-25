@@ -33,6 +33,20 @@ RELATIONSHIP_WORKER_POLL_INTERVAL_MS=1000
 Never put the service-role key or relayer key in Rendez-Web, Vercel `NEXT_PUBLIC_*` variables,
 browser storage, logs, screenshots, or source control.
 
+The Injective testnet deployment parameters are committed in
+`ignition/parameters.injective-testnet.json`; they contain public admin and attester addresses
+only. The corresponding private keys must remain in a secure secret store. The production
+Railway service receives only the relayer/attester private key.
+
+Current Injective EVM testnet deployment:
+
+```text
+Contract: 0xeD8403CC4611Cf661CfA067ADa4242Cc65F5b234
+Deployment block: 134682766
+Admin: 0xBcC7022199AC782fc8B180771719638a3409D269
+Attester: 0x91975AfdE5A2Fb3BbC4feeea0fe235d77B0b7112
+```
+
 ## Acceptance check
 
 Use two real authenticated accounts:
