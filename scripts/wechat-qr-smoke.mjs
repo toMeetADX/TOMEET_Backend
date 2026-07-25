@@ -98,7 +98,18 @@ async function readFirstSseEvent(response, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let buffered = "";
   try {
-    while (!buffered.includes("\n\n")) {
+    while (true) {
+      const normalized = buffered.replaceAll("\r\n", "\n");
+      const boundary = normalized.indexOf("\n\n");
+      if (boundary >= 0) {
+        const frame = normalized.slice(0, boundary);
+        buffered = normalized.slice(boundary + 2);
+        const hasEvent = frame.split("\n").some((line) => line.startsWith("event:"));
+        const hasData = frame.split("\n").some((line) => line.startsWith("data:"));
+        if (hasEvent && hasData) return `${frame}\n\n`;
+        continue;
+      }
+
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
         throw new Error("Timed out waiting for the first SSE event");
@@ -121,7 +132,6 @@ async function readFirstSseEvent(response, timeoutMs) {
         clearTimeout(timer);
       }
     }
-    return buffered.slice(0, buffered.indexOf("\n\n") + 2);
   } finally {
     await reader.cancel().catch(() => undefined);
   }
