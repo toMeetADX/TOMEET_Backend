@@ -69,6 +69,10 @@
       "sha256": "201f370263880efa2f33a8c1b1fb0aa633defea34c96ba60e599e64c66e1c592",
       "reason": "Move pending background memory jobs to a dedicated partition and replace the claim RPC so future retries do not block ready interactive work; REVOKE preserves service-role-only job claiming."
     },
+    "20260726140000_enable_two_person_matching.sql": {
+      "sha256": "a69b9aed96d1266a7e0a0e5f899afdd52d2d17d20642043adafa4acd9dc2372e",
+      "reason": "Replace three minimum-player check constraints in place so existing matching tables safely accept two-person drafts and rooms without deleting data."
+    },
     "20260726032000_relationship_labels.sql": {
       "sha256": "61e911ba38ad299647c3cccb271584ed8808597d28c84fb51c4edfa14a0c3d23",
       "reason": "Add validated relationship labels, replace relationship RPC return shapes, and restore authenticated-only execution after recreating the affected functions."
