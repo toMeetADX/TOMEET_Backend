@@ -369,10 +369,72 @@ describe("WeChat worker runtime", () => {
     ]);
   });
 
+  it("consumes the first new message after reactivation even with older message history", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
+    activeConnection.syncCursor = "";
+    runtime.ilink.getUpdates.mockResolvedValueOnce({
+      ret: 0,
+      get_updates_buf: "cursor-after-reactivation",
+      msgs: [
+        {
+          message_id: 49,
+          message_type: 1,
+          from_user_id: activeConnection.ownerIlinkUserId,
+          context_token: "context-reactivation-trigger",
+          item_list: [{ type: 1, text_item: { text: "123456" } }]
+        },
+        {
+          message_id: 50,
+          message_type: 1,
+          from_user_id: activeConnection.ownerIlinkUserId,
+          context_token: "context-first-real-input",
+          item_list: [{
+            type: 2,
+            image_item: { media: { encrypt_query_param: "image-9" } }
+          }]
+        }
+      ]
+    });
+    runtime.dependencies.downloadImage = vi.fn(async () => ({
+      bytes: Uint8Array.from([9]),
+      mimeType: "image/jpeg" as const
+    }));
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: new AbortController().signal,
+      turnBatchWindowMs: 0
+    });
+
+    expect(runtime.tomeet.startOnboarding).toHaveBeenCalledTimes(1);
+    expect(runtime.tomeet.sendTextBatch).not.toHaveBeenCalled();
+    expect(runtime.tomeet.sendImages).toHaveBeenCalledWith(expect.objectContaining({
+      images: [{ messageId: "50", bytes: Uint8Array.from([9]), mimeType: "image/jpeg" }],
+      turns: [{ messageId: "50", imageCount: 1 }]
+    }));
+    expect(runtime.store.completeWechatMessage).toHaveBeenCalledWith(
+      activeConnection.id,
+      "49"
+    );
+    expect(runtime.store.completeWechatMessage).toHaveBeenCalledWith(
+      activeConnection.id,
+      "50"
+    );
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+      "Image batch reply"
+    ]);
+  });
+
   it("groups multiple inbound image messages into one vision request and one reply", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
     activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
+    activeConnection.syncCursor = "cursor-before-images";
     runtime.ilink.getUpdates.mockResolvedValueOnce({
       ret: 0,
       get_updates_buf: "cursor-1",

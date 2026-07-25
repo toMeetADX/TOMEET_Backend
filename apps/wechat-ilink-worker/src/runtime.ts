@@ -478,7 +478,8 @@ export async function handleWechatMessage(
   connection: WechatConnection,
   botToken: string,
   message: WechatInboundMessage,
-  turnBatcher?: WechatTurnBatchSink
+  turnBatcher?: WechatTurnBatchSink,
+  openingTrigger?: boolean
 ): Promise<boolean> {
   if (
     message.message_type !== 1
@@ -499,7 +500,8 @@ export async function handleWechatMessage(
     // iLink needs this first contextual message to open the bot conversation. The activation
     // callback may already have delivered the welcome, but the handshake still must not reach
     // the Agent as user-authored content.
-    const isOpeningTrigger = !connection.lastMessageAt && Boolean(message.context_token);
+    const isOpeningTrigger = Boolean(message.context_token)
+      && (openingTrigger ?? !connection.lastMessageAt);
     if (isOpeningTrigger) {
       const welcome = await dependencies.tomeet.startOnboarding({
         userId: connection.userId
@@ -662,6 +664,10 @@ export async function monitorWechatConnection(
     );
     turnBatcher = new WechatTurnBatcher(dependencies, connection, botToken);
     let cursor = connection.syncCursor;
+    // Activating or reactivating an iLink connection resets its cursor. The first new inbound
+    // message after that reset opens the conversation and must not be sent to the Agent, even
+    // when this WeChat identity has older message history.
+    let openingTriggerPending = cursor.length === 0;
     while (!signal.aborted) {
       const renewed = await dependencies.store.renewWechatConnectionLease(
         connection.id,
@@ -698,9 +704,16 @@ export async function monitorWechatConnection(
       let handled = false;
       for (const inbound of updates.msgs ?? []) {
         try {
-          handled = (
-            await handleWechatMessage(dependencies, connection, botToken, inbound, turnBatcher)
-          ) || handled;
+          const currentHandled = await handleWechatMessage(
+            dependencies,
+            connection,
+            botToken,
+            inbound,
+            turnBatcher,
+            openingTriggerPending && Boolean(inbound.context_token)
+          );
+          if (currentHandled && openingTriggerPending) openingTriggerPending = false;
+          handled = currentHandled || handled;
         } catch (error) {
           // One unprocessable message must not drop the connection, because the cursor would
           // then stay put and iLink would redeliver the same message forever.
