@@ -29,11 +29,10 @@ type RuntimeStore = Pick<
 >;
 
 export interface AgentTextClient {
-  startOnboarding(input: { userId: string }): Promise<{
-    deliveryId: string;
-    bubbles: string[];
-  } | null>;
-  markOnboardingWelcomeDelivered(input: { userId: string }): Promise<void>;
+  completeOnboardingWelcomeDelivery(input: {
+    userId: string;
+    claimId: string | null;
+  }): Promise<void>;
   setResponseGeneration(input: {
     connectionId: string;
     generationToken: string;
@@ -117,6 +116,7 @@ export interface WechatOutboundDependencies {
   store: Pick<WechatConnectionStore, "completeWechatOutboundMessage">;
   cipher: CredentialCipher;
   ilink: Pick<WechatTransport, "sendText">;
+  tomeet: Pick<AgentTextClient, "completeOnboardingWelcomeDelivery">;
   logger?: WorkerLogger;
   bubbleDelayMs?: number;
 }
@@ -585,7 +585,25 @@ export async function deliverWechatOutboundMessage(
       delivery.connection.botTokenCiphertext,
       `wechat-connection:${delivery.connection.ownerIlinkUserId}`
     );
-    const bubbles = splitWechatBubbles(delivery.content);
+    let bubbles: string[];
+    if (delivery.kind === "onboarding_welcome") {
+      const plaintext = dependencies.cipher.decrypt(
+        delivery.content,
+        `wechat-welcome-delivery:${delivery.messageId}`
+      );
+      const payload = JSON.parse(plaintext) as { bubbles?: unknown; claimId?: unknown };
+      if (
+        !Array.isArray(payload.bubbles)
+        || payload.bubbles.length === 0
+        || payload.bubbles.some((bubble) => typeof bubble !== "string" || !bubble.trim())
+        || (payload.claimId ?? null) !== delivery.claimId
+      ) {
+        throw new Error("Invalid encrypted onboarding welcome payload");
+      }
+      bubbles = payload.bubbles as string[];
+    } else {
+      bubbles = splitWechatBubbles(delivery.content);
+    }
     for (const [index, bubble] of bubbles.entries()) {
       await dependencies.ilink.sendText({
         baseUrl: delivery.connection.baseUrl,
@@ -598,6 +616,12 @@ export async function deliverWechatOutboundMessage(
       if (index < bubbles.length - 1) {
         await waitBetweenBubbles(dependencies.bubbleDelayMs ?? 0);
       }
+    }
+    if (delivery.kind === "onboarding_welcome") {
+      await dependencies.tomeet.completeOnboardingWelcomeDelivery({
+        userId: delivery.userId,
+        claimId: delivery.claimId
+      });
     }
     await dependencies.store.completeWechatOutboundMessage(delivery.id, workerId);
     logger.info(JSON.stringify({
@@ -650,41 +674,12 @@ export async function handleWechatMessage(
   if (!started) return false;
 
   try {
-    // The first accepted inbound message is the earliest confirmably writable point. It must
-    // claim onboarding before any visible "你好" or other opener can reach the Agent as
-    // user-authored content, even when iLink omitted a context token.
+    // The first inbound only opens the iLink transport. A welcome task was created at activation
+    // only when the WeChat identity did not already map to a database user.
     const isOpeningTrigger = openingTrigger ?? (
       Boolean(message.context_token) && !connection.lastMessageAt
     );
     if (isOpeningTrigger) {
-      // Cursor reset happens both for a brand-new identity and for reauthorization of
-      // an existing one. Historical connections still need their iLink opener consumed,
-      // but must not restart onboarding or replay the welcome sequence.
-      const welcome = connection.lastMessageAt
-        ? null
-        : await dependencies.tomeet.startOnboarding({
-            userId: connection.userId
-          });
-      if (welcome) {
-        const deliveryKey = createHash("sha256")
-          .update(`${connection.userId}:${welcome.deliveryId}`)
-          .digest("hex");
-        await sendReplyBubbles({
-          dependencies,
-          connection,
-          botToken,
-          reply: welcome.bubbles,
-          contextToken: message.context_token,
-          runIdBase: `first-inbound-welcome-${deliveryKey}`,
-          clientIdBase: `tomeet:welcome:${deliveryKey}`
-        });
-      }
-      if (welcome) {
-        await dependencies.tomeet.markOnboardingWelcomeDelivered({
-          userId: connection.userId
-        });
-      }
-      // A fully sent welcome is permanently closed regardless of whether the user replies.
       connection.lastMessageAt = new Date().toISOString();
       await dependencies.store.completeWechatMessage(connection.id, id);
       return true;
@@ -822,10 +817,8 @@ export async function monitorWechatConnection(
     let cursor = connection.syncCursor;
     let nextLongPollTimeoutMs = WECHAT_LONG_POLL_DEFAULT_TIMEOUT_MS;
     let consecutiveTransportTimeouts = 0;
-    // Activating or reactivating an iLink connection resets its cursor. A new identity can also
-    // persist a non-empty polling cursor before the user says anything, so `lastMessageAt` is the
-    // durable signal that its first inbound still has to claim onboarding. Historical identities
-    // consume the reconnect opener silently instead of replaying the welcome.
+    // Empty polling responses may advance the cursor before the user speaks, so lastMessageAt is
+    // also needed only to identify the first transport opener. It does not decide who gets welcome.
     let openingTriggerPending = cursor.length === 0 || !connection.lastMessageAt;
     while (!signal.aborted) {
       const renewed = await dependencies.store.renewWechatConnectionLease(

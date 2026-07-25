@@ -189,8 +189,9 @@ WECHAT_WEB_REGISTRATION_URL=https://tomeet.chat/register
 WECHAT_WEB_CLAIM_TTL_SECONDS=900
 ```
 
-Supabase Auth 必须开启 Anonymous Sign-Ins。首次扫码会先创建同一 UUID 的匿名 Auth
-用户并加密保存一次性注册凭证；首次可确认投递的入站握手再发送开场白和注册链接。注册页契约见
+Supabase Auth 必须开启 Anonymous Sign-Ins。只有数据库中尚无对应用户的新微信身份
+才会创建同一 UUID 的匿名 Auth 用户及加密欢迎 outbox；首次入站握手解锁任务但不进入
+Agent，随后由 outbox 发送开场白和注册链接。已有用户扫码不会创建欢迎任务。注册页契约见
 [`wechat-web-registration.md`](wechat-web-registration.md)。
 
 浏览器必须使用 API 的公开 HTTPS 域名。确认 API：

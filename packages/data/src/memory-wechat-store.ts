@@ -47,27 +47,22 @@ export class MemoryWechatStore implements WechatConnectionStore {
     return structuredClone(claim);
   }
 
-  async exposeLatestWechatWebClaimForUser(
+  async exposeWechatWebClaim(
+    claimId: string,
     userId: string,
     ttlMs: number
   ): Promise<WechatWebClaim | null> {
-    const now = Date.now();
-    const claim = [...this.webClaims.values()]
-      .filter((item) => (
-        item.userId === userId
-        && !item.consumedAt
-        && item.tokenCiphertext
-        && new Date(item.expiresAt).getTime() > now
-      ))
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-    if (claim && !claim.exposedAt) {
+    const claim = this.webClaims.get(claimId);
+    if (!claim || claim.userId !== userId) return null;
+    if (!claim.exposedAt) {
+      const now = Date.now();
       claim.exposedAt = new Date(now).toISOString();
       claim.expiresAt = new Date(Math.min(
         new Date(claim.expiresAt).getTime(),
         now + ttlMs
       )).toISOString();
     }
-    return claim ? structuredClone(claim) : null;
+    return structuredClone(claim);
   }
 
   async consumeWechatWebClaim(tokenHash: string): Promise<WechatWebClaim | null> {

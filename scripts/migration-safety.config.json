@@ -72,6 +72,10 @@
     "20260726032000_relationship_labels.sql": {
       "sha256": "61e911ba38ad299647c3cccb271584ed8808597d28c84fb51c4edfa14a0c3d23",
       "reason": "Add validated relationship labels, replace relationship RPC return shapes, and restore authenticated-only execution after recreating the affected functions."
+    },
+    "20260726150000_wechat_onboarding_welcome_outbox.sql": {
+      "sha256": "7cda5ee986a7a56809fb8c0d1b7dc48f3493b6db2fbf2ce43a037208e63915a0",
+      "reason": "Extend the existing WeChat outbox with a new-user onboarding delivery kind, recreate its compatibility view and claim/completion RPCs, and keep all task data and execution service-role-only."
     }
   }
 }

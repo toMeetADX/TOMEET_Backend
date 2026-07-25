@@ -12,7 +12,8 @@ import type {
 export interface WechatConnectionStore {
   createWechatWebClaim(input: CreateWechatWebClaimInput): Promise<WechatWebClaim>;
   getWechatWebClaim(tokenHash: string): Promise<WechatWebClaim | null>;
-  exposeLatestWechatWebClaimForUser(
+  exposeWechatWebClaim(
+    claimId: string,
     userId: string,
     ttlMs: number
   ): Promise<WechatWebClaim | null>;

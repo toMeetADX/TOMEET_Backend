@@ -125,6 +125,8 @@ export interface WechatOutboundDelivery {
   messageId: string;
   userId: string;
   content: string;
+  kind: "message" | "onboarding_welcome";
+  claimId: string | null;
   attempts: number;
   connection: WechatConnection;
 }

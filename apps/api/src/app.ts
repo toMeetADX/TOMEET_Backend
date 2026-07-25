@@ -35,7 +35,6 @@ import {
 } from "./auth.js";
 import {
   registerWechatRoutes,
-  webRegistrationLink,
   type WechatApiRuntime,
   type WechatWebRegistrationRuntime
 } from "./wechat-routes.js";
@@ -284,47 +283,6 @@ export async function buildApp(options: BuildAppOptions) {
     return timingSafeEqual(expectedHash, candidateHash);
   }
 
-  app.post(
-    "/internal/users/:userId/adventurex-onboarding/start",
-    { config: { rateLimit: false } },
-    async (request, reply) => {
-      if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
-        return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
-      }
-      const { userId } = z.object({ userId: uuidSchema }).parse(request.params);
-      const { language } = z.object({
-        language: adventurexLanguageSchema.default("zh")
-      }).parse(request.body ?? {});
-      const state = await options.store.ensureAdventurexOnboardingState(userId);
-      if (state.welcomeDeliveredAt) return { message: null, bubbles: [] };
-      const message = await options.store.startAdventurexOnboarding(userId, language);
-      if (!message) return { message: null, bubbles: [] };
-      const bubbles = message.content.split(/\n\s*\n+/u).filter(Boolean);
-      if (options.wechat && options.wechatWebRegistration) {
-        const claim = await options.wechat.store.exposeLatestWechatWebClaimForUser(
-          userId,
-          options.wechatWebRegistration.claimTtlMs ?? 15 * 60_000
-        );
-        if (claim?.tokenCiphertext) {
-          const token = options.wechat.cipher.decrypt(
-            claim.tokenCiphertext,
-            `wechat-web-claim:${claim.id}:token`
-          );
-          const registrationUrl = webRegistrationLink(
-            options.wechatWebRegistration.registrationUrl,
-            token
-          );
-          bubbles.push(
-            "想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！",
-            "这是微信里的同一个 TOMEET 账号，网页只用于注册和加好友；Agent 对话和发起匹配仍在微信",
-            `点这里为当前账号添加网页登录：${registrationUrl}`
-          );
-        }
-      }
-      return { message, bubbles };
-    }
-  );
-
   registerWechatRoutes(app, {
     runtime: options.wechat,
     internalApiEnabled: Boolean(options.internalApiToken),
@@ -335,9 +293,29 @@ export async function buildApp(options: BuildAppOptions) {
     isNewWechatIdentity: async (externalUserId) => (
       (await options.store.resolveChannelIdentity("wechat", externalUserId)) === null
     ),
-    // The iLink conversation is not confirmably writable until its first inbound handshake.
-    // Welcome delivery is intentionally deferred to the worker so the contextual send, Web
-    // registration link, and delivered marker form one retryable idempotent operation.
+    onActivated: async ({ userId, webRegistrationUrl, webRegistrationClaimId }) => {
+      if (!options.wechat) return;
+      const message = await options.store.startAdventurexOnboarding(userId, "zh");
+      if (!message) return;
+      const bubbles = message.content.split(/\n\s*\n+/u).filter(Boolean);
+      if (webRegistrationUrl) {
+        bubbles.push(
+          "想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！",
+          "这是微信里的同一个 TOMEET 账号，网页只用于注册和加好友；Agent 对话和发起匹配仍在微信",
+          `点这里为当前账号添加网页登录：${webRegistrationUrl}`
+        );
+      }
+      const claimId = webRegistrationClaimId ?? null;
+      const payloadCiphertext = options.wechat.cipher.encrypt(
+        JSON.stringify({ bubbles, claimId }),
+        `wechat-welcome-delivery:${message.id}`
+      );
+      await options.store.enqueueWechatOnboardingWelcome(
+        message,
+        payloadCiphertext,
+        claimId
+      );
+    }
   });
 
   app.post(
@@ -348,6 +326,16 @@ export async function buildApp(options: BuildAppOptions) {
         return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
       }
       const { userId } = z.object({ userId: uuidSchema }).parse(request.params);
+      const { claimId } = z.object({
+        claimId: uuidSchema.nullable().default(null)
+      }).parse(request.body ?? {});
+      if (claimId && options.wechat && options.wechatWebRegistration) {
+        await options.wechat.store.exposeWechatWebClaim(
+          claimId,
+          userId,
+          options.wechatWebRegistration.claimTtlMs ?? 15 * 60_000
+        );
+      }
       return { state: await options.store.markAdventurexWelcomeDelivered(userId) };
     }
   );

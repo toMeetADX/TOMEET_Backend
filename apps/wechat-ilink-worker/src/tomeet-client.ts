@@ -57,41 +57,16 @@ export class TomeetClient {
       ?? Math.ceil(this.requestTimeoutMs / this.pollIntervalMs);
   }
 
-  async startOnboarding(input: { userId: string }): Promise<{
-    deliveryId: string;
-    bubbles: string[];
-  } | null> {
-    const response = await this.request<{ message?: unknown | null; bubbles?: unknown }>(
-      `/internal/users/${input.userId}/adventurex-onboarding/start`,
-      {
-        method: "POST",
-        body: JSON.stringify({ language: "zh" })
-      }
-    );
-    if (response.message == null) return null;
-    const message = messageSchema.parse(response.message);
-    if (message.role !== "assistant") {
-      throw new TomeetClientError(
-        502,
-        "onboarding_message_invalid",
-        "Onboarding endpoint returned a non-assistant message"
-      );
-    }
-    const bubbles = Array.isArray(response.bubbles)
-      ? response.bubbles.filter((bubble): bubble is string => (
-          typeof bubble === "string" && bubble.trim().length > 0
-        ))
-      : [];
-    return {
-      deliveryId: message.id,
-      bubbles: bubbles.length > 0 ? bubbles : [message.content]
-    };
-  }
-
-  async markOnboardingWelcomeDelivered(input: { userId: string }): Promise<void> {
+  async completeOnboardingWelcomeDelivery(input: {
+    userId: string;
+    claimId: string | null;
+  }): Promise<void> {
     await this.request(
       `/internal/users/${input.userId}/adventurex-onboarding/welcome-delivered`,
-      { method: "POST" }
+      {
+        method: "POST",
+        body: JSON.stringify({ claimId: input.claimId })
+      }
     );
   }
 

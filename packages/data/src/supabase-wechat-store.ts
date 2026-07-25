@@ -64,6 +64,8 @@ function mapOutboundDelivery(row: JsonRow): WechatOutboundDelivery {
     messageId: String(row.messageId ?? row.message_id),
     userId: String(row.userId ?? row.user_id),
     content: String(row.content),
+    kind: (row.kind ?? row.delivery_kind ?? "message") as WechatOutboundDelivery["kind"],
+    claimId: (row.claimId ?? row.claim_id ?? null) as string | null,
     attempts: Number(row.attempts ?? 0),
     connection: mapConnection(row.connection as JsonRow)
   };
@@ -129,36 +131,31 @@ export class SupabaseWechatStore implements WechatConnectionStore {
     return data ? mapWebClaim(data as JsonRow) : null;
   }
 
-  async exposeLatestWechatWebClaimForUser(
+  async exposeWechatWebClaim(
+    claimId: string,
     userId: string,
     ttlMs: number
   ): Promise<WechatWebClaim | null> {
-    const now = new Date();
     const { data, error } = await this.client
       .from("wechat_web_claims")
       .select("*")
+      .eq("id", claimId)
       .eq("user_id", userId)
-      .is("consumed_at", null)
-      .not("token_ciphertext", "is", null)
-      .gt("expires_at", now.toISOString())
-      .order("created_at", { ascending: false })
-      .limit(1)
       .maybeSingle();
-    if (error) this.throwError("Read latest WeChat Web claim", error);
+    if (error) this.throwError("Read WeChat Web claim for exposure", error);
     if (!data) return null;
     const claim = mapWebClaim(data as JsonRow);
     if (claim.exposedAt) return claim;
+    const now = new Date();
     const expiresAt = new Date(Math.min(
       new Date(claim.expiresAt).getTime(),
       now.getTime() + ttlMs
     )).toISOString();
     const { data: exposed, error: exposeError } = await this.client
       .from("wechat_web_claims")
-      .update({
-        exposed_at: now.toISOString(),
-        expires_at: expiresAt
-      })
-      .eq("id", claim.id)
+      .update({ exposed_at: now.toISOString(), expires_at: expiresAt })
+      .eq("id", claimId)
+      .eq("user_id", userId)
       .is("exposed_at", null)
       .select("*")
       .maybeSingle();
@@ -167,11 +164,10 @@ export class SupabaseWechatStore implements WechatConnectionStore {
     const { data: concurrent, error: concurrentError } = await this.client
       .from("wechat_web_claims")
       .select("*")
-      .eq("id", claim.id)
-      .is("consumed_at", null)
-      .gt("expires_at", new Date().toISOString())
+      .eq("id", claimId)
+      .eq("user_id", userId)
       .maybeSingle();
-    if (concurrentError) this.throwError("Read exposed WeChat Web claim", concurrentError);
+    if (concurrentError) this.throwError("Read concurrently exposed WeChat claim", concurrentError);
     return concurrent ? mapWebClaim(concurrent as JsonRow) : null;
   }
 

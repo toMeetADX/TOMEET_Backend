@@ -35,7 +35,7 @@ export interface WechatApiRuntime {
 export interface WechatActivationContext {
   userId: string;
   webRegistrationUrl?: string;
-  deliverText?: (input: { text: string; runId: string }) => Promise<void>;
+  webRegistrationClaimId?: string;
 }
 
 interface ProvisionedWechatWebAccount {
@@ -148,7 +148,7 @@ async function createWebRegistrationClaim(
   runtime: WechatApiRuntime,
   account: ProvisionedWechatWebAccount,
   registration: WechatWebRegistrationRuntime
-): Promise<string> {
+): Promise<{ id: string; url: string }> {
   const sessionExpiresAt = new Date(account.sessionExpiresAt).getTime();
   const expiresAtMs = sessionExpiresAt - 5_000;
   if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
@@ -174,7 +174,10 @@ async function createWebRegistrationClaim(
     ),
     expiresAt: new Date(expiresAtMs).toISOString()
   });
-  return webRegistrationLink(registration.registrationUrl, token);
+  return {
+    id,
+    url: webRegistrationLink(registration.registrationUrl, token)
+  };
 }
 
 function activationCredentials(
@@ -239,7 +242,9 @@ async function activateSession(
   const isNewIdentity = isNewWechatIdentity
     ? await isNewWechatIdentity(credentials.ilinkUserId)
     : true;
-  const shouldSendActivationWelcome = onActivated ? isNewIdentity : false;
+  const shouldQueueOnboardingWelcome = Boolean(
+    onActivated && isNewIdentity && !session.requestedUserId
+  );
   let provisionedAccount: ProvisionedWechatWebAccount | null = null;
   if (isNewIdentity && !session.requestedUserId && webRegistration) {
     try {
@@ -285,14 +290,17 @@ async function activateSession(
     throw error;
   }
   let registrationUrl: string | undefined;
+  let registrationClaimId: string | undefined;
   if (provisionedAccount) {
     if (activation.session.userId === provisionedAccount.userId) {
       try {
-        registrationUrl = await createWebRegistrationClaim(
+        const registration = await createWebRegistrationClaim(
           runtime,
           provisionedAccount,
           webRegistration!
         );
+        registrationUrl = registration.url;
+        registrationClaimId = registration.id;
       } catch (error) {
         reportWebRegistrationError?.(error);
       }
@@ -304,21 +312,14 @@ async function activateSession(
   if (
     activation.session.userId
     && onActivated
-    && shouldSendActivationWelcome
+    && shouldQueueOnboardingWelcome
+    && (!provisionedAccount || activation.session.userId === provisionedAccount.userId)
     && await runtime.store.claimWechatActivationCallback(session.id)
   ) {
     await onActivated({
       userId: activation.session.userId,
       webRegistrationUrl: registrationUrl,
-      deliverText: async ({ text, runId }) => {
-        await runtime.client.sendText({
-          baseUrl,
-          botToken: credentials.botToken,
-          toUserId: credentials.ilinkUserId,
-          text,
-          runId
-        });
-      }
+      webRegistrationClaimId: registrationClaimId
     });
   }
   return activation.session;
