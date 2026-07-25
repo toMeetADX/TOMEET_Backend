@@ -500,7 +500,7 @@ export async function handleWechatMessage(
     // callback may already have delivered the welcome, but the handshake still must not reach
     // the Agent as user-authored content.
     const isOpeningTrigger = !connection.lastMessageAt && Boolean(message.context_token);
-    if (message.context_token) {
+    if (isOpeningTrigger) {
       const welcome = await dependencies.tomeet.startOnboarding({
         userId: connection.userId
       });
@@ -513,13 +513,24 @@ export async function handleWechatMessage(
           contextToken: message.context_token,
           runIdBase: `first-inbound-welcome-${connection.id}-${id}`
         });
-        await dependencies.tomeet.markOnboardingWelcomeDelivered({ userId: connection.userId });
       }
-      if (welcome || isOpeningTrigger) {
-        await dependencies.store.completeWechatMessage(connection.id, id);
-        connection.lastMessageAt = new Date().toISOString();
-        return true;
+      // Once the opener has been consumed (and any welcome was sent), keep the local transport
+      // guard closed even if a secondary persistence call is temporarily unavailable.
+      connection.lastMessageAt = new Date().toISOString();
+      if (welcome) {
+        await dependencies.tomeet.markOnboardingWelcomeDelivered({
+          userId: connection.userId
+        }).catch((error: unknown) => {
+          (dependencies.logger ?? console).error(JSON.stringify({
+            level: "error",
+            event: "wechat_welcome_delivery_mark_failed",
+            connection: fingerprint(connection.id),
+            errorType: errorName(error)
+          }));
+        });
       }
+      await dependencies.store.completeWechatMessage(connection.id, id);
+      return true;
     }
     const content = WechatILinkClient.extractText(message);
     // Any image item counts as "the user sent a picture", even when the payload turns out to

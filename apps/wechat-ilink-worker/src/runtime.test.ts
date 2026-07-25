@@ -302,12 +302,70 @@ describe("WeChat worker runtime", () => {
       item_list: [{ type: 1, text_item: { text: "第二条" } }]
     });
 
-    expect(runtime.tomeet.startOnboarding).toHaveBeenCalledTimes(1);
+    expect(runtime.tomeet.startOnboarding).not.toHaveBeenCalled();
     expect(runtime.tomeet.sendTextBatch).toHaveBeenCalledWith(expect.objectContaining({
       turns: [{ messageId: "46", content: "第二条" }]
     }));
     expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
       "Agent reply"
+    ]);
+  });
+
+  it("does not replay the welcome when persisting its delivery marker fails", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    runtime.tomeet.startOnboarding.mockResolvedValue(adventurexWelcomeContent("zh"));
+    runtime.tomeet.markOnboardingWelcomeDelivered.mockRejectedValue(
+      new Error("mark_adventurex_welcome_delivered is unavailable")
+    );
+
+    await expect(handleWechatMessage(runtime.dependencies, activeConnection, "bot-secret", {
+      message_id: 47,
+      message_type: 1,
+      from_user_id: activeConnection.ownerIlinkUserId,
+      context_token: "context-opening",
+      item_list: [{ type: 1, text_item: { text: "没什么介意的" } }]
+    })).resolves.toBe(true);
+
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+      ...adventurexWelcomeBubbles.zh
+    ]);
+    expect(runtime.store.completeWechatMessage).toHaveBeenCalledWith(
+      activeConnection.id,
+      "47"
+    );
+    expect(activeConnection.lastMessageAt).not.toBeNull();
+    expect(JSON.stringify(runtime.logger.error.mock.calls)).toContain(
+      "wechat_welcome_delivery_mark_failed"
+    );
+
+    runtime.tomeet.startOnboarding.mockClear();
+    runtime.tomeet.markOnboardingWelcomeDelivered.mockClear();
+    runtime.ilink.sendText.mockClear();
+    runtime.dependencies.downloadImage = vi.fn(async () => ({
+      bytes: Uint8Array.from([8]),
+      mimeType: "image/jpeg" as const
+    }));
+
+    await expect(handleWechatMessage(runtime.dependencies, activeConnection, "bot-secret", {
+      message_id: 48,
+      message_type: 1,
+      from_user_id: activeConnection.ownerIlinkUserId,
+      context_token: "context-image",
+      item_list: [{
+        type: 2,
+        image_item: { media: { encrypt_query_param: "image-8" } }
+      }]
+    })).resolves.toBe(true);
+
+    expect(runtime.tomeet.startOnboarding).not.toHaveBeenCalled();
+    expect(runtime.tomeet.markOnboardingWelcomeDelivered).not.toHaveBeenCalled();
+    expect(runtime.tomeet.sendImages).toHaveBeenCalledWith(expect.objectContaining({
+      images: [{ messageId: "48", bytes: Uint8Array.from([8]), mimeType: "image/jpeg" }],
+      turns: [{ messageId: "48", imageCount: 1 }]
+    }));
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+      "Image batch reply"
     ]);
   });
 
