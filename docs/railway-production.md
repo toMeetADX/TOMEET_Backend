@@ -141,10 +141,34 @@ pnpm adventurex:reset-chat-data -- --owner-email=andy4fe0119@gmail.com --desired
 
 第一条只输出删除前计数；第二条才真正执行。脚本不会删除真实用户、既有房间、已完成匹配或微信连接，但会结束仍在进行的旧匹配请求，并重置对话摘要、消息来源记忆、社交钩子和首次欢迎状态。
 
+### Relationship Worker Service
+
+- Service 名：`tomeet-relationship-worker`
+- Config file path：`/railway.relationship.toml`
+- 不需要生成公网域名
+
+环境变量：
+
+```text
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<secret>
+INJECTIVE_EVM_RPC_URL=https://k8s.testnet.json-rpc.injective.network/
+INJECTIVE_EVM_CHAIN_ID=1439
+INJECTIVE_EVM_EXPLORER_URL=https://testnet.blockscout.injective.network/
+RELATIONSHIP_REGISTRY_ADDRESS=0x<deployed-contract>
+RELATIONSHIP_RELAYER_PRIVATE_KEY=0x<dedicated-relayer-private-key>
+RELATIONSHIP_REGISTRY_DEPLOYMENT_BLOCK=<deployment-block>
+RELATIONSHIP_WORKER_POLL_INTERVAL_MS=1000
+```
+
+先执行 `pnpm contracts:test`，再通过 Hardhat Ignition 部署 `RelationshipRegistry`。
+生产参数必须把冷钱包设为 `admin`、专用热钱包设为 `attester`；Railway 只保存 attester
+私钥。把部署得到的合约地址和区块号写入 Worker 变量后再启动服务。
+
 ## 3. 部署顺序
 
 1. 确认 Supabase migrations 已完成。
-2. 先部署 Worker，日志中应出现 `"event":"worker_started"`。
+2. 先部署 Intelligence、WeChat 和 Relationship Worker；Relationship 日志应出现 `"event":"relationship_worker_started"`。
 3. 再部署 API，Railway `/health` 检查应通过。
 4. 打开 `https://<api-domain>/ready`，应返回 `{ "status": "ready" }`。
 5. 将 API 域名写入 Vercel：

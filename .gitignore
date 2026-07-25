@@ -4,6 +4,8 @@ node_modules
 .next-build
 dist
 coverage
+artifacts/
+cache/
 .env
 .env.local
 .DS_Store

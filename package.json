@@ -2,6 +2,7 @@
   "name": "tomeet",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "packageManager": "pnpm@10.14.0",
   "engines": {
     "node": ">=22.0.0"
@@ -11,23 +12,34 @@
     "dev:all": "pnpm --parallel --filter @tomeet/api --filter @tomeet/intelligence-worker --filter @tomeet/wechat-ilink-worker dev",
     "dev:wechat": "pnpm --filter @tomeet/wechat-ilink-worker dev",
     "dev:wechat:ilink": "pnpm --filter @tomeet/wechat-ilink-worker dev",
-    "build": "pnpm -r build",
-    "lint": "eslint \"apps/**/*.{ts,tsx}\" \"packages/**/*.ts\" --max-warnings=0",
+    "dev:relationship": "pnpm --filter @tomeet/relationship-worker dev",
+    "build": "pnpm -r build && pnpm contracts:compile",
+    "lint": "eslint \"apps/**/*.{ts,tsx}\" \"packages/**/*.ts\" \"hardhat.config.ts\" \"ignition/**/*.ts\" \"test/**/*.ts\" --max-warnings=0",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test && node --test scripts/*.test.mjs",
+    "test": "pnpm -r test && node --test scripts/*.test.mjs && pnpm contracts:test",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "agent:migrations:check": "node scripts/migration-safety.mjs check",
     "agent:release:railway": "node scripts/railway-release.mjs",
     "agent:smoke:cross-channel": "node scripts/cross-channel-smoke.mjs",
     "wechat:smoke:qr": "node scripts/wechat-qr-smoke.mjs",
-    "adventurex:reset-chat-data": "node scripts/reset-adventurex-chat-data.mjs"
+    "adventurex:reset-chat-data": "node scripts/reset-adventurex-chat-data.mjs",
+    "contracts:compile": "hardhat compile",
+    "contracts:test": "hardhat test",
+    "contracts:deploy:testnet": "hardhat ignition deploy ignition/modules/RelationshipRegistry.ts --network injectiveTestnet",
+    "supabase:lint": "supabase db lint --linked",
+    "supabase:push": "supabase db push"
   },
   "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-viem": "5.0.7",
+    "@openzeppelin/contracts": "5.6.1",
     "@supabase/supabase-js": "2.110.8",
     "@types/node": "^22.15.0",
     "eslint": "9.39.2",
-    "typescript-eslint": "8.65.0",
+    "hardhat": "3.11.1",
+    "supabase": "2.109.1",
     "typescript": "^5.8.3",
+    "typescript-eslint": "8.65.0",
+    "viem": "2.55.8",
     "yaml": "2.9.0"
   }
 }
