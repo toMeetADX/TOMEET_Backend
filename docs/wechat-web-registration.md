@@ -28,6 +28,9 @@ After every bubble is accepted by iLink, the API records the welcome as
 delivered. User silence, worker restarts, and later QR scans never replay it.
 If a delivery attempt is interrupted, retries reuse the same provider client
 IDs for each bubble so already accepted bubbles remain idempotent.
+The inbound message that triggered this first delivery is consumed as the
+conversation opener; it is not stored as user dialogue or submitted to the
+Agent. Normal conversation begins with the user's following message.
 
 ## Registration page contract
 
