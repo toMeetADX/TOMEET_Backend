@@ -229,6 +229,15 @@ export class MemoryWechatStore implements WechatConnectionStore {
     };
   }
 
+  async listActiveWechatConnectionsForQr(limit = 10): Promise<WechatConnection[]> {
+    const capped = Math.max(0, Math.min(limit, 10));
+    return [...this.connections.values()]
+      .filter((connection) => connection.status === "active")
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .slice(0, capped)
+      .map((connection) => structuredClone(connection));
+  }
+
   async claimWechatActivationCallback(sessionId: string): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session || session.status !== "active" || this.claimedActivationCallbacks.has(sessionId)) {

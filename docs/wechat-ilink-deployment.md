@@ -299,7 +299,22 @@ pnpm dev:wechat
 
 本地忽略的 `dev-wechat.cmd` 只启动新的 iLink worker，不会提交到 GitHub。
 
-## 8. 上线验收
+## 8. 多微信号同时在线
+
+多个不同微信号可以同时保持 `wechat_ilink_connections.status='active'`。创建二维码时
+API 会查询最多 10 个 active 连接，解密 `bot_token` 后作为 `local_token_list` 提交给
+iLink `get_bot_qrcode`，让上游识别已在线 bot，避免新扫码会话顶掉旧会话（否则先登录
+方长轮询常收到 `-14` → Worker 标 `reauth_required`）。
+
+验收：
+
+1. 手机 A、B（不同微信号）先后扫码确认，DB 中两行均为 `status='active'`，且
+   `owner_ilink_user_id` / `user_id` 不同。
+2. A 与 B 各发一条消息均应收到回复；Worker 对两个 connection 持续
+   `wechat_updates_poll`，无先登录方的 `wechat_reauth_required`。
+3. 同一微信号重新扫码仍会覆盖本库对应连接并轮换 token（一对一约束，预期行为）。
+
+## 9. 上线验收
 
 1. API 和微信 worker 的 `/health`、`/ready` 均返回 200。
 2. `/wechat` 能生成二维码并显示扫码、验证、成功和过期状态。
@@ -318,3 +333,5 @@ pnpm dev:wechat
     完整清单。
 12. 人为制造一次 iLink 发送失败后，日志出现 `wechat_outbound_retry`，恢复后仅发送
     一次并记录 `wechat_outbound_sent`。
+13. 双机验收：两台手机不同微信号同时 active，互不因新扫码收到 `-14` / 断链
+   （见上一节）。

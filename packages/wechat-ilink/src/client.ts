@@ -80,14 +80,21 @@ export class WechatILinkClient {
     this.longPollGraceMs = options.longPollGraceMs ?? 15_000;
   }
 
-  async createLoginQr(): Promise<WechatQrStart> {
+  async createLoginQr(options?: { localTokenList?: string[] }): Promise<WechatQrStart> {
+    const localTokenList = [
+      ...new Set(
+        (options?.localTokenList ?? [])
+          .map((token) => token.trim())
+          .filter((token) => token.length > 0)
+      )
+    ].slice(0, 10);
     const response = await this.request<Record<string, unknown>>(
       this.qrBaseUrl,
       "ilink/bot/get_bot_qrcode?bot_type=3",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ local_token_list: [] })
+        body: JSON.stringify({ local_token_list: localTokenList })
       },
       this.requestTimeoutMs
     );

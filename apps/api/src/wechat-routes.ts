@@ -623,7 +623,21 @@ export function registerWechatRoutes(
     if (!runtime) return null;
     const id = randomUUID();
     const sessionToken = randomBytes(32).toString("base64url");
-    const qr = await runtime.client.createLoginQr();
+    const connections = await runtime.store.listActiveWechatConnectionsForQr(10);
+    const localTokenList: string[] = [];
+    for (const connection of connections) {
+      try {
+        localTokenList.push(
+          runtime.cipher.decrypt(
+            connection.botTokenCiphertext,
+            `wechat-connection:${connection.ownerIlinkUserId}`
+          )
+        );
+      } catch {
+        // Skip undecryptable credentials; QR creation must still succeed.
+      }
+    }
+    const qr = await runtime.client.createLoginQr({ localTokenList });
     const expiresAt = new Date(
       Date.now() + (runtime.sessionTtlMs ?? 5 * 60_000)
     ).toISOString();

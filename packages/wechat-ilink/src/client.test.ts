@@ -24,6 +24,40 @@ describe("WechatILinkClient", () => {
     expect(new Headers(requestedInit?.headers).get("iLink-App-Id")).toBe("bot");
   });
 
+  it("forwards deduped local bot tokens when creating a QR code", async () => {
+    let requestedInit: RequestInit | undefined;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestedInit = init;
+      return new Response(JSON.stringify({
+        qrcode: "qr-secret",
+        qrcode_img_content: "weixin://login/content"
+      }));
+    });
+    const client = new WechatILinkClient({ fetch: fetchMock as typeof fetch });
+
+    await client.createLoginQr({
+      localTokenList: ["tok-a", " tok-b ", "tok-a", "", "tok-c"]
+    });
+    expect(JSON.parse(String(requestedInit?.body))).toEqual({
+      local_token_list: ["tok-a", "tok-b", "tok-c"]
+    });
+  });
+
+  it("caps local_token_list at 10 entries", async () => {
+    let requestedInit: RequestInit | undefined;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestedInit = init;
+      return new Response(JSON.stringify({
+        qrcode: "qr-secret",
+        qrcode_img_content: "weixin://login/content"
+      }));
+    });
+    const client = new WechatILinkClient({ fetch: fetchMock as typeof fetch });
+    const tokens = Array.from({ length: 12 }, (_, index) => `tok-${index}`);
+    await client.createLoginQr({ localTokenList: tokens });
+    expect(JSON.parse(String(requestedInit?.body)).local_token_list).toEqual(tokens.slice(0, 10));
+  });
+
   it("sends a completed bot text message with the inbound context", async () => {
     let requestedInit: RequestInit | undefined;
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {

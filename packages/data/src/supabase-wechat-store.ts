@@ -272,6 +272,18 @@ export class SupabaseWechatStore implements WechatConnectionStore {
     };
   }
 
+  async listActiveWechatConnectionsForQr(limit = 10): Promise<WechatConnection[]> {
+    const capped = Math.max(0, Math.min(limit, 10));
+    const { data, error } = await this.client
+      .from("wechat_ilink_connections")
+      .select("*")
+      .eq("status", "active")
+      .order("updated_at", { ascending: false })
+      .limit(capped);
+    if (error) this.throwError("List active WeChat connections for QR", error);
+    return (data ?? []).map((row) => mapConnection(row as JsonRow));
+  }
+
   async claimWechatActivationCallback(sessionId: string): Promise<boolean> {
     const { data, error } = await this.client.rpc("claim_wechat_activation_callback", {
       p_session_id: sessionId

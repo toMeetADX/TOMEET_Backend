@@ -4,9 +4,32 @@ import { adventurexWelcomeBubbles } from "@tomeet/contracts";
 import { MemoryStore, MemoryWechatStore } from "@tomeet/data";
 import { JobProcessor } from "@tomeet/intelligence";
 import { MockMatchmakingIntelligence } from "@tomeet/matchmaking";
-import { CredentialCipher, WechatILinkClient } from "@tomeet/wechat-ilink";
+import {
+  CredentialCipher,
+  WechatILinkClient,
+  type WechatConnection
+} from "@tomeet/wechat-ilink";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app.js";
+
+function memoryConnections(wechatStore: MemoryWechatStore): Map<string, WechatConnection> {
+  return (wechatStore as unknown as {
+    connections: Map<string, WechatConnection>;
+  }).connections;
+}
+
+function qrLocalTokenLists(
+  fetchMock: ReturnType<typeof vi.fn>
+): string[][] {
+  return fetchMock.mock.calls
+    .filter(([input]) => String(input).includes("get_bot_qrcode"))
+    .map(([, init]) => {
+      const body = JSON.parse(String((init as RequestInit | undefined)?.body ?? "{}")) as {
+        local_token_list?: string[];
+      };
+      return body.local_token_list ?? [];
+    });
+}
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 
@@ -1269,5 +1292,210 @@ describe("WeChat one-time QR onboarding", () => {
 
     expect(response.headers["access-control-allow-origin"]).toBeUndefined();
     expect(verifyAccessToken).not.toHaveBeenCalled();
+  });
+
+  it("includes decrypted active bot tokens in subsequent get_bot_qrcode calls", async () => {
+    const statuses = [
+      {
+        status: "confirmed",
+        bot_token: "tok-a",
+        ilink_bot_id: "bot-a",
+        baseurl: "https://ilink-api.example.com",
+        ilink_user_id: "owner-a-local-tokens"
+      },
+      {
+        status: "confirmed",
+        bot_token: "tok-b",
+        ilink_bot_id: "bot-b",
+        baseurl: "https://ilink-api.example.com",
+        ilink_user_id: "owner-b-local-tokens"
+      }
+    ];
+    const { app, wechatStore, fetchMock } = await setup(statuses);
+
+    const firstCreate = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    expect(firstCreate.statusCode).toBe(201);
+    expect(qrLocalTokenLists(fetchMock)[0]).toEqual([]);
+
+    const first = firstCreate.json();
+    await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${first.sessionId}`,
+      headers: { "x-wechat-session-token": first.sessionToken }
+    });
+    for (const connection of memoryConnections(wechatStore).values()) {
+      if (connection.ownerIlinkUserId === "owner-a-local-tokens") {
+        connection.updatedAt = "2026-07-26T00:00:01.000Z";
+      }
+    }
+
+    const secondCreate = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    expect(secondCreate.statusCode).toBe(201);
+    expect(qrLocalTokenLists(fetchMock).at(-1)).toEqual(["tok-a"]);
+
+    const second = secondCreate.json();
+    await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${second.sessionId}`,
+      headers: { "x-wechat-session-token": second.sessionToken }
+    });
+    for (const connection of memoryConnections(wechatStore).values()) {
+      if (connection.ownerIlinkUserId === "owner-b-local-tokens") {
+        connection.updatedAt = "2026-07-26T00:00:02.000Z";
+      }
+    }
+
+    const thirdCreate = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    expect(thirdCreate.statusCode).toBe(201);
+    expect(qrLocalTokenLists(fetchMock).at(-1)).toEqual(["tok-b", "tok-a"]);
+  });
+
+  it("skips undecryptable active credentials when creating a QR session", async () => {
+    const { app, wechatStore, fetchMock, cipher } = await setup([{
+      status: "confirmed",
+      bot_token: "good-token",
+      ilink_bot_id: "bot-good",
+      baseurl: "https://ilink-api.example.com",
+      ilink_user_id: "owner-good-decrypt"
+    }]);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    const session = created.json();
+    await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${session.sessionId}`,
+      headers: { "x-wechat-session-token": session.sessionToken }
+    });
+
+    const connections = memoryConnections(wechatStore);
+    const good = [...connections.values()][0]!;
+    const badId = randomUUID();
+    connections.set(badId, {
+      ...good,
+      id: badId,
+      userId: randomUUID(),
+      ownerIlinkUserId: "owner-bad-decrypt",
+      botTokenCiphertext: "not-a-valid-ciphertext",
+      updatedAt: "2026-07-26T00:00:03.000Z"
+    });
+    good.updatedAt = "2026-07-26T00:00:02.000Z";
+    expect(() => cipher.decrypt(
+      "not-a-valid-ciphertext",
+      "wechat-connection:owner-bad-decrypt"
+    )).toThrow();
+
+    const next = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    expect(next.statusCode).toBe(201);
+    expect(qrLocalTokenLists(fetchMock).at(-1)).toEqual(["good-token"]);
+  });
+
+  it("caps local_token_list submitted to iLink at 10 active tokens", async () => {
+    const statuses = Array.from({ length: 12 }, (_, index) => ({
+      status: "confirmed",
+      bot_token: `tok-${index}`,
+      ilink_bot_id: `bot-${index}`,
+      baseurl: "https://ilink-api.example.com",
+      ilink_user_id: `owner-cap-${index}`
+    }));
+    const { app, wechatStore, fetchMock } = await setup(statuses);
+
+    for (let index = 0; index < 12; index += 1) {
+      const created = await app.inject({
+        method: "POST",
+        url: "/wechat/connect/sessions",
+        payload: {}
+      });
+      const session = created.json();
+      await app.inject({
+        method: "GET",
+        url: `/wechat/connect/sessions/${session.sessionId}`,
+        headers: { "x-wechat-session-token": session.sessionToken }
+      });
+      for (const connection of memoryConnections(wechatStore).values()) {
+        if (connection.ownerIlinkUserId === `owner-cap-${index}`) {
+          connection.updatedAt = new Date(Date.UTC(2026, 6, 26, 0, 0, index)).toISOString();
+        }
+      }
+    }
+
+    const next = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    expect(next.statusCode).toBe(201);
+    expect(qrLocalTokenLists(fetchMock).at(-1)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `tok-${11 - index}`)
+    );
+  });
+
+  it("keeps one connection row when the same WeChat identity reconnects", async () => {
+    const confirmed = {
+      status: "confirmed",
+      bot_token: "bot-secret-1",
+      ilink_bot_id: "bot-1",
+      baseurl: "https://ilink-api.example.com",
+      ilink_user_id: "owner-upsert-once"
+    };
+    const { app, wechatStore, fetchMock } = await setup([
+      confirmed,
+      { ...confirmed, bot_token: "bot-secret-2", ilink_bot_id: "bot-2" }
+    ]);
+
+    const firstCreate = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    const first = firstCreate.json();
+    await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${first.sessionId}`,
+      headers: { "x-wechat-session-token": first.sessionToken }
+    });
+    const before = await wechatStore.listActiveWechatConnectionsForQr(10);
+    expect(before).toHaveLength(1);
+    const connectionId = before[0]!.id;
+
+    const secondCreate = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    expect(qrLocalTokenLists(fetchMock).at(-1)).toEqual(["bot-secret-1"]);
+    const second = secondCreate.json();
+    await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${second.sessionId}`,
+      headers: { "x-wechat-session-token": second.sessionToken }
+    });
+
+    const after = await wechatStore.listActiveWechatConnectionsForQr(10);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({
+      id: connectionId,
+      ownerIlinkUserId: "owner-upsert-once",
+      ilinkBotId: "bot-2"
+    });
   });
 });
