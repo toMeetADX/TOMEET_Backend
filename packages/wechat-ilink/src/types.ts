@@ -81,6 +81,8 @@ export interface WechatUpdates {
   msgs?: WechatInboundMessage[];
   get_updates_buf?: string;
   longpolling_timeout_ms?: number;
+  // Local transport metadata. This field is never sent to or expected from iLink.
+  transport_timed_out?: boolean;
 }
 
 export interface WechatConnectionSession {
