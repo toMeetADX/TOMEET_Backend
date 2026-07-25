@@ -175,3 +175,86 @@ WeChat Worker 启动后曾记录一次 `wechat_reauth_required`（iLink `-14`）
 当前服务上线判定为 **PASS**。剩余自动化待办不会影响当前运行实例：由
 `4Fe_Andy` Railway Workspace 的 Project 管理员创建 Production Project
 Token，并将其写入 GitHub `production` Environment 的 `RAILWAY_TOKEN`。
+
+## 8. Supabase 用户模型 ID 热修（2026-07-25）
+
+### 根因与修复
+
+`packages/data/src/supabase-store.ts` 的 `mapUserModel()` 原先只读取
+`user_id/userId`，而 Production `users` 表的真实主键为 `id`，因此 Agent
+读取用户模型时可能得到 `userId: undefined`。热修将映射顺序改为
+`id -> user_id -> userId`，没有修改数据库、OpenAPI、公共接口、任务 payload
+或重试策略。
+
+| 项目 | 结果 |
+| --- | --- |
+| 热修分支 | `fix/supabase-user-model-id-hotfix` |
+| 源码提交 | `c45e264092b831b70afa2814a48780668241d2ea` |
+| PR | [#23](https://github.com/toMeetADX/TOMEET_Backend/pull/23) |
+| `Main Validation / validate-pr` | [PASS](https://github.com/toMeetADX/TOMEET_Backend/actions/runs/30154978986/job/89671414472) |
+| main 合并 / Production SHA | `daa9cbe74339bf3d3bc5754cd6bef06dca38462e` |
+
+### 回归与本地门禁
+
+| 验证 | 结果 |
+| --- | --- |
+| `pnpm --filter @tomeet/data test` | PASS，29/29 |
+| Supabase Store 定向回归 | PASS，5/5 |
+| `pnpm --filter @tomeet/data typecheck` | PASS |
+| `pnpm agent:migrations:check -- --all` | PASS，15 个迁移 |
+| `pnpm check` | PASS |
+| 真实 `users.id` 行、`saveUserModel()` 返回行和旧 `user_id/userId` 兼容 | PASS |
+| 完整 `agent_reply` payload（含 `userId/content/userMessageId`） | PASS |
+
+Supabase 当前文档与变更记录复核未发现要求改变本次映射或数据库结构的相关破坏性
+变更，因此本次没有执行 DDL 或迁移。
+
+### Railway Production 发布
+
+由于三个服务的 watch path 不包含 `packages/data/**`，本次没有依赖 merge
+自动部署，而是从固定 main SHA 强制重新构建并按 Intelligence Worker → API →
+WeChat iLink Worker 顺序发布。
+
+| Service | Deployment ID | SHA | 终态 |
+| --- | --- | --- | --- |
+| `@tomeet/intelligence-worker` | `d817e13c-2e95-46b8-9286-87ab46f0f866` | `daa9cbe74339bf3d3bc5754cd6bef06dca38462e` | `SUCCESS + RUNNING` |
+| `@tomeet/api` | `9b52d987-0001-498e-83b9-df90d5f19882` | `daa9cbe74339bf3d3bc5754cd6bef06dca38462e` | `SUCCESS + RUNNING` |
+| `@tomeet/wechat-ilink-worker` | `a48ac6be-d489-453c-a140-592d4e037864` | `daa9cbe74339bf3d3bc5754cd6bef06dca38462e` | `SUCCESS + RUNNING` |
+
+### Production 验证与观察
+
+| 检查 | 结果 |
+| --- | --- |
+| `/ready`、`/health` | PASS，连续 10 轮均为 HTTP 200 |
+| Production `SupabaseStore.getUserModel()` 脱敏调用 | PASS；真实 `users.id` 与返回 `userId` 完全一致 |
+| QR smoke | PASS；Origin `https://tomeet.chat`、CORS、匿名创建、Header 鉴权、SSE、状态查询 |
+| 新 WeChat-source `agent_reply` | PASS；任务 `completed`，assistant 回复和 WeChat source 消息均已持久化 |
+| Intelligence 日志 | PASS；2026-07-25 11:05:29 UTC 出现新的 `job_completed` |
+| API 5xx | 0 |
+| 新增 `wechat_turn_batch_flush_failed` | 0 |
+| Intelligence / WeChat error | 0 |
+| 观察窗口 | PASS；最后一个部署后超过 10 分钟，10 轮探针覆盖 10:56:01–11:00:36 UTC |
+
+观察窗口指标快照：
+
+| Service | CPU 当前 / 1h 平均 | 内存当前 / 1h 平均 |
+| --- | --- | --- |
+| Intelligence Worker | `0.0072 / 0.0130` | `0.1471 / 0.1683 GB` |
+| API | `0.0020 / 0.0028` | `0.1413 / 0.1523 GB` |
+| WeChat Worker | `0.0050 / 0.0076` | `0.1425 / 0.1359 GB` |
+
+失败任务 `041816cf-8e1d-4ca7-b7ae-6a04eb923896` 没有重放，避免对真实用户重复回复。
+生产 smoke 使用一次性临时 Auth 用户，完成后已删除。`wechat_reauth_required (-14)`
+仍表示单个微信连接过期，需要用户重新扫码；它与本次映射缺陷无关，不构成热修回滚条件。
+
+### 回滚与 stable 标签
+
+| 标签 | SHA | 状态 |
+| --- | --- | --- |
+| `pre-user-model-hotfix-20260725` | `1907608a5f552396a3d97c025fdd274765699064` | 新增 annotated 回滚点 |
+| `prod-intelligence-stable` | `daa9cbe74339bf3d3bc5754cd6bef06dca38462e` | 已推进 |
+| `prod-web-stable` | `daa9cbe74339bf3d3bc5754cd6bef06dca38462e` | 已推进 |
+| `prod-wechat-stable` | `daa9cbe74339bf3d3bc5754cd6bef06dca38462e` | 已推进 |
+| `confirmed-main-wechat-v1` | `1907608a5f552396a3d97c025fdd274765699064` | 历史指向保持不变 |
+
+热修 Production 判定：**PASS**。
