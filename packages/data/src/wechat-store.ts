@@ -68,6 +68,7 @@ export interface WechatConnectionStore {
   completeWechatOutboundMessage(
     outboundId: string,
     workerId: string,
-    error?: string
+    error?: string,
+    reauthRequired?: boolean
   ): Promise<void>;
 }

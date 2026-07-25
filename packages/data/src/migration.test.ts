@@ -1893,7 +1893,7 @@ describe("Supabase migration", () => {
     expect(concurrentlyClaimed.rows).toHaveLength(0);
 
     await db.query(
-      "select complete_wechat_outbound_message($1::uuid, 'outbound-worker', 'temporary')",
+      "select complete_wechat_outbound_message($1::uuid, 'outbound-worker', 'temporary', false)",
       [outboundId]
     );
     await db.query(
@@ -1905,7 +1905,7 @@ describe("Supabase migration", () => {
     );
     expect(retried.rows[0]!.delivery.attempts).toBe(2);
     await db.query(
-      "select complete_wechat_outbound_message($1::uuid, 'outbound-worker', null)",
+      "select complete_wechat_outbound_message($1::uuid, 'outbound-worker', null, false)",
       [outboundId]
     );
     const status = await db.query<{ status: string; attempts: number; completed: boolean }>(
@@ -1920,6 +1920,94 @@ describe("Supabase migration", () => {
       status: "sent",
       attempts: 2,
       completed: true
+    });
+  });
+
+  it("serializes outbound delivery per connection and parks permanent auth failures", async () => {
+    const userId = "72500000-0000-4000-8000-000000000001";
+    await db.query("select ensure_tomeet_user($1::uuid, $2)", [userId, "会话恢复用户"]);
+    const inserted = await db.query<{ id: string }>(`
+      insert into wechat_ilink_connections (
+        user_id, ilink_bot_id, owner_ilink_user_id, bot_token_ciphertext, base_url
+      ) values (
+        $1::uuid,
+        'recovery-bot-1',
+        'recovery-owner-1',
+        repeat('x', 32),
+        'https://ilink.example.com'
+      )
+      returning id
+    `, [userId]);
+    const connectionId = inserted.rows[0]!.id;
+    await db.query(
+      "select append_proactive_agent_message($1::uuid, '候选一', 'recovery-outbound-1')",
+      [userId]
+    );
+    await db.query(
+      "select append_proactive_agent_message($1::uuid, '候选二', 'recovery-outbound-2')",
+      [userId]
+    );
+
+    const claimed = await db.query<{ delivery: { id: string; attempts: number } }>(
+      "select claim_wechat_outbound_messages('recovery-worker', 8) as delivery"
+    );
+    expect(claimed.rows).toHaveLength(1);
+    expect(claimed.rows[0]!.delivery.attempts).toBe(1);
+    const outboundId = claimed.rows[0]!.delivery.id;
+
+    const whileProcessing = await db.query(
+      "select claim_wechat_outbound_messages('other-recovery-worker', 8)"
+    );
+    expect(whileProcessing.rows).toHaveLength(0);
+
+    await db.query(
+      `select complete_wechat_outbound_message(
+        $1::uuid,
+        'recovery-worker',
+        'Stored credential could not be decrypted',
+        true
+      )`,
+      [outboundId]
+    );
+    const parked = await db.query<{
+      connection_status: string;
+      delivery_status: string;
+      attempts: number;
+      lease_released: boolean;
+    }>(`
+      select
+        connection.status as connection_status,
+        delivery.status as delivery_status,
+        delivery.attempts,
+        connection.lease_owner is null and connection.lease_expires_at is null as lease_released
+      from channel_message_deliveries delivery
+      join wechat_ilink_connections connection on connection.id = delivery.connection_id
+      where delivery.id = $1::uuid
+    `, [outboundId]);
+    expect(parked.rows[0]).toEqual({
+      connection_status: "reauth_required",
+      delivery_status: "retry",
+      attempts: 0,
+      lease_released: true
+    });
+    const whileInactive = await db.query(
+      "select claim_wechat_outbound_messages('recovery-worker', 8)"
+    );
+    expect(whileInactive.rows).toHaveLength(0);
+
+    await db.query(
+      `update wechat_ilink_connections
+       set status = 'active', last_error = null
+       where id = $1::uuid`,
+      [connectionId]
+    );
+    const resumed = await db.query<{ delivery: { id: string; attempts: number } }>(
+      "select claim_wechat_outbound_messages('recovery-worker', 8) as delivery"
+    );
+    expect(resumed.rows).toHaveLength(1);
+    expect(resumed.rows[0]!.delivery).toMatchObject({
+      id: outboundId,
+      attempts: 1
     });
   });
 

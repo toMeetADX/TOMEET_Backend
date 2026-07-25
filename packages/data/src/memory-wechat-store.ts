@@ -351,6 +351,7 @@ export class MemoryWechatStore implements WechatConnectionStore {
   async completeWechatOutboundMessage(
     _outboundId: string,
     _workerId: string,
-    _error?: string
+    _error?: string,
+    _reauthRequired?: boolean
   ): Promise<void> {}
 }

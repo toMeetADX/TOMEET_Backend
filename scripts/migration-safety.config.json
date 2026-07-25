@@ -83,6 +83,10 @@
     "20260726150000_wechat_onboarding_welcome_outbox.sql": {
       "sha256": "7cda5ee986a7a56809fb8c0d1b7dc48f3493b6db2fbf2ce43a037208e63915a0",
       "reason": "Extend the existing WeChat outbox with a new-user onboarding delivery kind, recreate its compatibility view and claim/completion RPCs, and keep all task data and execution service-role-only."
+    },
+    "20260726160000_quarantine_invalid_wechat_sessions.sql": {
+      "sha256": "384f81d25078175b769a657c50c278a3ffa02bb921aff456477909d0552088fe",
+      "reason": "Add a rolling-deploy-compatible four-argument WeChat completion RPC overload, serialize claims per connection, and revoke default public execution before granting only service_role."
     }
   }
 }
