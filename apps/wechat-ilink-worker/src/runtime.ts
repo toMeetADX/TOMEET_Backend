@@ -650,11 +650,10 @@ export async function handleWechatMessage(
   if (!started) return false;
 
   try {
-    // iLink needs this first contextual message to open the bot conversation. The activation
-    // callback may already have delivered the welcome, but the handshake still must not reach
-    // the Agent as user-authored content.
-    const isOpeningTrigger = Boolean(message.context_token)
-      && (openingTrigger ?? !connection.lastMessageAt);
+    // The first accepted inbound message is the earliest confirmably writable point. It must
+    // claim onboarding before any visible "你好" or other opener can reach the Agent as
+    // user-authored content, even when iLink omitted a context token.
+    const isOpeningTrigger = openingTrigger ?? !connection.lastMessageAt;
     if (isOpeningTrigger) {
       // Cursor reset happens both for a brand-new identity and for reauthorization of
       // an existing one. Historical connections still need their iLink opener consumed,
@@ -821,11 +820,11 @@ export async function monitorWechatConnection(
     let cursor = connection.syncCursor;
     let nextLongPollTimeoutMs = WECHAT_LONG_POLL_DEFAULT_TIMEOUT_MS;
     let consecutiveTransportTimeouts = 0;
-    // Activating or reactivating an iLink connection resets its cursor. The first new inbound
-    // message after that reset opens the conversation and must not be sent to the Agent. For a
-    // historical identity it is consumed silently; only a genuinely new conversation can start
-    // onboarding.
-    let openingTriggerPending = cursor.length === 0;
+    // Activating or reactivating an iLink connection resets its cursor. A new identity can also
+    // persist a non-empty polling cursor before the user says anything, so `lastMessageAt` is the
+    // durable signal that its first inbound still has to claim onboarding. Historical identities
+    // consume the reconnect opener silently instead of replaying the welcome.
+    let openingTriggerPending = cursor.length === 0 || !connection.lastMessageAt;
     while (!signal.aborted) {
       const renewed = await dependencies.store.renewWechatConnectionLease(
         connection.id,
@@ -893,7 +892,7 @@ export async function monitorWechatConnection(
             botToken,
             inbound,
             turnBatcher,
-            openingTriggerPending && Boolean(inbound.context_token)
+            openingTriggerPending
           );
           if (currentHandled && openingTriggerPending) openingTriggerPending = false;
           handled = currentHandled || handled;
