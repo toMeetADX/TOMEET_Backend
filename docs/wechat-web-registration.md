@@ -10,7 +10,7 @@ The activation welcome appends three bubbles:
 ```text
 想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！
 
-这是你微信里的同一个 TOMEET 账号，注册只会添加网页登录方式，聊天、画像和匹配都会保留
+这是微信里的同一个 TOMEET 账号，网页只用于注册和加好友；Agent 对话和发起匹配仍在微信
 
 点这里为当前账号添加网页登录：https://tomeet.chat/register#claim=<one-time-token>
 ```
@@ -51,7 +51,8 @@ Use this primary explanation above the choices:
 
 ```text
 这是你微信里的同一个 TOMEET 账号
-注册只是增加一种网页登录方式，不会新建账号；聊天记录、个人画像和正在进行的匹配都会保留
+网页用于账号资料、线下加好友和必吃榜；Agent 对话和发起匹配仍在微信
+注册不会新建第二个用户，也不会重置微信里的画像或正在进行的匹配
 ```
 
 ### Email and password
@@ -86,19 +87,21 @@ verified.
 await supabase.auth.linkIdentity({
   provider: "google",
   options: {
-    redirectTo: `${window.location.origin}/api/auth/callback?next=/agent`
+    redirectTo: `${window.location.origin}/api/auth/callback?next=/`
   }
 });
 ```
 
 Supabase manual identity linking must be enabled. After the OAuth callback,
-update `registration_status` and redirect to the Agent page.
+update `registration_status` and redirect to the Web social home page.
 
 ## UX and conflict rules
 
 - The page title is `为微信里的 TOMEET 添加网页登录`, not `创建另一个账号`.
 - Explain that registration upgrades the existing WeChat user and keeps its
   conversation, profile, active match request, room, and matching history.
+- Do not show Agent chat, start-match buttons, matching options, or matching
+  controls on Web. Those product flows remain WeChat-only.
 - The claim response includes `accountContinuity.mode=upgrade_existing_wechat_user`
   and `preserves=[conversation,profile,matching]`; render this as user-facing copy,
   not as technical account IDs.

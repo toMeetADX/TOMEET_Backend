@@ -50,9 +50,6 @@ async function setup(
   const verifyAccessToken = vi.fn(async (accessToken: string) => {
     const userId = integration?.userByToken?.[accessToken];
     if (userId) return userId;
-    if (integration?.webRegistration && accessToken === "anonymous-access-token") {
-      return provisionedUserId;
-    }
     throw new Error("WeChat route unexpectedly required a bearer token");
   });
   const inlineProcessor = integration?.processJobsInline
@@ -160,13 +157,16 @@ describe("WeChat one-time QR onboarding", () => {
     expect(texts.slice(0, 4)).toEqual(adventurexWelcomeBubbles.zh);
     expect(texts[4]).toBe("想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！");
     expect(texts[5]).toBe(
-      "这是你微信里的同一个 TOMEET 账号，注册只会添加网页登录方式，聊天、画像和匹配都会保留"
+      "这是微信里的同一个 TOMEET 账号，网页只用于注册和加好友；Agent 对话和发起匹配仍在微信"
     );
     expect(texts[6]).toMatch(
       /^点这里为当前账号添加网页登录：https:\/\/tomeet\.chat\/register#claim=[A-Za-z0-9_-]{43}$/u
     );
     const token = texts[6]?.match(/#claim=([A-Za-z0-9_-]{43})$/u)?.[1];
     expect(token).toEqual(expect.any(String));
+    const existingWechatMatch = await store.createMatchRequest(provisionedUserId, {
+      rawText: "在微信里开始匹配"
+    });
 
     const claim = await app.inject({
       method: "POST",
@@ -188,22 +188,8 @@ describe("WeChat one-time QR onboarding", () => {
         preserves: ["conversation", "profile", "matching"]
       }
     });
-
-    const webMatch = await app.inject({
-      method: "POST",
-      url: "/match-requests",
-      headers: { authorization: "Bearer anonymous-access-token" },
-      payload: {
-        userId: provisionedUserId,
-        intent: { rawText: "想在网页继续微信里的匹配" }
-      }
-    });
-    expect(webMatch.statusCode).toBe(202);
-    expect(webMatch.json().matchRequest).toMatchObject({ userId: provisionedUserId });
-    const wechatMatch = await store.createMatchRequest(provisionedUserId, {
-      rawText: "从微信继续匹配"
-    });
-    expect(wechatMatch.requestId).toBe(webMatch.json().matchRequest.requestId);
+    expect(await store.getLatestMatchRequestForUser(provisionedUserId))
+      .toEqual(existingWechatMatch);
 
     const repeated = await app.inject({
       method: "POST",

@@ -329,7 +329,7 @@ export async function buildApp(options: BuildAppOptions) {
           runId: `activation-welcome-${userId}-web-register-intro`
         });
         await deliverText({
-          text: "这是你微信里的同一个 TOMEET 账号，注册只会添加网页登录方式，聊天、画像和匹配都会保留",
+          text: "这是微信里的同一个 TOMEET 账号，网页只用于注册和加好友；Agent 对话和发起匹配仍在微信",
           runId: `activation-welcome-${userId}-web-register-continuity`
         });
         await deliverText({
