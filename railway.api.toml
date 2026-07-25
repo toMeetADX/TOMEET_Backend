@@ -1,6 +1,15 @@
 [build]
 builder = "NIXPACKS"
 buildCommand = "corepack pnpm install --frozen-lockfile && corepack pnpm --filter @tomeet/api... typecheck"
+watchPatterns = [
+  "/apps/api/**",
+  "/packages/**",
+  "/package.json",
+  "/pnpm-lock.yaml",
+  "/pnpm-workspace.yaml",
+  "/tsconfig.base.json",
+  "/railway.api.toml",
+]
 
 [deploy]
 startCommand = "corepack pnpm --filter @tomeet/api start"
