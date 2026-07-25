@@ -653,7 +653,9 @@ export async function handleWechatMessage(
     // The first accepted inbound message is the earliest confirmably writable point. It must
     // claim onboarding before any visible "你好" or other opener can reach the Agent as
     // user-authored content, even when iLink omitted a context token.
-    const isOpeningTrigger = openingTrigger ?? !connection.lastMessageAt;
+    const isOpeningTrigger = openingTrigger ?? (
+      Boolean(message.context_token) && !connection.lastMessageAt
+    );
     if (isOpeningTrigger) {
       // Cursor reset happens both for a brand-new identity and for reauthorization of
       // an existing one. Historical connections still need their iLink opener consumed,

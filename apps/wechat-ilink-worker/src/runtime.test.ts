@@ -35,11 +35,11 @@ function connection(cipher: CredentialCipher): WechatConnection {
       "wechat-connection:wechat-owner-1"
     ),
     baseUrl: "https://ilink.example.com",
-    syncCursor: "",
+    syncCursor: "cursor-existing",
     status: "active",
     leaseOwner: "worker-1",
     leaseExpiresAt: now,
-    lastMessageAt: null,
+    lastMessageAt: now,
     lastError: null,
     failureCount: 0,
     createdAt: now,
@@ -366,6 +366,7 @@ describe("WeChat worker runtime", () => {
   it("consumes the first inbound trigger when activation already delivered the welcome", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = null;
 
     await expect(handleWechatMessage(
       runtime.dependencies,
@@ -393,21 +394,28 @@ describe("WeChat worker runtime", () => {
     expect(activeConnection.lastMessageAt).not.toBeNull();
   });
 
-  it("consumes the opening trigger after sending the onboarding welcome", async () => {
+  it("sends onboarding before a first visible hello even without a context token", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = null;
     runtime.tomeet.startOnboarding.mockResolvedValue({
       deliveryId: "welcome-45",
       bubbles: [...adventurexWelcomeBubbles.zh]
     });
 
-    await handleWechatMessage(runtime.dependencies, activeConnection, "bot-secret", {
-      message_id: 45,
-      message_type: 1,
-      from_user_id: activeConnection.ownerIlinkUserId,
-      context_token: "context-first",
-      item_list: [{ type: 1, text_item: { text: "开始" } }]
-    });
+    await handleWechatMessage(
+      runtime.dependencies,
+      activeConnection,
+      "bot-secret",
+      {
+        message_id: 45,
+        message_type: 1,
+        from_user_id: activeConnection.ownerIlinkUserId,
+        item_list: [{ type: 1, text_item: { text: "你好" } }]
+      },
+      undefined,
+      true
+    );
 
     expect(runtime.tomeet.startOnboarding).toHaveBeenCalledTimes(1);
     expect(runtime.tomeet.markOnboardingWelcomeDelivered).toHaveBeenCalledWith({
@@ -459,9 +467,51 @@ describe("WeChat worker runtime", () => {
     ]);
   });
 
+  it("still claims onboarding after an empty poll cursor was persisted before first hello", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = null;
+    activeConnection.syncCursor = "cursor-from-empty-poll";
+    runtime.tomeet.startOnboarding.mockResolvedValue({
+      deliveryId: "welcome-after-restart",
+      bubbles: [...adventurexWelcomeBubbles.zh]
+    });
+    runtime.ilink.getUpdates.mockResolvedValueOnce({
+      ret: 0,
+      get_updates_buf: "cursor-after-first-hello",
+      msgs: [{
+        message_id: 49,
+        message_type: 1,
+        from_user_id: activeConnection.ownerIlinkUserId,
+        item_list: [{ type: 1, text_item: { text: "你好" } }]
+      }]
+    });
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: new AbortController().signal,
+      turnBatchWindowMs: 0
+    });
+
+    expect(runtime.tomeet.startOnboarding).toHaveBeenCalledWith({
+      userId: activeConnection.userId
+    });
+    expect(runtime.tomeet.sendTextBatch).not.toHaveBeenCalled();
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+      ...adventurexWelcomeBubbles.zh
+    ]);
+    expect(runtime.tomeet.markOnboardingWelcomeDelivered).toHaveBeenCalledWith({
+      userId: activeConnection.userId
+    });
+  });
+
   it("retries an unmarked welcome with the same provider idempotency ids", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = null;
     runtime.tomeet.startOnboarding.mockResolvedValue({
       deliveryId: "welcome-retry",
       bubbles: [...adventurexWelcomeBubbles.zh]
@@ -638,6 +688,7 @@ describe("WeChat worker runtime", () => {
   it("re-analyzes an active image batch together with all newer messages", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = new Date().toISOString();
     let markImageStarted!: () => void;
     const imageStarted = new Promise<void>((resolve) => {
       markImageStarted = resolve;
@@ -737,6 +788,7 @@ describe("WeChat worker runtime", () => {
   it("groups consecutive text bubbles into one Agent turn", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = new Date().toISOString();
     runtime.ilink.getUpdates.mockResolvedValueOnce({
       ret: 0,
       get_updates_buf: "cursor-text",
@@ -961,6 +1013,7 @@ describe("WeChat worker runtime", () => {
   it("never folds a failed batch into the next one and apologizes once per turn", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = new Date().toISOString();
     runtime.store.updateWechatConnectionCursor.mockResolvedValue(true);
     runtime.tomeet.sendTextBatch.mockRejectedValue(new Error("agent_job_failed"));
     let markApologyStarted!: () => void;
@@ -1033,6 +1086,7 @@ describe("WeChat worker runtime", () => {
   it("delivers a superseding batch even when the batch before it failed", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = new Date().toISOString();
     runtime.store.updateWechatConnectionCursor.mockResolvedValue(true);
     let markFirstStarted!: () => void;
     const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
