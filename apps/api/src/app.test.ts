@@ -434,6 +434,57 @@ describe("TOMEET core flow", () => {
       .toHaveLength(1);
   });
 
+  it("persists each superseded WeChat source message only once", async () => {
+    const store = new MemoryStore();
+    const processor = new JobProcessor(store, new MockAgentIntelligence(), new MockMatchmakingIntelligence());
+    const internalApiToken = "stable-wechat-turn-token-at-least-32-characters";
+    const app = await buildApp({ store, inlineProcessor: processor, internalApiToken });
+    apps.push(app);
+    const userId = randomUUID();
+    const connectionId = randomUUID();
+    const firstMessageKey = randomUUID();
+    const secondMessageKey = randomUUID();
+
+    for (const [index, generation] of [randomUUID(), randomUUID()].entries()) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/internal/agent/response-generations",
+        headers: { "x-tomeet-internal-token": internalApiToken },
+        payload: { connectionId, generationToken: generation }
+      });
+      expect(response.statusCode).toBe(204);
+
+      const messages = [
+        { messageId: "wechat-1", content: "第一条原话", idempotencyKey: firstMessageKey }
+      ];
+      if (index === 1) {
+        messages.push({ messageId: "wechat-2", content: "第二条原话", idempotencyKey: secondMessageKey });
+      }
+      const turn = await app.inject({
+        method: "POST",
+        url: "/internal/agent/messages",
+        headers: { "x-tomeet-internal-token": internalApiToken },
+        payload: {
+          userId,
+          displayName: "微信用户",
+          content: messages.map((message, index) => `${index + 1}. ${message.content}`).join("\n"),
+          idempotencyKey: randomUUID(),
+          connectionId,
+          generationToken: generation,
+          messages
+        }
+      });
+      expect(turn.statusCode).toBe(200);
+    }
+
+    const userMessages = (await store.listRecentMessages(userId, 20))
+      .filter((message) => message.role === "user");
+    expect(userMessages.map((message) => message.content)).toEqual([
+      "第一条原话",
+      "第二条原话"
+    ]);
+  });
+
   it("auto-provisions deterministic channel users only when explicitly enabled", async () => {
     const store = new MemoryStore();
     const processor = new JobProcessor(store, new MockAgentIntelligence(), new MockMatchmakingIntelligence());

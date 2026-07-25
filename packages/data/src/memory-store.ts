@@ -134,6 +134,7 @@ export class MemoryStore implements DataStore {
       preferredLanguage: "zh",
       boundaryPromptedAt: null,
       welcomeSentAt: null,
+      welcomeDeliveredAt: null,
       createdAt: now,
       updatedAt: now
     };
@@ -236,6 +237,17 @@ export class MemoryStore implements DataStore {
     state.welcomeSentAt = now;
     state.updatedAt = now;
     return message;
+  }
+
+  async markAdventurexWelcomeDelivered(userId: string): Promise<AdventurexOnboardingState> {
+    await this.ensureUser(userId);
+    const state = this.onboardingStates.get(userId)!;
+    const now = new Date().toISOString();
+    state.welcomeDeliveredAt ??= now;
+    state.welcomeSentAt ??= now;
+    if (state.stage === "new") state.stage = "awaiting_image_or_text";
+    state.updatedAt = now;
+    return structuredClone(state);
   }
 
   async updateAdventurexOnboardingState(
@@ -890,7 +902,7 @@ export class MemoryStore implements DataStore {
           candidateRequestIds: [...proposal.candidateRequestIds],
           rationale: proposal.rationale,
           createdAt: new Date().toISOString(),
-          expiresAt: input.offerExpiresAt
+          expiresAt: input.offerExpiresAt ?? new Date(Date.now() + 10 * 60_000).toISOString()
         });
         this.draftTempKeys.set(`${input.roundId}:${proposal.tempDraftId}`, draftId);
       }
@@ -940,6 +952,48 @@ export class MemoryStore implements DataStore {
     return saved;
   }
 
+  async activateMatchOfferWindow(
+    requestId: string,
+    roundId: string,
+    windowSeconds: number
+  ): Promise<MatchRequest> {
+    const request = this.matchRequests.get(requestId);
+    if (
+      !request
+      || request.status !== "matching"
+      || request.activeRoundId !== roundId
+      || request.phase !== "offered"
+    ) {
+      throw new StoreConflictError("候选当前不能开始选择计时");
+    }
+    if (!Number.isInteger(windowSeconds) || windowSeconds < 10 || windowSeconds > 600) {
+      throw new StoreConflictError("候选选择窗口必须在 10-600 秒之间");
+    }
+    const expiresAt = new Date(Date.now() + windowSeconds * 1_000).toISOString();
+    request.optionsExpiresAt = expiresAt;
+    request.updatedAt = new Date().toISOString();
+    const round = this.rounds.get(roundId);
+    if (round) {
+      round.offerExpiresAt = !round.offerExpiresAt || round.offerExpiresAt < expiresAt
+        ? expiresAt
+        : round.offerExpiresAt;
+      round.updatedAt = request.updatedAt;
+    }
+    for (const draft of this.drafts.values()) {
+      if (draft.roundId === roundId && draft.status === "collecting" && draft.expiresAt < expiresAt) {
+        draft.expiresAt = expiresAt;
+      }
+    }
+    await this.enqueueJob({
+      type: "match_round_settle",
+      payload: { roundId },
+      idempotencyKey: `match-round-settle:${roundId}:${Math.floor(new Date(expiresAt).getTime() / 1_000)}`,
+      partitionKey: `match-round:${roundId}`,
+      runAt: expiresAt
+    });
+    return structuredClone(request);
+  }
+
   async listCurrentMatchOptions(userId: string): Promise<MatchOptionContext | null> {
     const request = [...this.matchRequests.values()]
       .filter((item) => item.userId === userId && item.status === "matching" && ["offered", "selected"].includes(item.phase))
@@ -968,8 +1022,8 @@ export class MemoryStore implements DataStore {
   async saveMatchChoices(requestId: string, input: SaveMatchChoicesInput): Promise<MatchChoice[]> {
     const request = this.matchRequests.get(requestId);
     if (!request || request.status !== "matching" || !request.activeRoundId) throw new StoreConflictError("匹配请求当前不能选择");
-    if (request.optionsExpiresAt && new Date(request.optionsExpiresAt).getTime() <= Date.now()) {
-      throw new StoreConflictError("候选已过期");
+    if (!request.optionsExpiresAt || new Date(request.optionsExpiresAt).getTime() <= Date.now()) {
+      throw new StoreConflictError("候选尚未送达或已过期");
     }
     const acceptedNumbers = [...new Set(input.acceptedOptionNumbers)];
     const currentOffers = [...this.offers.values()].filter(
@@ -981,6 +1035,13 @@ export class MemoryStore implements DataStore {
     if (input.requiredHookIds.some((hookId) => !allowedRequiredHooks.has(hookId))) {
       throw new StoreConflictError("required hook 必须来自已接受候选");
     }
+    const previousDraftIds = new Set([...this.choices.values()]
+      .filter((choice) =>
+        choice.requestId === requestId
+        && choice.roundId === request.activeRoundId
+        && choice.draftId
+      )
+      .map((choice) => choice.draftId!));
     for (const [choiceId, choice] of this.choices) {
       if (choice.requestId === requestId && choice.roundId === request.activeRoundId) this.choices.delete(choiceId);
     }
@@ -1010,6 +1071,28 @@ export class MemoryStore implements DataStore {
     }
     request.phase = "selected";
     request.updatedAt = now;
+    for (const choice of saved.filter((item) => item.draftId && !previousDraftIds.has(item.draftId))) {
+      const draft = this.drafts.get(choice.draftId!);
+      if (!draft || draft.status !== "collecting") continue;
+      draft.version += 1;
+      const eventId = randomUUID();
+      const payload = { joinedUserId: request.userId };
+      const acceptedUserIds = [...this.choices.values()]
+        .filter((item) => item.draftId === choice.draftId && item.requestId !== requestId)
+        .map((item) => this.matchRequests.get(item.requestId)?.userId)
+        .filter((userId): userId is string => Boolean(userId));
+      for (const userId of new Set(acceptedUserIds)) {
+        const notification: DraftChangeNotification = {
+          eventId,
+          draftId: choice.draftId!,
+          userId,
+          changeType: "confirmed_member_joined",
+          payload,
+          idempotencyKey: `draft-change:${eventId}:${userId}`
+        };
+        this.draftNotifications.set(`${eventId}:${userId}`, notification);
+      }
+    }
     return saved;
   }
 
@@ -1579,8 +1662,9 @@ export class MemoryStore implements DataStore {
     }
     const request = [...this.matchRequests.values()].find((item) => item.roomId === roomId && item.userId === userId);
     if (request) {
-      request.status = request.proactivePushEnabled ? "matching" : "cancelled";
-      request.phase = request.proactivePushEnabled ? "watching" : "waiting";
+      request.status = "cancelled";
+      request.phase = "waiting";
+      request.proactivePushEnabled = false;
       request.roomId = null;
       request.activeRoundId = null;
       request.optionsExpiresAt = null;
@@ -1714,6 +1798,12 @@ export class MemoryStore implements DataStore {
       throw new StoreConflictError("Web 对话消息不能投递到微信");
     }
     this.wechatOutboundMessages.set(message.id, structuredClone(message));
+    if (message.id.startsWith("match-options:")) {
+      const [, roundId, requestId] = message.id.split(":");
+      if (roundId && requestId) {
+        await this.activateMatchOfferWindow(requestId, roundId, 90);
+      }
+    }
   }
 
   async enqueueJob(input: EnqueueJobInput): Promise<LlmJob> {

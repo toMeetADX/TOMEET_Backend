@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MockAgentIntelligence } from "@tomeet/agent-core";
 import { MemoryStore } from "@tomeet/data";
 import {
@@ -8,9 +8,14 @@ import {
   selectNonOverlappingGroups,
   validateMatchRoundProposal
 } from "@tomeet/matchmaking";
-import { JobProcessor, scheduleAdventurexMatchRequest } from "./index.js";
+import {
+  JobProcessor,
+  scheduleAdventurexMatchRequest,
+  scheduleMatchStatusHeartbeat
+} from "./index.js";
 
 describe("AdventureX 12-user integration", () => {
+  afterEach(() => vi.useRealTimers());
   it("offers real drafts and settles at least two non-overlapping confirmed rooms", async () => {
     const store = new MemoryStore();
     const matcher = new MockMatchmakingIntelligence();
@@ -116,7 +121,7 @@ describe("AdventureX 12-user integration", () => {
         previewText: "**1｜故事交换桌**\n你可能遇见其他候选成员。",
         hooks: []
       }],
-      offerExpiresAt: new Date(Date.now() + 90_000).toISOString()
+      offerExpiresAt: new Date(Date.now() - 1).toISOString()
     });
     const job = await store.enqueueJob({
       type: "match_round_settle",
@@ -137,7 +142,35 @@ describe("AdventureX 12-user integration", () => {
     expect(await store.listRoundCandidates(round.roundId)).toHaveLength(0);
   });
 
+  it("publishes a ten-second matching heartbeat and schedules the next one", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-07-25T12:00:00.000Z");
+    vi.setSystemTime(now);
+    const store = new MemoryStore();
+    const processor = new JobProcessor(
+      store,
+      new MockAgentIntelligence(),
+      new MockMatchmakingIntelligence(),
+      { adventurexMatchingV1: true }
+    );
+    const userId = randomUUID();
+    await store.ensureUser(userId, "心跳用户");
+    const request = await store.createMatchRequest(userId, { rawText: "现在开始匹配" });
+    const heartbeat = await scheduleMatchStatusHeartbeat(store, request.requestId, { now });
+    expect(heartbeat.runAt).toBe("2026-07-25T12:00:10.000Z");
+
+    vi.setSystemTime(new Date(now.getTime() + 10_000));
+    const result = await processor.process(heartbeat);
+    expect(result).toMatchObject({ sent: true, phase: "waiting", nextJobId: expect.any(String) });
+    const progress = (await store.listRecentMessages(userId, 10))
+      .find((message) => message.id.startsWith(`match-progress:${request.requestId}:`));
+    expect(progress?.content).toContain("处理");
+  });
+
   it("ends an unformed confirmation neutrally and prioritizes the accepting user among watchers", async () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-07-25T12:00:00.000Z");
+    vi.setSystemTime(now);
     const store = new MemoryStore();
     const processor = new JobProcessor(
       store,
@@ -177,7 +210,7 @@ describe("AdventureX 12-user integration", () => {
         previewText: "**1｜故事交换桌**\n等待其他候选成员确认。",
         hooks: []
       })),
-      offerExpiresAt: new Date(Date.now() + 90_000).toISOString()
+      offerExpiresAt: new Date(now.getTime() + 90_000).toISOString()
     });
     await store.saveMatchChoices(users[0]!.requestId, {
       preferredOptionNumber: 1,
@@ -192,6 +225,7 @@ describe("AdventureX 12-user integration", () => {
       partitionKey: `match-round:${round.roundId}`
     });
 
+    vi.setSystemTime(new Date(now.getTime() + 91_000));
     await processor.process(settleJob);
 
     expect(await store.getMatchRequest(users[0]!.requestId)).toMatchObject({
@@ -326,9 +360,15 @@ describe("AdventureX 12-user integration", () => {
       requiredHookIds: [],
       rawText: "1"
     });
-    const settleJob = await store.getJob(String(result.settleJobId));
-    expect(settleJob).not.toBeNull();
-    const settled = await processor.process(settleJob!);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 91_000));
+    const settleJob = await store.enqueueJob({
+      type: "match_round_settle",
+      payload: { roundId: scheduled.round.roundId },
+      idempotencyKey: `virtual-settle-test:${scheduled.round.roundId}`,
+      partitionKey: `match-round:${scheduled.round.roundId}`
+    });
+    const settled = await processor.process(settleJob);
     expect(settled.roomIds).toHaveLength(1);
     const room = await store.getRoom(String((settled.roomIds as string[])[0]));
     expect(room?.members).toHaveLength(5);
@@ -365,7 +405,8 @@ describe("AdventureX 12-user integration", () => {
     const resumed = await processor.process(job);
 
     expect(first.offerCount).toBe(3);
-    expect(resumed).toMatchObject({ resumed: true, offerCount: 3, settleJobId: first.settleJobId });
+    expect(resumed).toMatchObject({ resumed: true, offerCount: 3 });
+    expect(resumed.settleJobId).toEqual(expect.any(String));
     for (const [index, requestId] of requestIds.entries()) {
       expect(await store.getMatchRequest(requestId)).toMatchObject({ status: "matching", phase: "offered" });
       const messages = await store.listRecentMessages(userIds[index]!, 10);

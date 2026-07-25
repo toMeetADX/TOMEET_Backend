@@ -502,6 +502,7 @@ export class MockAgentIntelligence implements AgentIntelligence {
       match_confirmation_incomplete: "这次候选没有完成成局确认。你的选择已经收到；如果你愿意，有新的合适安排时我可以主动告诉你。",
       room_intro: "成局信息已经准备好。",
       match_expired: "这次匹配已经超时并结束了。如果还想再匹配，告诉我就行。",
+      match_progress: "我还在处理这次匹配，会继续主动同步进展。",
       room_change: "当前活动的信息发生了变化，我把最新情况同步给你。",
       draft_change: "你看过的候选发生了变化，我会按最新情况重新说明。",
       unsupported_channel_message: "这条消息目前无法读取，你可以换一种方式告诉我。",

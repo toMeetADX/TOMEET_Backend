@@ -122,7 +122,27 @@ export async function scheduleAdventurexMatchRequest(
     partitionKey: `match-round:${round.roundId}`,
     runAt: scheduledAt
   });
+  if (request.intentSnapshot.virtualTestUser !== true) {
+    await scheduleMatchStatusHeartbeat(store, request.requestId, { now: options.now });
+  }
   return { round, job };
+}
+
+export async function scheduleMatchStatusHeartbeat(
+  store: DataStore,
+  requestId: string,
+  options: { now?: Date; intervalSeconds?: number } = {}
+): Promise<LlmJob> {
+  const intervalSeconds = options.intervalSeconds ?? 10;
+  const runAt = new Date((options.now?.getTime() ?? Date.now()) + intervalSeconds * 1_000);
+  const bucket = Math.floor(runAt.getTime() / 1_000);
+  return store.enqueueJob({
+    type: "match_status_notify",
+    payload: { requestId, intervalSeconds },
+    idempotencyKey: `match-status:${requestId}:${bucket}`,
+    partitionKey: `user-match-status:${requestId}`,
+    runAt: runAt.toISOString()
+  });
 }
 
 export async function scheduleAdventurexClearingTick(
@@ -173,6 +193,8 @@ export class JobProcessor {
           return await this.processMatchRoundGenerate(job);
         case "match_round_settle":
           return await this.processMatchRoundSettle(job);
+        case "match_status_notify":
+          return await this.processMatchStatusNotify(job);
         case "room_change_notify":
           return await this.processRoomChangeNotify();
         case "feedback_update":
@@ -245,6 +267,44 @@ export class JobProcessor {
       roundBucketSeconds: this.options.roundBucketSeconds
     });
     return { roundId: scheduled.round.roundId, jobId: scheduled.job.id };
+  }
+
+  private async processMatchStatusNotify(job: LlmJob): Promise<Record<string, unknown>> {
+    const requestId = requireString(job.payload, "requestId");
+    const request = await this.store.getMatchRequest(requestId);
+    if (
+      !request
+      || request.status !== "matching"
+      || !["waiting", "selected", "settling"].includes(request.phase)
+    ) {
+      return {
+        sent: false,
+        stopped: true,
+        phase: request?.phase ?? null,
+        status: request?.status ?? null
+      };
+    }
+    if (request.intentSnapshot.virtualTestUser === true) {
+      return { sent: false, stopped: true, virtualTestUser: true };
+    }
+    await this.appendProactiveProductMessage({
+      userId: request.userId,
+      event: {
+        kind: "match_progress",
+        facts: {
+          phase: request.phase,
+          matchingStartedAt: request.createdAt,
+          hasActiveRound: Boolean(request.activeRoundId),
+          userActionRequired: false
+        }
+      },
+      idempotencyKey: `match-progress:${request.requestId}:${Math.floor(Date.now() / 1_000)}`
+    });
+    const intervalSeconds = typeof job.payload.intervalSeconds === "number"
+      ? Math.min(Math.max(Math.floor(job.payload.intervalSeconds), 5), 60)
+      : 10;
+    const next = await scheduleMatchStatusHeartbeat(this.store, requestId, { intervalSeconds });
+    return { sent: true, phase: request.phase, nextJobId: next.id };
   }
 
   private async buildProductContext(userId: string) {
@@ -609,6 +669,9 @@ export class JobProcessor {
               idempotencyKey: `match:${matchRequest.requestId}`,
               partitionKey: `user:${userId}`
             }).then((queued) => ({ roundId: null, jobId: queued.id }));
+        if (!this.adventurexMatchingV1 && matchRequest.intentSnapshot.virtualTestUser !== true) {
+          await scheduleMatchStatusHeartbeat(this.store, matchRequest.requestId);
+        }
         if (this.adventurexMatchingV1) {
           await this.store.updateAdventurexOnboardingState(userId, { stage: "matching" });
         }
@@ -722,7 +785,19 @@ export class JobProcessor {
             replyOverride: intro
           };
         }
-        return { result: { choices }, matchRequest: await this.store.getMatchRequest(currentMatchRequest.requestId), room: currentRoom };
+        const notifyJob = choices.some((choice) => choice.draftId)
+          ? await this.store.enqueueJob({
+              type: "room_change_notify",
+              payload: { roundId: currentMatchRequest.activeRoundId },
+              idempotencyKey: `draft-change-notify:${currentMatchRequest.requestId}:${currentMatchRequest.updatedAt}`,
+              partitionKey: `match-round:${currentMatchRequest.activeRoundId}`
+            })
+          : null;
+        return {
+          result: { choices, jobId: notifyJob?.id ?? null },
+          matchRequest: await this.store.getMatchRequest(currentMatchRequest.requestId),
+          room: currentRoom
+        };
       }
       case "refresh_match_options": {
         if (!this.adventurexMatchingV1) {
@@ -1003,9 +1078,13 @@ export class JobProcessor {
         ? understanding.summary
         : "";
     if (kind === "image") {
+      const userMessageId = typeof job.payload.userMessageId === "string"
+        ? job.payload.userMessageId
+        : undefined;
       const turn = await this.runAgentTurn(job, {
         userId,
         userContent: describeImageObservation(understanding, storagePaths.length, hint),
+        userMessageId,
         replyIdempotencyKey: `multimodal-reply:${job.id}`,
         memorySource: memoryContent
           ? { sourceType: "multimodal", sourceId: inputIds[0]!, content: memoryContent }
@@ -1532,12 +1611,11 @@ export class JobProcessor {
       }
       optionMessages.set(requestId, composed.content);
     }));
-    const offerExpiresAt = new Date(Date.now() + (this.options.offerWindowSeconds ?? 90) * 1_000).toISOString();
     const offers = await this.store.saveRoundProposals({
       roundId,
       proposal,
       offers: preparedOffers,
-      offerExpiresAt
+      offerExpiresAt: null
     });
     if (offers.length === 0) {
       const stillActive = activeEntrants.filter((candidate) => !noOfferEntrants.some(
@@ -1575,6 +1653,11 @@ export class JobProcessor {
       const content = optionMessages.get(requestId);
       if (!content) throw new Error("候选消息没有完成个性化生成");
       if (candidate.request.intentSnapshot.virtualTestUser === true) {
+        await this.store.activateMatchOfferWindow(
+          requestId,
+          roundId,
+          this.options.offerWindowSeconds ?? 90
+        );
         const requestOffers = offersByRequest.get(requestId) ?? [];
         const optionNumbers = requestOffers
           .map((offer) => offer.optionNumber)
@@ -1597,20 +1680,13 @@ export class JobProcessor {
       });
     }));
     await notifyUnavailable(noOfferEntrants, unavailableCause, "partial");
-    const settleJob = await this.store.enqueueJob({
-      type: "match_round_settle",
-      payload: { roundId },
-      idempotencyKey: `match-round-settle:${roundId}`,
-      partitionKey: `match-round:${roundId}`,
-      runAt: offerExpiresAt
-    });
     return {
       roundId,
       candidateCount: candidates.length,
       draftCount: proposal?.drafts.length ?? 0,
       offerCount: offers.length,
       unavailableCount: noOfferEntrants.length,
-      settleJobId: settleJob.id
+      settleJobId: null
     };
   }
 
@@ -1620,6 +1696,22 @@ export class JobProcessor {
       this.store.getRoundSettlementState(roundId),
       this.store.listOfflineGames()
     ]);
+    const latestOfferExpiry = state.requests
+      .filter((request) => request.status === "matching" && request.activeRoundId === roundId)
+      .map((request) => request.optionsExpiresAt)
+      .filter((value): value is string => Boolean(value))
+      .sort()
+      .at(-1);
+    if (latestOfferExpiry && new Date(latestOfferExpiry).getTime() > Date.now()) {
+      const deferred = await this.store.enqueueJob({
+        type: "match_round_settle",
+        payload: { roundId },
+        idempotencyKey: `match-round-settle:${roundId}:${Math.floor(new Date(latestOfferExpiry).getTime() / 1_000)}`,
+        partitionKey: `match-round:${roundId}`,
+        runAt: latestOfferExpiry
+      });
+      return { roundId, deferred: true, runAt: latestOfferExpiry, jobId: deferred.id };
+    }
     const candidateByRequest = new Map<string, MatchCandidate>();
     await Promise.all(state.requests.map(async (request) => {
       const [userModel, socialHooks, profile] = await Promise.all([

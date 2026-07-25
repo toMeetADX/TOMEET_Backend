@@ -278,6 +278,8 @@ export async function buildApp(options: BuildAppOptions) {
       const { language } = z.object({
         language: adventurexLanguageSchema.default("zh")
       }).parse(request.body ?? {});
+      const state = await options.store.ensureAdventurexOnboardingState(userId);
+      if (state.welcomeDeliveredAt) return { message: null };
       const message = await options.store.startAdventurexOnboarding(userId, language);
       return { message };
     }
@@ -292,12 +294,30 @@ export async function buildApp(options: BuildAppOptions) {
     isNewWechatIdentity: async (externalUserId) => (
       (await options.store.resolveChannelIdentity("wechat", externalUserId)) === null
     ),
-    onActivated: async ({ userId }) => {
+    onActivated: async ({ userId, deliverText }) => {
       const onboardingState = await options.store.ensureAdventurexOnboardingState(userId);
-      if (onboardingState.welcomeSentAt) return;
-      await options.store.startAdventurexOnboarding(userId, "zh");
+      if (onboardingState.welcomeDeliveredAt) return;
+      const message = await options.store.startAdventurexOnboarding(userId, "zh");
+      if (!message || !deliverText) return;
+      const bubbles = message.content.split(/\n\s*\n+/u).filter(Boolean);
+      for (const [index, text] of bubbles.entries()) {
+        await deliverText({ text, runId: `activation-welcome-${userId}-${index + 1}` });
+      }
+      await options.store.markAdventurexWelcomeDelivered(userId);
     }
   });
+
+  app.post(
+    "/internal/users/:userId/adventurex-onboarding/welcome-delivered",
+    { config: { rateLimit: false } },
+    async (request, reply) => {
+      if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
+        return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
+      }
+      const { userId } = z.object({ userId: uuidSchema }).parse(request.params);
+      return { state: await options.store.markAdventurexWelcomeDelivered(userId) };
+    }
+  );
 
   async function requireAdventurexTestPoolOwner(request: FastifyRequest, reply: FastifyReply): Promise<string | null> {
     if (!options.adventurexTestPoolAccessTokenMatches) {
@@ -396,7 +416,12 @@ export async function buildApp(options: BuildAppOptions) {
     const generation = sourceChannel === "wechat"
       ? z.object({
           connectionId: uuidSchema.optional(),
-          generationToken: z.string().min(8).max(128).optional()
+          generationToken: z.string().min(8).max(128).optional(),
+          messages: z.array(z.object({
+            messageId: z.string().min(1).max(255),
+            content: z.string().trim().min(1).max(20_000),
+            idempotencyKey: z.string().min(8).max(128)
+          })).min(1).max(20).optional()
         }).refine(
           (value) => Boolean(value.connectionId) === Boolean(value.generationToken),
           "connectionId 与 generationToken 必须同时提供"
@@ -404,13 +429,25 @@ export async function buildApp(options: BuildAppOptions) {
       : {};
     assertCurrentUser(request, input.userId);
     await options.store.ensureUser(input.userId, input.displayName);
-    const userMessage = await options.store.appendMessage({
-      userId: input.userId,
-      role: "user",
-      content: input.content,
-      idempotencyKey: input.idempotencyKey,
-      sourceChannel
-    });
+    const rawMessages = "messages" in generation ? generation.messages : undefined;
+    const savedMessages = rawMessages
+      ? await Promise.all(rawMessages.map((item) => options.store.appendMessage({
+          userId: input.userId,
+          role: "user",
+          content: item.content,
+          idempotencyKey: item.idempotencyKey,
+          sourceChannel
+        })))
+      : [await options.store.appendMessage({
+          userId: input.userId,
+          role: "user",
+          content: input.content,
+          idempotencyKey: input.idempotencyKey,
+          sourceChannel
+        })];
+    const userMessage = savedMessages.at(-1)!;
+    const connectionId = "connectionId" in generation ? generation.connectionId : undefined;
+    const generationToken = "generationToken" in generation ? generation.generationToken : undefined;
     const job = await options.store.enqueueJob({
       type: "agent_reply",
       payload: {
@@ -418,9 +455,12 @@ export async function buildApp(options: BuildAppOptions) {
         content: input.content,
         userMessageId: userMessage.id,
         sourceChannel,
-        ...generation
+        connectionId,
+        generationToken
       },
-      idempotencyKey: `agent:${userMessage.id}`,
+      idempotencyKey: generationToken
+        ? `agent-generation:${connectionId}:${generationToken}`
+        : `agent:${userMessage.id}`,
       partitionKey: `user:${input.userId}`
     });
     const currentJob = await runInline(job.id);
@@ -540,9 +580,17 @@ export async function buildApp(options: BuildAppOptions) {
       connectionId: uuidSchema.optional(),
       generationToken: z.string().min(8).max(128).optional(),
       images: z.array(z.object({
+        messageId: z.string().min(1).max(255).optional(),
         mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
         dataBase64: z.string().min(4).max(14 * 1024 * 1024)
       })).min(1).max(9),
+      turns: z.array(z.object({
+        messageId: z.string().min(1).max(255),
+        content: z.string().trim().min(1).max(2_000).optional(),
+        imageCount: z.number().int().min(0).max(9),
+        idempotencyKey: z.string().min(8).max(128)
+      })).min(1).max(20).optional(),
+      messageIds: z.array(z.string().min(1).max(255)).min(1).max(20).optional(),
       hint: z.string().trim().min(1).max(2_000).optional(),
       idempotencyKey: z.string().min(8).max(128)
     }).refine(
@@ -558,6 +606,16 @@ export async function buildApp(options: BuildAppOptions) {
       throw new StoreConflictError("单批微信图片总大小必须在 30MB 以内");
     }
     await options.store.ensureUser(input.userId, "微信用户");
+    const imageMessageIds = input.images.map((image, index) =>
+      image.messageId ?? input.messageIds?.[index] ?? `batch-${index + 1}`
+    );
+    const turns = input.turns ?? [...new Set(input.messageIds ?? imageMessageIds)].map((messageId, index) => ({
+      messageId,
+      ...(index === 0 && input.hint ? { content: input.hint } : {}),
+      imageCount: imageMessageIds.filter((id) => id === messageId).length,
+      idempotencyKey: `multimodal-turn:${input.idempotencyKey}:${messageId}`
+    }));
+    const turnByMessageId = new Map(turns.map((turn) => [turn.messageId, turn]));
     const records = await Promise.all(decoded.map(async (image, index) => {
       const extension = image.mimeType === "image/jpeg" ? "jpg" : image.mimeType.split("/")[1]!;
       const storagePath = `${input.userId}/${randomUUID()}.${extension}`;
@@ -568,17 +626,24 @@ export async function buildApp(options: BuildAppOptions) {
         storagePath,
         mimeType: image.mimeType,
         sizeBytes: image.bytes.length,
-        hint: index === 0 ? input.hint : undefined
+        hint: turnByMessageId.get(imageMessageIds[index]!)?.content
       });
       return { inputId, storagePath, mimeType: image.mimeType };
     }));
-    await options.store.appendMessage({
-      userId: input.userId,
-      role: "user",
-      content: input.images.length === 1 ? "[发送了一张图片]" : `[一次发送了 ${input.images.length} 张图片]`,
-      idempotencyKey: `multimodal-user:${input.idempotencyKey}`,
-      sourceChannel: "wechat"
-    });
+    const savedMessages = await Promise.all(turns.map((turn) => {
+      const imagePrefix = turn.imageCount === 0
+        ? ""
+        : turn.imageCount === 1 ? "[发送了一张图片]" : `[一次发送了 ${turn.imageCount} 张图片]`;
+      return options.store.appendMessage({
+        userId: input.userId,
+        role: "user",
+        content: [imagePrefix, turn.content].filter(Boolean).join("\n"),
+        idempotencyKey: turn.idempotencyKey,
+        sourceChannel: "wechat"
+      });
+    }));
+    const userMessage = savedMessages.at(-1)!;
+    const hint = turns.flatMap((turn) => turn.content ? [turn.content] : []).join("\n") || undefined;
     const job = await options.store.enqueueJob({
       type: "multimodal_understanding",
       payload: {
@@ -587,7 +652,8 @@ export async function buildApp(options: BuildAppOptions) {
         storagePaths: records.map((record) => record.storagePath),
         mimeTypes: records.map((record) => record.mimeType),
         kind: "image",
-        hint: input.hint,
+        hint,
+        userMessageId: userMessage.id,
         sourceChannel: "wechat",
         connectionId: input.connectionId,
         generationToken: input.generationToken
@@ -733,7 +799,17 @@ export async function buildApp(options: BuildAppOptions) {
     }
     const choices = await options.store.saveMatchChoices(id, input);
     const preferredOpenRoom = choices.find((choice) => choice.preferenceRank === 1 && choice.sourceType === "open_room");
-    if (!preferredOpenRoom) return { choices, status: "waiting_for_settlement" };
+    if (!preferredOpenRoom) {
+      const notifyJob = choices.some((choice) => choice.draftId)
+        ? await options.store.enqueueJob({
+            type: "room_change_notify",
+            payload: { roundId: matchRequest.activeRoundId },
+            idempotencyKey: `draft-change-notify:${matchRequest.requestId}:${matchRequest.updatedAt}`,
+            partitionKey: `match-round:${matchRequest.activeRoundId}`
+          })
+        : null;
+      return { choices, status: "waiting_for_settlement", jobId: notifyJob?.id ?? null };
+    }
     const context = await options.store.listCurrentMatchOptions(matchRequest.userId);
     const offer = context?.options.find((option) => option.roomId === preferredOpenRoom.roomId);
     if (!offer) throw new StoreConflictError("开放局候选已经变化");

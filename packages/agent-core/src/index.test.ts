@@ -148,6 +148,7 @@ describe("mock agent intelligence", () => {
         preferredLanguage: "zh",
         boundaryPromptedAt: null,
         welcomeSentAt: nowIso(),
+        welcomeDeliveredAt: nowIso(),
         updatedAt: nowIso()
       }
     });
@@ -166,6 +167,7 @@ describe("mock agent intelligence", () => {
         preferredLanguage: "zh",
         boundaryPromptedAt: null,
         welcomeSentAt: nowIso(),
+        welcomeDeliveredAt: nowIso(),
         updatedAt: nowIso()
       }
     });
@@ -193,6 +195,7 @@ describe("mock agent intelligence", () => {
       preferredLanguage: "zh" as const,
       boundaryPromptedAt: null,
       welcomeSentAt: nowIso(),
+      welcomeDeliveredAt: nowIso(),
       updatedAt: nowIso()
     };
     const first = await intelligence.reply(buildAgentContext(messages, createDefaultUserModel("u1"), {

@@ -21,6 +21,10 @@ describe("AdventureX MemoryStore", () => {
       preferredLanguage: "zh",
       boundaryPromptedAt: null
     });
+    await store.markAdventurexWelcomeDelivered(userId);
+    expect(await store.ensureAdventurexOnboardingState(userId)).toMatchObject({
+      welcomeDeliveredAt: expect.any(String)
+    });
   });
 
   it("does not inject a welcome into an existing conversation", async () => {
@@ -124,6 +128,7 @@ describe("AdventureX MemoryStore", () => {
         rawText: "1"
       });
     }
+    expect((await store.listPendingDraftChangeNotifications()).length).toBeGreaterThan(0);
     const state = await store.getRoundSettlementState(round.roundId);
     const roomIds = await store.settleMatchRound(round.roundId, [{
       draftId: state.drafts[0]!.draftId,
@@ -180,9 +185,9 @@ describe("AdventureX MemoryStore", () => {
     await expect(store.leaveRoom(joined.roomId, userIds[3]!)).rejects.toThrow("理由");
     await store.leaveRoom(joined.roomId, userIds[3]!, "临时有事");
     expect(await store.getLatestMatchRequestForUser(userIds[3]!)).toMatchObject({
-      status: "matching",
-      phase: "watching",
-      proactivePushEnabled: true,
+      status: "cancelled",
+      phase: "waiting",
+      proactivePushEnabled: false,
       roomId: null
     });
     expect((await store.listSuitableOpenRooms(userIds[3]!)).map((item) => item.roomId)).not.toContain(joined.roomId);

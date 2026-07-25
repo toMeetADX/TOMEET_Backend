@@ -38,6 +38,7 @@ export const agentProductEventKindSchema = z.enum([
   "match_confirmation_incomplete",
   "room_intro",
   "match_expired",
+  "match_progress",
   "room_change",
   "draft_change",
   "unsupported_channel_message",
@@ -102,6 +103,22 @@ export const channelTurnFailureNotice: Record<AdventurexLanguage, string> = {
   en: "I could not process that last batch of messages. Could you send it again?"
 };
 
+// Sent one at a time while an Agent turn is still running, so the user can tell the agent
+// is working rather than stuck. Also delivered straight over the channel transport: the
+// Agent that would otherwise word them is exactly the thing still being awaited.
+export const channelTurnProgressNotices: Record<AdventurexLanguage, readonly string[]> = {
+  zh: [
+    "收到，我想一想…",
+    "还在想，稍等我一下…",
+    "快好了，马上回你…"
+  ],
+  en: [
+    "Got it, let me think…",
+    "Still thinking, give me a moment…",
+    "Almost there, one second…"
+  ]
+};
+
 export const adventurexOnboardingStateSchema = z.object({
   userId: idSchema,
   stage: adventurexOnboardingStageSchema,
@@ -109,6 +126,7 @@ export const adventurexOnboardingStateSchema = z.object({
   preferredLanguage: adventurexLanguageSchema.default("zh"),
   boundaryPromptedAt: z.string().datetime().nullable().default(null),
   welcomeSentAt: z.string().datetime().nullable(),
+  welcomeDeliveredAt: z.string().datetime().nullable().default(null),
   createdAt: z.string().datetime().optional(),
   updatedAt: z.string().datetime()
 });
@@ -497,6 +515,7 @@ export const llmJobTypeSchema = z.enum([
   "matchmaking",
   "match_round_generate",
   "match_round_settle",
+  "match_status_notify",
   "room_change_notify",
   "feedback_update",
   "memory_extract",
