@@ -16,7 +16,7 @@ export const curatedGames: OfflineGame[] = [
     id: "game-story-table",
     name: "故事交换桌",
     description: "用图片卡和小问题逐步交换真实经历，适合偏安静或重视深度交流的人。",
-    minPlayers: 3,
+    minPlayers: 2,
     maxPlayers: 6,
     intentTags: ["深度交流", "安静", "建立连接"],
     traits: ["室内", "节奏稳定", "表达友好"],

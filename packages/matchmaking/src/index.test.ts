@@ -4,11 +4,63 @@ import {
   formatCandidatePreview,
   formatConfirmedIntro,
   generateFinalGroupCandidates,
+  MockMatchmakingIntelligence,
   selectNonOverlappingGroups,
   validateMatchDecision
 } from "./index.js";
+import type { MatchCandidate } from "./index.js";
+
+function buildWaitingCandidate(suffix: string): MatchCandidate {
+  const now = new Date().toISOString();
+  return {
+    request: {
+      requestId: `request-${suffix}`,
+      userId: `user-${suffix}`,
+      intentSnapshot: { rawText: "Meet a small group" },
+      status: "matching",
+      phase: "waiting",
+      proactivePushEnabled: false,
+      activeRoundId: null,
+      optionsExpiresAt: null,
+      roomId: null,
+      inviteId: null,
+      createdAt: now,
+      updatedAt: now
+    },
+    userModel: {
+      userId: `user-${suffix}`,
+      vibeNarrative: "",
+      longTermProfile: {},
+      currentIntent: {},
+      socialHistory: [],
+      feedbackMemory: [],
+      multimodalUnderstanding: {},
+      version: 0,
+      updatedAt: now
+    }
+  };
+}
 
 describe("match decision validation", () => {
+  it("waits for one application user and proposes a round when a second arrives", async () => {
+    const matcher = new MockMatchmakingIntelligence();
+    const candidates = ["1", "2"].map(buildWaitingCandidate);
+
+    await expect(matcher.proposeMatchRound(candidates.slice(0, 1), curatedGames)).resolves.toBeNull();
+
+    const proposal = await matcher.proposeMatchRound(candidates, curatedGames);
+    expect(proposal).not.toBeNull();
+    expect(proposal?.drafts[0]).toMatchObject({
+      offlineGameId: "game-story-table",
+      targetPlayers: 2,
+      candidateRequestIds: ["request-1", "request-2"]
+    });
+    expect(proposal?.userOptions.map((option) => option.requestId)).toEqual([
+      "request-1",
+      "request-2"
+    ]);
+  });
+
   it("rejects duplicated members", () => {
     expect(() => validateMatchDecision({
       memberIds: ["u1", "u1"],

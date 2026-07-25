@@ -92,6 +92,61 @@ describe("Supabase migration", () => {
     expect(memoryTables.rows).toHaveLength(2);
   });
 
+  it("allows two-person AdventureX drafts and rooms", async () => {
+    const game = await db.query<{ min_players: number }>(`
+      select min_players
+      from public.offline_games
+      where id = 'game-story-table'
+    `);
+    expect(game.rows[0]?.min_players).toBe(2);
+
+    const round = await db.query<{ create_or_get_match_round: { id: string } }>(
+      "select create_or_get_match_round('two-person-migration-test', now())"
+    );
+    const roundId = round.rows[0]!.create_or_get_match_round.id;
+    const draft = await db.query<{ id: string }>(`
+      insert into public.match_drafts (
+        round_id,
+        temp_draft_id,
+        offline_game_id,
+        target_players,
+        rationale,
+        expires_at
+      ) values (
+        $1::uuid,
+        'two-person-draft',
+        'game-story-table',
+        2,
+        'Two-person matching regression test',
+        now() + interval '90 seconds'
+      )
+      returning id
+    `, [roundId]);
+    const room = await db.query<{ id: string; target_players: number; capacity: number }>(`
+      insert into public.match_rooms (
+        offline_game_id,
+        match_summary,
+        status,
+        target_players,
+        recruitment_status
+      ) values (
+        'game-story-table',
+        'Two-person matching regression test',
+        'confirmed',
+        2,
+        'full'
+      )
+      returning id, target_players, capacity
+    `);
+
+    expect(draft.rows).toHaveLength(1);
+    expect(room.rows[0]).toMatchObject({ target_players: 2, capacity: 2 });
+
+    await db.query("delete from public.match_rooms where id = $1::uuid", [room.rows[0]!.id]);
+    await db.query("delete from public.match_drafts where id = $1::uuid", [draft.rows[0]!.id]);
+    await db.query("delete from public.match_rounds where id = $1::uuid", [roundId]);
+  });
+
   it("consolidates duplicate operational records while preserving compatibility views", async () => {
     const relations = await db.query<{ relname: string; relkind: string }>(`
       select relname, relkind
