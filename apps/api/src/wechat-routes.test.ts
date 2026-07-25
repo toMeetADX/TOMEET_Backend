@@ -80,6 +80,63 @@ async function setup(
 }
 
 describe("WeChat one-time QR onboarding", () => {
+  it("returns QR creation secrets once and never exposes them from status or SSE", async () => {
+    const { app } = await setup([{
+      status: "confirmed",
+      bot_token: "secret-bot-token",
+      ilink_bot_id: "secure-bot",
+      baseurl: "https://ilink-api.example.com",
+      ilink_user_id: "secure-owner"
+    }]);
+    const createdResponse = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      headers: { origin: "http://localhost:3000" },
+      payload: {}
+    });
+
+    expect(createdResponse.statusCode).toBe(201);
+    expect(createdResponse.headers["cache-control"]).toContain("no-store");
+    expect(createdResponse.headers["access-control-allow-origin"])
+      .toBe("http://localhost:3000");
+    const created = createdResponse.json();
+    expect(created.sessionToken).toEqual(expect.any(String));
+    expect(created.qrCodeContent).toBe("weixin://connect/1");
+
+    const statusResponse = await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${created.sessionId}`,
+      headers: {
+        origin: "http://localhost:3000",
+        "x-wechat-session-token": created.sessionToken
+      }
+    });
+    expect(statusResponse.statusCode).toBe(200);
+    expect(statusResponse.headers["access-control-allow-origin"])
+      .toBe("http://localhost:3000");
+    expect(statusResponse.json()).not.toHaveProperty("sessionToken");
+    expect(statusResponse.json()).not.toHaveProperty("qrCodeContent");
+    expect(statusResponse.json()).not.toHaveProperty("botToken");
+    expect(statusResponse.json()).not.toHaveProperty("sessionTokenHash");
+    expect(statusResponse.json()).not.toHaveProperty("qrTokenCiphertext");
+
+    const events = await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${created.sessionId}/events`,
+      headers: {
+        accept: "text/event-stream",
+        origin: "http://localhost:3000",
+        "x-wechat-session-token": created.sessionToken
+      }
+    });
+    expect(events.statusCode).toBe(200);
+    expect(events.payload).not.toContain(created.sessionToken);
+    expect(events.payload).not.toContain(created.qrCodeContent);
+    expect(events.payload).not.toContain("secret-bot-token");
+    expect(events.payload).not.toContain("sessionTokenHash");
+    expect(events.payload).not.toContain("qrTokenCiphertext");
+  });
+
   it("allows only the roadshow account to bypass the public QR creation limit", async () => {
     const roadshowUserId = randomUUID();
     const otherUserId = randomUUID();
@@ -581,6 +638,13 @@ describe("WeChat one-time QR onboarding", () => {
       headers
     });
     expect(verification.json().status).toBe("verification_required");
+    const invalidCode = await app.inject({
+      method: "POST",
+      url: `/wechat/connect/sessions/${session.sessionId}/verify`,
+      headers,
+      payload: { code: "12ab" }
+    });
+    expect(invalidCode.statusCode).toBe(400);
     const completed = await app.inject({
       method: "POST",
       url: `/wechat/connect/sessions/${session.sessionId}/verify`,
@@ -772,6 +836,7 @@ describe("WeChat one-time QR onboarding", () => {
     expect(responses.slice(0, 30).every((response) => response.statusCode === 201))
       .toBe(true);
     expect(responses[30]?.statusCode).toBe(429);
+    expect(Number(responses[30]?.headers["retry-after"])).toBeGreaterThan(0);
   });
 
   it("supports a configurable bounded QR limit for a managed kiosk", async () => {
@@ -803,8 +868,28 @@ describe("WeChat one-time QR onboarding", () => {
     });
 
     expect(response.statusCode).toBe(204);
+    expect(response.headers["access-control-allow-origin"])
+      .toBe("http://localhost:3000");
+    expect(response.headers["access-control-allow-credentials"]).toBe("true");
+    expect(response.headers["access-control-allow-methods"]).toContain("GET");
     expect(response.headers["access-control-allow-headers"])
       .toContain("x-wechat-session-token");
+    expect(verifyAccessToken).not.toHaveBeenCalled();
+  });
+
+  it("does not emit CORS approval for an unconfigured browser origin", async () => {
+    const { app, verifyAccessToken } = await setup([]);
+    const response = await app.inject({
+      method: "OPTIONS",
+      url: "/wechat/connect/sessions/26000000-0000-4000-8000-000000000001",
+      headers: {
+        origin: "https://untrusted.example.com",
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "x-wechat-session-token"
+      }
+    });
+
+    expect(response.headers["access-control-allow-origin"]).toBeUndefined();
     expect(verifyAccessToken).not.toHaveBeenCalled();
   });
 });

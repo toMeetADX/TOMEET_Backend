@@ -571,21 +571,15 @@ interface FeedbackResponse {
 
 ## 10. 微信扫码连接
 
-Web 端 `/wechat` 页面使用独立的一次性会话。推荐在已登录状态下创建并携带 Supabase
-Bearer token，这样扫码确认后的微信身份会绑定到当前 `users.id`，与 Web 共享完整
-对话、状态和记忆。未携带 token 的匿名扫码仍可用，但会落到独立微信 profile。
+当前仓库外部的扫码客户端使用独立的一次性会话，并匿名创建二维码。扫码确认后，
+后端按微信身份创建或复用独立 profile，不要求 Supabase Bearer token。接口仍兼容
+未来已登录客户端在创建时携带 Bearer token，但这不属于当前扫码前端契约。
 
 ### 10.1 创建扫码会话
 
 `POST /wechat/connect/sessions`
 
-已登录用户应携带：
-
-```http
-Authorization: Bearer <supabase_access_token>
-```
-
-请求体为 `{}`。响应：
+当前匿名客户端不携带 `Authorization`，请求体为 `{}`。响应：
 
 ```ts
 type WechatConnectStatus =

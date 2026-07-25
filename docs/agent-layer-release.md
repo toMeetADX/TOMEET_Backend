@@ -108,7 +108,7 @@ git push origin prod-web-stable prod-wechat-stable
   `SET NOT NULL` 和 revoke。
 - 新的必填列必须先带 default 或保持 nullable。
 - contraction migration 必须在确认所有旧 deployment 已退出后走独立人工流程，
-  不进入 Agent 自动同步发布。
+  不进入自动发布。
 - 如果相对 `prod-web-stable` 存在 schema 变化，而
   `PRODUCTION_BACKUP_OR_PITR_ENABLED` 不是 `true`，Production 发布会停止。
 
@@ -117,7 +117,7 @@ git push origin prod-web-stable prod-wechat-stable
 在 GitHub branch protection 中：
 
 - `main` 禁止直接 push；
-- `main` 要求 `Agent Layer Sync / validate-pr`；
+- `main` 要求 `Main Validation / validate-pr`；
 - PR 需人工审核，不启用自动合并；
 - 不再创建或依赖 `automation/agent-sync-main-to-wechat` 分支。
 

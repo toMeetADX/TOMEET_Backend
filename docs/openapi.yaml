@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: TOMEET API
   version: 1.0.0
-  description: TOMEET Railway API。除健康检查外，所有接口都使用 Supabase Bearer access token。
+  description: TOMEET backend API。Agent routes use Supabase Bearer access tokens; the public WeChat QR flow uses a one-time session token.
 servers:
   - url: https://{apiHost}
     description: Railway production
@@ -20,6 +20,7 @@ tags:
   - name: AdventureX Testing
   - name: Rooms
   - name: Jobs
+  - name: WeChat QR
 paths:
   /health:
     get:
@@ -644,12 +645,176 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
+  /wechat/connect/sessions:
+    post:
+      tags: [WeChat QR]
+      summary: Create a one-time WeChat QR connection session
+      description: |
+        Anonymous kiosk clients should omit Authorization. A signed-in client may
+        optionally send a Supabase Bearer token to bind the activated WeChat
+        identity to its existing profile. The session token and QR content are
+        returned only by this response and must not be logged or persisted.
+      security:
+        - {}
+        - bearerAuth: []
+      responses:
+        "201":
+          description: One-time QR session created
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatQrSessionCreated"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          description: WeChat QR runtime is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+  /wechat/connect/sessions/{sessionId}:
+    get:
+      tags: [WeChat QR]
+      summary: Read the current QR session state
+      security:
+        - wechatSessionToken: []
+      parameters:
+        - $ref: "#/components/parameters/WechatSessionId"
+      responses:
+        "200":
+          description: Current public session state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatQrSession"
+        "401":
+          description: Missing or invalid one-time session token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+        "404":
+          description: Session does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+        "409":
+          description: Session activation conflicts with an existing profile binding
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+        "503":
+          description: WeChat QR runtime is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+  /wechat/connect/sessions/{sessionId}/events:
+    get:
+      tags: [WeChat QR]
+      summary: Stream QR session state through server-sent events
+      description: |
+        Use fetch with a readable stream because the native EventSource API
+        cannot set X-WeChat-Session-Token. The server immediately emits
+        `event: session`, emits state changes, and emits `event: done` before
+        closing after active, expired, or failed.
+      security:
+        - wechatSessionToken: []
+      parameters:
+        - $ref: "#/components/parameters/WechatSessionId"
+      responses:
+        "200":
+          description: |
+            SSE stream whose `session` and `done` data payloads conform to
+            WechatQrSession. Creation-only secrets are never included.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          description: Missing or invalid one-time session token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+        "404":
+          description: Session does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+        "503":
+          description: WeChat QR runtime is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+  /wechat/connect/sessions/{sessionId}/verify:
+    post:
+      tags: [WeChat QR]
+      summary: Submit the verification code shown by WeChat
+      security:
+        - wechatSessionToken: []
+      parameters:
+        - $ref: "#/components/parameters/WechatSessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WechatVerificationCodeInput"
+      responses:
+        "200":
+          description: Updated public session state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatQrSession"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Missing or invalid one-time session token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+        "404":
+          description: Session does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+        "409":
+          description: Verification is not allowed in the current session state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+        "503":
+          description: WeChat QR runtime is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: Supabase JWT
+    wechatSessionToken:
+      type: apiKey
+      in: header
+      name: X-WeChat-Session-Token
   parameters:
     UserId:
       name: userId
@@ -660,6 +825,12 @@ components:
       description: 必须等于 access token 对应的用户 ID
     ResourceId:
       name: id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    WechatSessionId:
+      name: sessionId
       in: path
       required: true
       schema:
@@ -714,6 +885,105 @@ components:
     JsonObject:
       type: object
       additionalProperties: true
+    WechatQrSessionStatus:
+      type: string
+      enum:
+        - pending
+        - scanned
+        - verification_required
+        - active
+        - expired
+        - failed
+    WechatQrSession:
+      type: object
+      additionalProperties: false
+      required:
+        - sessionId
+        - status
+        - expiresAt
+        - confirmedAt
+        - errorCode
+        - errorMessage
+      properties:
+        sessionId:
+          $ref: "#/components/schemas/Uuid"
+        status:
+          $ref: "#/components/schemas/WechatQrSessionStatus"
+        expiresAt:
+          type: string
+          format: date-time
+        confirmedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        errorCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        errorMessage:
+          oneOf:
+            - type: string
+            - type: "null"
+    WechatQrSessionCreated:
+      type: object
+      additionalProperties: false
+      required:
+        - sessionId
+        - status
+        - expiresAt
+        - confirmedAt
+        - errorCode
+        - errorMessage
+        - sessionToken
+        - qrCodeContent
+      properties:
+        sessionId:
+          $ref: "#/components/schemas/Uuid"
+        status:
+          $ref: "#/components/schemas/WechatQrSessionStatus"
+        expiresAt:
+          type: string
+          format: date-time
+        confirmedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        errorCode:
+          oneOf:
+            - type: string
+            - type: "null"
+        errorMessage:
+          oneOf:
+            - type: string
+            - type: "null"
+        sessionToken:
+          type: string
+          minLength: 16
+          description: One-time secret returned only during creation
+        qrCodeContent:
+          type: string
+          minLength: 1
+          description: Content rendered by the external frontend as a QR code
+    WechatVerificationCodeInput:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          pattern: '^\d{4,12}$'
+    WechatSessionError:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        requestId:
+          type: string
     HealthResponse:
       type: object
       required: [status, service, time]

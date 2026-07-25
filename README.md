@@ -6,11 +6,11 @@ Agent 通过用户主动提供的文本、图片、短录音和持续对话认�
 
 ## 当前实现
 
-仓库已经包含可运行的初步框架，并保持前后端分离：
+仓库已经包含可运行的纯后端框架；可视化前端位于仓库之外：
 
 - `apps/api`：Fastify API，部署到 Railway。
 - `apps/intelligence-worker`：支持多并发槽位的智能任务 Worker，部署到 Railway。
-- `apps/web`：只用于本地联调的简洁测试台，不替代现有 Vercel 前端。
+- `apps/wechat-ilink-worker`：微信 iLink 长轮询、收发消息与连接生命周期 Worker，部署到 Railway。
 - `packages/*`：契约、Agent、用户模型、匹配、游戏目录、房间、反馈、数据访问和任务编排。
 - `supabase/migrations`：业务表、索引、私有 Storage Bucket 和并发安全 RPC。
 - Agent Memory V2：独立证据记忆、隐藏 profile、token-budgeted context 与同用户任务 FIFO；详见 [`docs/agent-memory-context.md`](docs/agent-memory-context.md)。
@@ -42,10 +42,9 @@ cp .env.example .env
 pnpm dev
 ```
 
-- 本地测试台：`http://localhost:3000`
 - API：`http://localhost:4000`
 
-本地页面提供聊天和图片入口。用户可以通过文字与图片持续形成多模态 vibe，完成表达社交意图、自动匹配、确认房间、标记活动完成和提交活动反馈。
+本仓库不再提供本地页面。接口联调使用自动测试、`docs/openapi.yaml` 或仓库外部客户端。
 
 当前 `.env.example` 默认使用真实硅基流动模型。填写 `LLM_API_KEY` 后，使用以下组合可以在不接 Supabase 的情况下做真实模型场景测试：
 
@@ -100,14 +99,14 @@ AdventureX 冷启动匹配使用在线贪心竞价：当前 `waiting` 用户优�
 
 生产上线的完整变量表、部署顺序、Supabase Auth 和冒烟验收步骤见 [`docs/railway-production.md`](docs/railway-production.md)。前端对接同时参考 [`docs/api.md`](docs/api.md) 和机器可读的 [`docs/openapi.yaml`](docs/openapi.yaml)。
 
-在同一个 Railway Project 创建两个 Service，均连接此仓库根目录：
+正式发布在同一个 Railway Project 中保留 Intelligence Worker、Web API、WeChat API 和 WeChat Worker 四个 Service，并统一从同一个 `main` commit 发布。详细变量和发布顺序见 [`docs/agent-layer-release.md`](docs/agent-layer-release.md)。
 
 ### API Service
 
 - Config file：`/railway.api.toml`
 - 环境变量：`NODE_ENV=production`、`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`FRONTEND_ORIGIN`、`DEMO_MODE=false`、`ADVENTUREX_MATCHING_V1=true`
 - `FRONTEND_ORIGIN` 支持逗号分隔多个来源，例如本地测试台和现有 Vercel 域名。
-- 非健康检查接口要求 `Authorization: Bearer <Supabase access token>`，请求中的 `userId` 必须等于 token 用户。
+- Agent 等用户接口要求 `Authorization: Bearer <Supabase access token>`；公开微信扫码接口改用一次性 `X-WeChat-Session-Token`，详见 [`docs/wechat-qr-api.md`](docs/wechat-qr-api.md)。
 - Railway 通过 `/health` 做存活检查，通过 `/ready` 检查 Supabase 连接。
 
 ### Intelligence Worker Service
@@ -118,9 +117,9 @@ AdventureX 冷启动匹配使用在线贪心竞价：当前 `waiting` 用户优�
 
 Worker 使用 Supabase PostgreSQL 的 `FOR UPDATE SKIP LOCKED` 领取任务。多槽位和多副本不会重复领取同一任务；`partition_key=user:{userId}` 保证同一用户任务严格顺序执行，不同用户仍可并行。失败任务使用指数退避，进程中断后的锁会自动回收。
 
-## 现有 Vercel 前端接入
+## 外部扫码前端接入
 
-现有前端将 API Base URL 指向 Railway API 域名，并按照 [API 契约](docs/api.md) 调用。前端需先通过 Supabase Auth 登录（可使用匿名登录），每次请求携带 access token。需要 LLM 的接口可能返回 `202`，前端轮询 `/jobs/:id` 或匹配请求状态即可。
+当前外部前端只负责微信扫码连接，不承载 Agent Layer。它将 API Base URL 指向 Railway Web API，并仅调用 [`docs/wechat-qr-api.md`](docs/wechat-qr-api.md) 定义的四个 `/wechat/connect/sessions*` 接口；完整机器可读契约见 [`docs/openapi.yaml`](docs/openapi.yaml)。
 
 ## 并发与一致性
 
@@ -419,9 +418,9 @@ POST /rooms/:id/feedback
 ```text
 tomeet/
 ├── apps/
-│   ├── web/                       # Next.js 本地测试台；正式前端已在 Vercel
 │   ├── api/                       # API 服务，部署到 Railway
-│   └── intelligence-worker/       # 智能任务，部署到 Railway
+│   ├── intelligence-worker/       # 智能任务，部署到 Railway
+│   └── wechat-ilink-worker/       # 微信 iLink Worker，部署到 Railway
 ├── packages/
 │   ├── contracts/
 │   ├── agent-core/
@@ -457,19 +456,20 @@ tomeet/
 
 ### Railway
 
-在同一个 Railway Project 中创建两个 Service：
+在同一个 Railway Project 中保留四个 Service：
 
-- `api`：运行 `apps/api`。
-- `intelligence-worker`：运行 `apps/intelligence-worker`。
+- Web API 和 WeChat API：均运行 `apps/api` 的同一个 `main` commit。
+- Intelligence Worker：运行 `apps/intelligence-worker`。
+- WeChat Worker：运行 `apps/wechat-ilink-worker`。
 
-两个 Service 连接同一个 Supabase 项目。
+四个 Service 连接同一套受控环境配置和 Supabase 项目。
 
 ### Vercel
 
 - 继续使用已经部署的正式前端项目。
 - 将 `NEXT_PUBLIC_API_BASE_URL` 指向 Railway API 域名。
 - 图片和短录音上传需要 Supabase 公开配置，但 Service Role Key 只能留在 Railway。
-- 本仓库的 `apps/web` 只在本地用于接口联调。
+- 本仓库不包含前端源码或可部署前端。
 
 ### Cloudflare DNS
 

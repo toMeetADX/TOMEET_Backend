@@ -1,4 +1,4 @@
-name: Agent Layer Sync
+name: Main Validation
 
 on:
   pull_request:
@@ -6,7 +6,7 @@ on:
       - main
 
 concurrency:
-  group: agent-layer-validate-${{ github.event.pull_request.number }}
+  group: main-validate-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
