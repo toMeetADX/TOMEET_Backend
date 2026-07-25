@@ -147,6 +147,54 @@ test("existing migrations cannot be deleted", async () => {
   );
 });
 
+test("an approved migration rename must preserve the exact SQL", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "migration-safety-rename-"));
+  await mkdir(join(repoRoot, "supabase", "migrations"), { recursive: true });
+  await mkdir(join(repoRoot, "scripts"), { recursive: true });
+  const originalName = "20260726140000_add_claim_recovery.sql";
+  const replacementName = "20260726145000_add_claim_recovery.sql";
+  await writeFile(
+    join(repoRoot, "scripts", "config.json"),
+    JSON.stringify({
+      approvedLegacyMigrations: {},
+      approvedMigrationRenames: {
+        [originalName]: replacementName
+      }
+    })
+  );
+  await writeFile(
+    join(repoRoot, "supabase", "migrations", originalName),
+    "alter table public.claims add column recovered_at timestamptz;\n"
+  );
+  git(repoRoot, "init", "-b", "main");
+  git(repoRoot, "config", "user.name", "Migration Test");
+  git(repoRoot, "config", "user.email", "migration@example.invalid");
+  git(repoRoot, "add", ".");
+  git(repoRoot, "commit", "-m", "migration");
+  git(repoRoot, "branch", "base");
+  git(
+    repoRoot,
+    "mv",
+    `supabase/migrations/${originalName}`,
+    `supabase/migrations/${replacementName}`
+  );
+  git(repoRoot, "commit", "-m", "rename migration");
+
+  const result = await checkMigrations({
+    repoRoot,
+    options: { base: "base", head: "HEAD" },
+    configPath: join(repoRoot, "scripts", "config.json")
+  });
+  assert.equal(result.safe, true);
+  assert.equal(
+    result.inspected.some(
+      ({ renamedTo }) =>
+        renamedTo === `supabase/migrations/${replacementName}`
+    ),
+    true
+  );
+});
+
 test("an exact documented approval allows an intentional destructive migration", async () => {
   const repoRoot = await mkdtemp(join(tmpdir(), "migration-safety-approved-"));
   await mkdir(join(repoRoot, "supabase", "migrations"), { recursive: true });
