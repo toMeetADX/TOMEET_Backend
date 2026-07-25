@@ -1,4 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import {
+  channelSupportedInputs,
+  channelTurnFailureNotice,
+  type AdventurexLanguage
+} from "@tomeet/contracts";
 import type { WechatConnectionStore } from "@tomeet/data";
 import {
   CredentialCipher,
@@ -57,7 +62,7 @@ export interface AgentTextClient {
     messageId: string;
     userId: string;
     event: {
-      kind: "unsupported_channel_message";
+      kind: "unsupported_channel_message" | "channel_media_unreadable";
       facts: Record<string, unknown>;
     };
   }): Promise<string>;
@@ -96,6 +101,7 @@ export interface WechatRuntimeDependencies {
   imageBatchWindowMs?: number;
   imageCdnBaseUrl?: string;
   downloadImage?: typeof downloadWechatImage;
+  noticeLanguage?: AdventurexLanguage;
 }
 
 export interface WechatOutboundDependencies {
@@ -201,6 +207,13 @@ interface PendingWechatTurn {
   }>;
 }
 
+interface WechatTurnBatch {
+  messages: PendingWechatTurn[];
+  // A settled batch has already produced its user-visible outcome, so it must never be
+  // folded back into a later batch by supersede().
+  settled: boolean;
+}
+
 interface WechatTurnBatchSink {
   supersede(): Promise<string>;
   enqueue(message: PendingWechatTurn): Promise<void>;
@@ -237,8 +250,9 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
   private pending: PendingWechatTurn[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
   private flushing: Promise<void> | null = null;
-  private activeBatch: PendingWechatTurn[] | null = null;
+  private activeBatch: WechatTurnBatch | null = null;
   private latestGenerationToken: string | null = null;
+  private notifiedFailureGeneration: string | null = null;
 
   constructor(
     private readonly dependencies: WechatRuntimeDependencies,
@@ -253,10 +267,10 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    if (this.activeBatch) {
+    if (this.activeBatch && !this.activeBatch.settled) {
       const pendingIds = new Set(this.pending.map((message) => message.messageId));
       this.pending = [
-        ...this.activeBatch.filter((message) => !pendingIds.has(message.messageId)),
+        ...this.activeBatch.messages.filter((message) => !pendingIds.has(message.messageId)),
         ...this.pending
       ];
     }
@@ -293,13 +307,15 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
   }
 
   async flush(): Promise<void> {
-    if (this.flushing) await this.flushing;
+    // A previous batch that failed must not cancel this one: its error was already reported
+    // to its own sender and its messages are never re-queued.
+    if (this.flushing) await this.flushing.catch(() => undefined);
     if (this.pending.length === 0) return;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    const batch = this.pending;
+    const batch: WechatTurnBatch = { messages: this.pending, settled: false };
     this.pending = [];
     this.activeBatch = batch;
     this.flushing = this.deliver(batch).finally(() => {
@@ -309,12 +325,16 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
     await this.flushing;
   }
 
-  private async deliver(batch: PendingWechatTurn[]): Promise<void> {
-    const messageIds = batch.map((message) => message.messageId);
-    const latest = batch.at(-1)!;
+  private async deliver(batch: WechatTurnBatch): Promise<void> {
+    const messageIds = batch.messages.map((message) => message.messageId);
+    const latest = batch.messages.at(-1)!;
     try {
-      const images = batch.flatMap((message) => message.images).slice(0, WECHAT_IMAGE_BATCH_MAX);
-      const contents = batch.map((message) => message.content).filter((value): value is string => Boolean(value));
+      const images = batch.messages
+        .flatMap((message) => message.images)
+        .slice(0, WECHAT_IMAGE_BATCH_MAX);
+      const contents = batch.messages
+        .map((message) => message.content)
+        .filter((value): value is string => Boolean(value));
       const result = images.length > 0
         ? await this.dependencies.tomeet.sendImages({
             connectionId: this.connection.id,
@@ -331,6 +351,7 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
             userId: this.connection.userId,
             contents
           });
+      batch.settled = true;
       if (
         result.stale
         || !result.reply
@@ -343,7 +364,7 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
           level: "info",
           event: "wechat_turn_superseded",
           connection: fingerprint(this.connection.id),
-          messageCount: batch.length
+          messageCount: batch.messages.length
         }));
         return;
       }
@@ -367,19 +388,24 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
         connection: fingerprint(this.connection.id),
         user: fingerprint(this.connection.ownerIlinkUserId),
         imageCount: images.length,
-        messageCount: batch.length
+        messageCount: batch.messages.length
       }));
     } catch (error) {
+      batch.settled = true;
       const detail = errorMessage(error);
       await Promise.all(messageIds.map((messageId) => (
         this.dependencies.store.completeWechatMessage(this.connection.id, messageId, detail)
       )));
-      if (this.latestGenerationToken === latest.generationToken) {
+      if (
+        this.latestGenerationToken === latest.generationToken
+        && this.notifiedFailureGeneration !== latest.generationToken
+      ) {
+        this.notifiedFailureGeneration = latest.generationToken;
         await sendReplyBubbles({
           dependencies: this.dependencies,
           connection: this.connection,
           botToken: this.botToken,
-          reply: "刚才这组消息没处理成功，可以再发一次吗？",
+          reply: channelTurnFailureNotice[this.dependencies.noticeLanguage ?? "zh"],
           contextToken: latest.contextToken,
           runIdBase: `turn-batch-error-${this.connection.id}-${messageIds[0]}`,
           shouldContinue: () => this.latestGenerationToken === latest.generationToken
@@ -479,10 +505,12 @@ export async function handleWechatMessage(
       }
     }
     const content = WechatILinkClient.extractText(message);
+    // Any image item counts as "the user sent a picture", even when the payload turns out to
+    // be undownloadable: the reply must never claim pictures are unsupported.
     const imageItems = (message.item_list ?? []).filter((item): item is WechatMessageItem => (
       item.type === 2
-      && Boolean(item.image_item?.media?.encrypt_query_param || item.image_item?.media?.full_url)
     ));
+    let unreadableImageCount = 0;
     if (imageItems.length > 0 || content) {
       const batcher = turnBatcher ?? new WechatTurnBatcher(
         { ...dependencies, turnBatchWindowMs: 0 },
@@ -491,38 +519,68 @@ export async function handleWechatMessage(
       );
       const generationToken = await batcher.supersede();
       const downloader = dependencies.downloadImage ?? downloadWechatImage;
-      const images = await Promise.all(imageItems.slice(0, WECHAT_IMAGE_BATCH_MAX).map((item) => (
-        downloader(item, {
-          cdnBaseUrl: dependencies.imageCdnBaseUrl ?? DEFAULT_WECHAT_CDN_BASE_URL
-        })
-      )));
-      const pending = {
-        messageId: id,
-        generationToken,
-        contextToken: message.context_token,
-        runId: message.run_id,
-        content: content ?? undefined,
-        images
-      };
-      await batcher.enqueue(pending);
-      if (!turnBatcher) await batcher.flush();
-      connection.lastMessageAt = new Date().toISOString();
-      return true;
-    }
-    if (turnBatcher) await turnBatcher.flush().catch(() => undefined);
-    const reply = await dependencies.tomeet.sendEvent({
-          connectionId: connection.id,
+      const downloads = await Promise.allSettled(
+        imageItems.slice(0, WECHAT_IMAGE_BATCH_MAX).map((item) => (
+          downloader(item, {
+            cdnBaseUrl: dependencies.imageCdnBaseUrl ?? DEFAULT_WECHAT_CDN_BASE_URL
+          })
+        ))
+      );
+      const images = downloads
+        .filter((download) => download.status === "fulfilled")
+        .map((download) => download.value);
+      unreadableImageCount = downloads.length - images.length;
+      if (unreadableImageCount > 0) {
+        (dependencies.logger ?? console).error(JSON.stringify({
+          level: "error",
+          event: "wechat_image_unreadable",
+          connection: fingerprint(connection.id),
+          unreadableImageCount,
+          errorTypes: downloads
+            .filter((download) => download.status === "rejected")
+            .map((download) => errorName(download.reason))
+        }));
+      }
+      if (images.length > 0 || content) {
+        await batcher.enqueue({
           messageId: id,
-          userId: connection.userId,
-          event: {
-            kind: "unsupported_channel_message",
-            facts: {
-              channel: "wechat",
-              supportedInputs: ["text", "transcribed_audio"],
-              receivedMessageType: message.message_type
-            }
-          }
+          generationToken,
+          contextToken: message.context_token,
+          runId: message.run_id,
+          content: content ?? undefined,
+          images
         });
+        if (!turnBatcher) await batcher.flush();
+        connection.lastMessageAt = new Date().toISOString();
+        return true;
+      }
+    }
+    // Nothing readable is left for this turn, so any earlier batch that supersede() pulled back
+    // into the queue still owes the user its own reply.
+    if (turnBatcher) await turnBatcher.flush().catch(() => undefined);
+    const event = unreadableImageCount > 0
+      ? {
+          kind: "channel_media_unreadable" as const,
+          facts: {
+            channel: "wechat",
+            receivedKinds: ["image"],
+            unreadableCount: unreadableImageCount
+          }
+        }
+      : {
+          kind: "unsupported_channel_message" as const,
+          facts: {
+            channel: "wechat",
+            supportedInputs: [...channelSupportedInputs],
+            receivedMessageType: message.message_type
+          }
+        };
+    const reply = await dependencies.tomeet.sendEvent({
+      connectionId: connection.id,
+      messageId: id,
+      userId: connection.userId,
+      event
+    });
     const runIdBase = message.run_id?.trim() || `inbound-${connection.id}-${id}`;
     await sendReplyBubbles({
       dependencies,
@@ -538,7 +596,7 @@ export async function handleWechatMessage(
       event: "wechat_message_completed",
       connection: fingerprint(connection.id),
       user: fingerprint(connection.ownerIlinkUserId),
-      kind: "unsupported_media"
+      kind: event.kind
     }));
     connection.lastMessageAt = new Date().toISOString();
     return true;
@@ -611,9 +669,21 @@ export async function monitorWechatConnection(
 
       let handled = false;
       for (const inbound of updates.msgs ?? []) {
-        handled = (
-          await handleWechatMessage(dependencies, connection, botToken, inbound, turnBatcher)
-        ) || handled;
+        try {
+          handled = (
+            await handleWechatMessage(dependencies, connection, botToken, inbound, turnBatcher)
+          ) || handled;
+        } catch (error) {
+          // One unprocessable message must not drop the connection, because the cursor would
+          // then stay put and iLink would redeliver the same message forever.
+          handled = true;
+          logger.error(JSON.stringify({
+            level: "error",
+            event: "wechat_message_failed",
+            connection: connectionFingerprint,
+            errorType: errorName(error)
+          }));
+        }
       }
       cursor = updates.get_updates_buf ?? cursor;
       const updated = await dependencies.store.updateWechatConnectionCursor(

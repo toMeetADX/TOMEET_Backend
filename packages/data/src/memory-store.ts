@@ -63,6 +63,7 @@ export class MemoryStore implements DataStore {
   private readonly matchRequests = new Map<string, MatchRequest>();
   private readonly rooms = new Map<string, MatchRoom>();
   private readonly jobs = new Map<string, LlmJob>();
+  private readonly jobLocks = new Map<string, { workerId: string; lockedAt: string }>();
   private readonly jobKeys = new Map<string, string>();
   private readonly multimodal = new Map<string, MultimodalRecordInput & { understanding?: Record<string, unknown> }>();
   private readonly uploadedFiles = new Map<string, { mimeType: string; bytes: Uint8Array }>();
@@ -1433,7 +1434,7 @@ export class MemoryStore implements DataStore {
     return job ? structuredClone(job) : null;
   }
 
-  async claimJob(_workerId: string): Promise<LlmJob | null> {
+  async claimJob(workerId: string): Promise<LlmJob | null> {
     const processingPartitions = new Set(
       [...this.jobs.values()]
         .filter((item) => item.status === "processing" && item.partitionKey)
@@ -1450,24 +1451,54 @@ export class MemoryStore implements DataStore {
     job.status = "processing";
     job.attempts += 1;
     job.updatedAt = new Date().toISOString();
+    this.jobLocks.set(job.id, { workerId, lockedAt: new Date().toISOString() });
     return structuredClone(job);
   }
 
-  async completeJob(jobId: string, result: Record<string, unknown>): Promise<void> {
+  async heartbeatJob(jobId: string, workerId: string): Promise<boolean> {
+    const job = this.jobs.get(jobId);
+    const lock = this.jobLocks.get(jobId);
+    if (!job || job.status !== "processing" || !lock || lock.workerId !== workerId) return false;
+    lock.lockedAt = new Date().toISOString();
+    job.updatedAt = new Date().toISOString();
+    return true;
+  }
+
+  async completeJob(jobId: string, result: Record<string, unknown>, workerId?: string): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) throw new StoreNotFoundError("任务不存在");
+    if (workerId) {
+      if (job.status !== "processing") throw new StoreConflictError("任务不存在或状态已变化");
+      const lock = this.jobLocks.get(jobId);
+      if (lock && lock.workerId !== workerId) {
+        throw new StoreConflictError("任务锁持有者不匹配");
+      }
+    } else if (job.status === "completed" || job.status === "failed") {
+      throw new StoreConflictError("任务不存在或状态已变化");
+    }
     job.status = "completed";
     job.result = structuredClone(result);
     job.error = null;
     job.updatedAt = new Date().toISOString();
+    this.jobLocks.delete(jobId);
   }
 
-  async failJob(jobId: string, error: string): Promise<void> {
+  async failJob(jobId: string, error: string, workerId?: string): Promise<void> {
     const job = this.jobs.get(jobId);
     if (!job) throw new StoreNotFoundError("任务不存在");
+    if (workerId) {
+      if (job.status !== "processing") throw new StoreConflictError("任务不存在或状态已变化");
+      const lock = this.jobLocks.get(jobId);
+      if (lock && lock.workerId !== workerId) {
+        throw new StoreConflictError("任务锁持有者不匹配");
+      }
+    } else if (job.status === "completed" || job.status === "failed") {
+      throw new StoreConflictError("任务不存在或状态已变化");
+    }
     job.status = job.attempts >= job.maxAttempts ? "failed" : "retry";
     job.error = error;
     job.updatedAt = new Date().toISOString();
+    this.jobLocks.delete(jobId);
   }
 
   async ping(): Promise<void> {}

@@ -1,5 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { adventurexWelcomeBubbles, adventurexWelcomeContent } from "@tomeet/contracts";
+import {
+  adventurexWelcomeBubbles,
+  adventurexWelcomeContent,
+  channelTurnFailureNotice
+} from "@tomeet/contracts";
 import type { WechatConnectionStore } from "@tomeet/data";
 import {
   CredentialCipher,
@@ -62,7 +66,10 @@ function setup() {
   const tomeet = {
     startOnboarding: vi.fn<AgentTextClient["startOnboarding"]>(async () => null),
     setResponseGeneration: vi.fn(async () => undefined),
-    sendTextBatch: vi.fn(async () => ({ reply: "Agent reply", stale: false })),
+    sendTextBatch: vi.fn<AgentTextClient["sendTextBatch"]>(async () => ({
+      reply: "Agent reply",
+      stale: false
+    })),
     sendText: vi.fn(async () => "Agent reply"),
     sendImages: vi.fn<AgentTextClient["sendImages"]>(async () => ({
       reply: "Image batch reply",
@@ -513,7 +520,7 @@ describe("WeChat worker runtime", () => {
         message_type: 1,
         from_user_id: activeConnection.ownerIlinkUserId,
         context_token: "context-2",
-        item_list: [{ type: 2 }]
+        item_list: [{ type: 9 }]
       }
     )).resolves.toBe(true);
 
@@ -525,7 +532,7 @@ describe("WeChat worker runtime", () => {
         kind: "unsupported_channel_message",
         facts: {
           channel: "wechat",
-          supportedInputs: ["text", "transcribed_audio"],
+          supportedInputs: ["text", "image", "transcribed_audio"],
           receivedMessageType: 1
         }
       }
@@ -534,6 +541,245 @@ describe("WeChat worker runtime", () => {
     expect(runtime.ilink.sendText).toHaveBeenCalledWith(
       expect.objectContaining({ text: "Agent event reply" })
     );
+  });
+
+  it("reports an unreadable picture as received instead of unsupported", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    runtime.dependencies.downloadImage = vi.fn(async () => {
+      throw new Error("微信图片缺少 CDN 下载参数");
+    });
+
+    await expect(handleWechatMessage(
+      runtime.dependencies,
+      activeConnection,
+      "bot-secret",
+      {
+        message_id: 81,
+        message_type: 1,
+        from_user_id: activeConnection.ownerIlinkUserId,
+        context_token: "context-81",
+        item_list: [{ type: 2, image_item: { thumb_media: {} } }]
+      }
+    )).resolves.toBe(true);
+
+    expect(runtime.tomeet.sendEvent).toHaveBeenCalledWith(expect.objectContaining({
+      event: {
+        kind: "channel_media_unreadable",
+        facts: { channel: "wechat", receivedKinds: ["image"], unreadableCount: 1 }
+      }
+    }));
+    expect(runtime.tomeet.sendImages).not.toHaveBeenCalled();
+  });
+
+  it("still answers the accompanying text when one picture of a turn is unreadable", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    runtime.dependencies.downloadImage = vi.fn(async () => {
+      throw new Error("微信图片下载失败 (404)");
+    });
+
+    await expect(handleWechatMessage(
+      runtime.dependencies,
+      activeConnection,
+      "bot-secret",
+      {
+        message_id: 82,
+        message_type: 1,
+        from_user_id: activeConnection.ownerIlinkUserId,
+        item_list: [
+          { type: 1, text_item: { text: "看看这张" } },
+          { type: 2, image_item: { media: { encrypt_query_param: "broken" } } }
+        ]
+      }
+    )).resolves.toBe(true);
+
+    expect(runtime.tomeet.sendEvent).not.toHaveBeenCalled();
+    expect(runtime.tomeet.sendTextBatch).toHaveBeenCalledWith(expect.objectContaining({
+      contents: ["看看这张"]
+    }));
+  });
+
+  it("keeps polling and advances the cursor when a message cannot be handled", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    runtime.dependencies.downloadImage = vi.fn(async () => {
+      throw new Error("微信图片格式不是 JPEG、PNG 或 WebP");
+    });
+    runtime.tomeet.sendEvent.mockRejectedValue(new Error("tomeet_api_error"));
+    runtime.ilink.getUpdates.mockResolvedValueOnce({
+      ret: 0,
+      get_updates_buf: "cursor-after-broken-image",
+      msgs: [{
+        message_id: 91,
+        message_type: 1,
+        from_user_id: activeConnection.ownerIlinkUserId,
+        item_list: [{ type: 2, image_item: { media: { encrypt_query_param: "broken" } } }]
+      }]
+    });
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: new AbortController().signal,
+      turnBatchWindowMs: 10
+    });
+
+    expect(runtime.store.markWechatConnectionError).not.toHaveBeenCalled();
+    expect(runtime.store.updateWechatConnectionCursor).toHaveBeenCalledWith(
+      activeConnection.id,
+      "worker-1",
+      "cursor-after-broken-image",
+      expect.any(String)
+    );
+  });
+
+  it("never folds a failed batch into the next one and apologizes once per turn", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    runtime.store.updateWechatConnectionCursor.mockResolvedValue(true);
+    runtime.tomeet.sendTextBatch.mockRejectedValue(new Error("agent_job_failed"));
+    let markApologyStarted!: () => void;
+    const apologyStarted = new Promise<void>((resolve) => { markApologyStarted = resolve; });
+    let releaseApology!: () => void;
+    const apologyGate = new Promise<void>((resolve) => { releaseApology = resolve; });
+    let bubble = 0;
+    runtime.ilink.sendText.mockImplementation(async (_input) => {
+      bubble += 1;
+      if (bubble === 1) {
+        markApologyStarted();
+        await apologyGate;
+      }
+      return "client-1";
+    });
+    let poll = 0;
+    const controller = new AbortController();
+    runtime.ilink.getUpdates.mockImplementation(async () => {
+      poll += 1;
+      if (poll === 1) {
+        return {
+          ret: 0,
+          get_updates_buf: "cursor-1",
+          msgs: [{
+            message_id: 101,
+            message_type: 1,
+            from_user_id: activeConnection.ownerIlinkUserId,
+            item_list: [{ type: 1, text_item: { text: "你好" } }]
+          }]
+        };
+      }
+      if (poll === 2) {
+        await apologyStarted;
+        return {
+          ret: 0,
+          get_updates_buf: "cursor-2",
+          msgs: [{
+            message_id: 102,
+            message_type: 1,
+            from_user_id: activeConnection.ownerIlinkUserId,
+            item_list: [{ type: 1, text_item: { text: "在吗" } }]
+          }]
+        };
+      }
+      releaseApology();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      controller.abort();
+      return { ret: 0, msgs: [], get_updates_buf: "cursor-3" };
+    });
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: controller.signal,
+      turnBatchWindowMs: 0
+    });
+
+    expect(runtime.tomeet.sendTextBatch.mock.calls.map(([input]) => input.messageIds)).toEqual([
+      ["101"],
+      ["102"]
+    ]);
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+      channelTurnFailureNotice.zh,
+      channelTurnFailureNotice.zh
+    ]);
+  });
+
+  it("delivers a superseding batch even when the batch before it failed", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    runtime.store.updateWechatConnectionCursor.mockResolvedValue(true);
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    let rejectFirst!: (error: Error) => void;
+    runtime.tomeet.sendTextBatch
+      .mockImplementationOnce(async () => {
+        markFirstStarted();
+        return new Promise<{ reply: string; stale: boolean }>((_, reject) => {
+          rejectFirst = reject;
+        });
+      })
+      .mockResolvedValue({ reply: "合并后的回复", stale: false });
+    let registrations = 0;
+    runtime.tomeet.setResponseGeneration.mockImplementation(async () => {
+      registrations += 1;
+      if (registrations === 2) {
+        setTimeout(() => rejectFirst(new Error("agent_job_failed")), 20);
+      }
+    });
+    let poll = 0;
+    const controller = new AbortController();
+    runtime.ilink.getUpdates.mockImplementation(async () => {
+      poll += 1;
+      if (poll === 1) {
+        return {
+          ret: 0,
+          get_updates_buf: "cursor-1",
+          msgs: [{
+            message_id: 111,
+            message_type: 1,
+            from_user_id: activeConnection.ownerIlinkUserId,
+            item_list: [{ type: 1, text_item: { text: "你好" } }]
+          }]
+        };
+      }
+      if (poll === 2) {
+        await firstStarted;
+        return {
+          ret: 0,
+          get_updates_buf: "cursor-2",
+          msgs: [{
+            message_id: 112,
+            message_type: 1,
+            from_user_id: activeConnection.ownerIlinkUserId,
+            item_list: [{ type: 1, text_item: { text: "在吗" } }]
+          }]
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      controller.abort();
+      return { ret: 0, msgs: [], get_updates_buf: "cursor-3" };
+    });
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: controller.signal,
+      turnBatchWindowMs: 0
+    });
+
+    expect(runtime.tomeet.sendTextBatch.mock.calls.map(([input]) => input.messageIds)).toEqual([
+      ["111"],
+      ["111", "112"]
+    ]);
+    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
+      "合并后的回复"
+    ]);
   });
 
   it("marks iLink -14 as requiring a fresh QR authorization", async () => {

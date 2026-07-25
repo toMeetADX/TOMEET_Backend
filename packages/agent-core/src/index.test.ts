@@ -102,6 +102,42 @@ describe("mock agent intelligence", () => {
     expect(selectRelevantMemories([memory], ["咖啡馆"], 6)).toHaveLength(1);
   });
 
+  it("exposes confirmed social hooks so the Agent can see how far the profile has come", () => {
+    const now = nowIso();
+    const context = buildAgentContext([], createDefaultUserModel("u1"), {
+      socialHooks: [{
+        id: "hook-1",
+        userId: "u1",
+        hookText: "在黑客松上从零搭了一个社交 Agent",
+        sourceMessageIds: ["m1"],
+        status: "active",
+        createdAt: now,
+        updatedAt: now
+      }]
+    });
+    expect(context.promptRuntime.profileReadiness).toEqual({
+      confirmedSocialHooks: ["在黑客松上从零搭了一个社交 Agent"],
+      confirmedSocialHookCount: 1
+    });
+    expect(buildAgentContext([], createDefaultUserModel("u1")).promptRuntime.profileReadiness)
+      .toEqual({ confirmedSocialHooks: [], confirmedSocialHookCount: 0 });
+  });
+
+  it("turns an image observation into a question about the user instead of about the picture", async () => {
+    const intelligence = new MockAgentIntelligence();
+    const insight = await intelligence.reply(
+      buildAgentContext([], createDefaultUserModel("u1")),
+      [
+        "[图片观察] 用户刚发来 2 张图片。",
+        "可直接观察到：一张是技术分享会现场；一张是一碗面",
+        "建议的追问方向：这场分享会你是去听的，还是自己上台讲的？"
+      ].join("\n")
+    );
+    expect(insight.reply).toBe("这场分享会你是去听的，还是自己上台讲的？");
+    expect(insight.onboardingTransition).toBe("engaged");
+    expect(insight.socialHooks).toEqual([]);
+  });
+
   it("moves to text after image refusal without asking why", async () => {
     const intelligence = new MockAgentIntelligence();
     const context = buildAgentContext([], createDefaultUserModel("u1"), {

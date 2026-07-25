@@ -4,6 +4,7 @@ import type {
   MatchRequest,
   MatchRoom,
   Message,
+  SocialHook,
   UserMemory,
   UserMemoryProfile,
   UserModel
@@ -106,15 +107,25 @@ function selectMemories(
   };
 }
 
+function buildProfileReadiness(socialHooks: SocialHook[]): Record<string, unknown> {
+  return {
+    confirmedSocialHooks: socialHooks.slice(0, 8).map((hook) => hook.hookText),
+    confirmedSocialHookCount: socialHooks.length
+  };
+}
+
 function buildPromptRuntime(
   currentIntent: Record<string, unknown>,
   matchRequest: MatchRequest | null,
   matchOptions: MatchOptionContext | null,
   onboardingState: AdventurexOnboardingState | null,
   room: MatchRoom | null,
+  socialHooks: SocialHook[],
   maxTokens: number
 ): Record<string, unknown> {
+  const profileReadiness = buildProfileReadiness(socialHooks);
   const projected = {
+    profileReadiness,
     currentIntent,
     matchRequest: matchRequest
       ? {
@@ -166,6 +177,7 @@ function buildPromptRuntime(
   };
   if (estimateTokens(projected) <= maxTokens) return projected;
   return {
+    profileReadiness,
     currentIntentSummary: truncateToEstimatedTokens(JSON.stringify(currentIntent), Math.floor(maxTokens * 0.55)),
     matchRequest: matchRequest
       ? {
@@ -219,6 +231,7 @@ export function buildAgentContext(
     relevantMemories?: UserMemory[];
     matchOptions?: MatchOptionContext | null;
     onboardingState?: AdventurexOnboardingState | null;
+    socialHooks?: SocialHook[];
     excludeMessageId?: string;
   } = {},
   options: ContextAssemblerOptions = {}
@@ -255,16 +268,25 @@ export function buildAgentContext(
   const matchOptions = socialState.matchOptions ?? null;
   const onboardingState = socialState.onboardingState ?? null;
   const room = socialState.room ?? null;
+  const socialHooks = socialState.socialHooks ?? [];
   const promptRuntime = buildPromptRuntime(
     userModel.currentIntent,
     matchRequest,
     matchOptions,
     onboardingState,
     room,
+    socialHooks,
     limits.runtimeTokenBudget
   );
   const runtimeTokens = estimateTokens(promptRuntime);
-  if (estimateTokens({ currentIntent: userModel.currentIntent, matchRequest, matchOptions, onboardingState, room }) > runtimeTokens) {
+  if (estimateTokens({
+    currentIntent: userModel.currentIntent,
+    matchRequest,
+    matchOptions,
+    onboardingState,
+    room,
+    profileReadiness: buildProfileReadiness(socialHooks)
+  }) > runtimeTokens) {
     truncatedSections.push("runtimeState");
   }
 

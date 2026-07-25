@@ -351,6 +351,54 @@ describe("hosted Agent web search", () => {
   });
 });
 
+describe("hosted Agent exploration pressure", () => {
+  it("forbids mirror replies in planning and rewrites one at the publish gate", async () => {
+    const requestBodies = stubChatResponses(
+      plannedReply({
+        replyDraft: "你在打黑客松，听起来挺有意思的",
+        searchPlan: { required: false, queries: [] }
+      }),
+      verifiedReply("你在打黑客松\n\n你负责的是里面哪一块？", {
+        status: "corrected",
+        issues: ["原回复只复述了用户原话，没有推进了解"]
+      })
+    );
+
+    const insight = await hostedWithSearch().reply(agentContext(), "我在打黑客松");
+
+    expect(insight.reply).toContain("哪一块");
+    expect(requestBodies[0]).toContain("往前走一步");
+    expect(requestBodies[0]).toContain("不允许输出");
+    expect(requestBodies[1]).toContain("视为空转");
+  });
+
+  it("treats an image observation as evidence about the person rather than the user's own words", async () => {
+    const requestBodies = stubChatResponses(
+      plannedReply({
+        replyDraft: "这场分享会你是去听的，还是自己上台讲的？",
+        searchPlan: { required: false, queries: [] },
+        onboardingTransition: "engaged"
+      }),
+      verifiedReply("这场分享会你是去听的，还是自己上台讲的？")
+    );
+
+    const insight = await hostedWithSearch().reply(
+      agentContext(),
+      [
+        "[图片观察] 用户刚发来 2 张图片。",
+        "可直接观察到：一张是技术分享会现场；一张是一碗面",
+        "关于用户本人的待求证线索：用户可能亲自参加了这场技术分享会"
+      ].join("\n")
+    );
+
+    expect(insight.onboardingTransition).toBe("engaged");
+    expect(insight.socialHooks).toEqual([]);
+    expect(requestBodies[0]).toContain("newMessage 以 [图片观察] 开头时");
+    expect(requestBodies[0]).toContain("不要写进 socialHooks");
+    expect(requestBodies[0]).toContain("profileReadiness");
+  });
+});
+
 describe("hosted Agent memory isolation", () => {
   it("retrieves memory after planning and never lets evidence change frozen actions", async () => {
     const action = { type: "start_match", intent: { rawText: "想认识新朋友" } };
@@ -799,12 +847,12 @@ describe("hosted Agent product-event composition", () => {
 });
 
 describe("hosted vibe matchmaking", () => {
-  it("sends a group of images to one vision request and asks one combined question", async () => {
+  it("sends a group of images to one vision request that observes the person without speaking", async () => {
     const requestBodies = stubChatResponses({
       observableDetails: ["两张图里都出现了夜间城市光线"],
       uncertainty: ["无法确定拍摄地点"],
-      suggestedQuestion: "这组夜景里你最想保留的是哪种感觉？",
-      reply: "这几张图放在一起有一种连续的夜间漫游感\n\n你最想保留的是哪种感觉？"
+      personCues: ["用户可能经常在夜里出门拍照"],
+      suggestedQuestion: "这些夜景是你自己走出去拍的吗？"
     });
 
     const result = await hostedWithSearch().understandMultimodal({
@@ -814,7 +862,9 @@ describe("hosted vibe matchmaking", () => {
       preferredLanguage: "zh"
     });
 
-    expect(result.reply).toContain("哪种感觉");
+    expect(result.reply).toBeUndefined();
+    expect(result.personCues).toEqual(["用户可能经常在夜里出门拍照"]);
+    expect(result.suggestedQuestion).toBe("这些夜景是你自己走出去拍的吗？");
     const payload = JSON.parse(requestBodies[0]!) as {
       messages: Array<{ content: string | Array<{ type: string; image_url?: { url: string } }> }>;
     };
@@ -822,7 +872,8 @@ describe("hosted vibe matchmaking", () => {
     expect(Array.isArray(content)).toBe(true);
     expect((content as Array<{ type: string }>).filter((item) => item.type === "image_url"))
       .toHaveLength(2);
-    expect(requestBodies[0]).toContain("作为一个整体理解");
+    expect(requestBodies[0]).toContain("作为一个整体来看");
+    expect(requestBodies[0]).toContain("只负责看，不负责说话");
   });
 
   it("sends continuous multimodal vibe context without any matching tags", async () => {
