@@ -153,10 +153,28 @@ export interface MatchRequest {
   requestId: string;
   userId: string;
   intentSnapshot: Record<string, unknown>;
-  status: "matching" | "matched" | "cancelled";
+  status: "matching" | "invited" | "matched" | "cancelled";
   roomId: string | null;
+  inviteId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface MatchInvite {
+  inviteId: string;
+  kind: "initial_pair" | "room_join";
+  roomId: string | null;
+  participants: Array<{
+    userId: string;
+    requestId: string;
+    displayName: string;
+    accepted: boolean;
+  }>;
+  offlineGameId: string;
+  matchSummary: string;
+  status: "pending" | "accepted" | "declined" | "cancelled";
+  createdAt: string;
+  resolvedAt: string | null;
 }
 
 export interface OfflineGame {
@@ -183,6 +201,8 @@ export interface MatchRoom {
   offlineGame: OfflineGame;
   matchSummary: string;
   status: "confirming" | "confirmed" | "completed";
+  matchingStatus: "active" | "stopped" | "full";
+  capacity: number;
   createdAt: string;
   completedAt: string | null;
 }
@@ -204,9 +224,13 @@ export interface MatchRoom {
 | `POST` | `/match-requests` | Bearer | 201/202 | 创建匹配请求 |
 | `GET` | `/match-requests/:id` | Bearer | 200 | 查询匹配状态 |
 | `POST` | `/match-requests/:id/cancel` | Bearer | 200 | 取消等待中的匹配 |
+| `GET` | `/match-invites/:id` | Bearer | 200 | 查询双边或入房邀请 |
+| `POST` | `/match-invites/:id/accept` | Bearer | 200 | 接受匹配邀请 |
+| `POST` | `/match-invites/:id/decline` | Bearer | 200 | 拒绝匹配邀请 |
 | `GET` | `/jobs/:id` | Bearer | 200 | 查询异步任务 |
 | `GET` | `/rooms/:id` | Bearer | 200 | 查询房间 |
 | `POST` | `/rooms/:id/confirm` | Bearer | 200 | 确认参加 |
+| `POST` | `/rooms/:id/stop-match` | Bearer | 200 | 停止房间继续匹配 |
 | `POST` | `/rooms/:id/complete` | Bearer | 200 | 标记活动完成 |
 | `POST` | `/rooms/:id/feedback` | Bearer | 200/202 | 提交活动反馈 |
 | `POST` | `/wechat/connect/sessions` | Bearer 推荐；可匿名 | 201 | 创建微信扫码会话并优先绑定当前 Web 用户 |
@@ -482,12 +506,13 @@ interface OfflineGamesResponse {
 ```ts
 interface CreateMatchRequestResponse {
   matchRequest: MatchRequest | null;
+  invite: MatchInvite | null;
   job: LlmJob;
 }
 ```
 
-- `201`：本次请求内已经匹配成功
-- `202`：已进入异步匹配
+- `201`：用户已进入房间
+- `202`：已进入队列或已收到待处理邀请
 - `409`：社交意图未确认，或用户仍有未结束房间
 
 ### 8.2 查询匹配
@@ -500,13 +525,21 @@ interface MatchRequestResponse {
 }
 ```
 
-当 `status === "matched"` 时，读取 `roomId` 并调用房间接口。
+当 `status === "invited"` 时读取 `inviteId`；当 `status === "matched"` 时读取 `roomId` 并调用房间接口。
 
 ### 8.3 取消匹配
 
 `POST /match-requests/:id/cancel`
 
 无请求体，只能取消 `matching` 状态。
+
+### 8.4 处理匹配邀请
+
+- `GET /match-invites/:id`
+- `POST /match-invites/:id/accept`，请求体 `{ "userId": "UUID" }`
+- `POST /match-invites/:id/decline`，请求体 `{ "userId": "UUID" }`
+
+初始邀请需要双方接受，第二位接受后响应中的 `room` 才会非空。`room_join` 邀请只需要被邀请的新用户接受。
 
 ## 9. 房间和反馈
 
@@ -536,13 +569,23 @@ interface RoomResponse {
 
 所有成员确认后，房间状态变为 `confirmed`。
 
-### 9.3 标记完成
+### 9.3 停止房间匹配
+
+`POST /rooms/:id/stop-match`
+
+```json
+{ "userId": "UUID" }
+```
+
+任一房间成员都可以调用。停止后 `matchingStatus === "stopped"`；达到 `capacity` 时后端自动设置为 `full`。
+
+### 9.4 标记完成
 
 `POST /rooms/:id/complete`
 
 无请求体。当前用户必须是房间成员，且房间状态允许完成。重复调用按后端业务状态处理。
 
-### 9.4 提交反馈
+### 9.5 提交反馈
 
 `POST /rooms/:id/feedback`
 

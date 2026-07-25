@@ -1,5 +1,6 @@
 import type {
   AdventurexOnboardingState,
+  MatchInvite,
   MatchOptionContext,
   MatchRequest,
   MatchRoom,
@@ -29,6 +30,7 @@ export interface AgentContext {
   matchRequest: MatchRequest | null;
   matchOptions: MatchOptionContext | null;
   onboardingState: AdventurexOnboardingState | null;
+  matchInvite: MatchInvite | null;
   room: MatchRoom | null;
   promptRuntime: Record<string, unknown>;
   budget: AgentContextBudget;
@@ -111,6 +113,7 @@ function buildPromptRuntime(
   matchRequest: MatchRequest | null,
   matchOptions: MatchOptionContext | null,
   onboardingState: AdventurexOnboardingState | null,
+  matchInvite: MatchInvite | null,
   room: MatchRoom | null,
   maxTokens: number
 ): Record<string, unknown> {
@@ -146,10 +149,21 @@ function buildPromptRuntime(
         }
       : null,
     onboardingState,
+    matchInvite: matchInvite
+      ? {
+          inviteId: matchInvite.inviteId,
+          kind: matchInvite.kind,
+          roomId: matchInvite.roomId,
+          status: matchInvite.status,
+          participants: matchInvite.participants
+        }
+      : null,
     room: room
       ? {
           roomId: room.roomId,
           status: room.status,
+          matchingStatus: room.matchingStatus,
+          capacity: room.capacity,
           members: room.members.map((member) => ({
             userId: member.userId,
             displayName: member.displayName,
@@ -193,10 +207,15 @@ function buildPromptRuntime(
         }
       : null,
     onboardingState,
+    matchInvite: matchInvite
+      ? { inviteId: matchInvite.inviteId, kind: matchInvite.kind, status: matchInvite.status }
+      : null,
     room: room
       ? {
           roomId: room.roomId,
           status: room.status,
+          matchingStatus: room.matchingStatus,
+          capacity: room.capacity,
           memberIds: room.members.map((member) => member.userId),
           offlineGame: {
             id: room.offlineGame.id,
@@ -213,6 +232,7 @@ export function buildAgentContext(
   userModel: UserModel,
   socialState: {
     matchRequest?: MatchRequest | null;
+    matchInvite?: MatchInvite | null;
     room?: MatchRoom | null;
     checkpoint?: string;
     memoryProfile?: UserMemoryProfile | null;
@@ -254,17 +274,26 @@ export function buildAgentContext(
   const matchRequest = socialState.matchRequest ?? null;
   const matchOptions = socialState.matchOptions ?? null;
   const onboardingState = socialState.onboardingState ?? null;
+  const matchInvite = socialState.matchInvite ?? null;
   const room = socialState.room ?? null;
   const promptRuntime = buildPromptRuntime(
     userModel.currentIntent,
     matchRequest,
     matchOptions,
     onboardingState,
+    matchInvite,
     room,
     limits.runtimeTokenBudget
   );
   const runtimeTokens = estimateTokens(promptRuntime);
-  if (estimateTokens({ currentIntent: userModel.currentIntent, matchRequest, matchOptions, onboardingState, room }) > runtimeTokens) {
+  if (estimateTokens({
+    currentIntent: userModel.currentIntent,
+    matchRequest,
+    matchOptions,
+    onboardingState,
+    matchInvite,
+    room
+  }) > runtimeTokens) {
     truncatedSections.push("runtimeState");
   }
 
@@ -284,6 +313,7 @@ export function buildAgentContext(
     matchRequest,
     matchOptions,
     onboardingState,
+    matchInvite,
     room,
     promptRuntime,
     budget: {

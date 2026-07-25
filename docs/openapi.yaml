@@ -497,6 +497,77 @@ paths:
           description: 已加入开放局
         "409":
           $ref: "#/components/responses/Conflict"
+  /match-invites/{id}:
+    get:
+      tags: [Matchmaking]
+      summary: 查询匹配邀请
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: 当前用户参与的匹配邀请
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [invite]
+                properties:
+                  invite:
+                    $ref: "#/components/schemas/MatchInvite"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /match-invites/{id}/accept:
+    post:
+      tags: [Matchmaking]
+      summary: 接受初始匹配或入房邀请
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserIdBody"
+      responses:
+        "200":
+          description: 邀请接受结果；初始邀请双方接受后才创建房间
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MatchInviteResolution"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /match-invites/{id}/decline:
+    post:
+      tags: [Matchmaking]
+      summary: 拒绝初始匹配或入房邀请
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserIdBody"
+      responses:
+        "200":
+          description: 邀请拒绝及重新入队结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MatchInviteResolution"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /jobs/{id}:
     get:
       tags: [Jobs]
@@ -564,6 +635,39 @@ paths:
                     $ref: "#/components/schemas/MatchRoom"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /rooms/{id}/stop-match:
+    post:
+      tags: [Rooms]
+      summary: 停止房间继续匹配新成员
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserIdBody"
+      responses:
+        "200":
+          description: 已停止继续匹配；待处理候选重新入队
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [room, requeuedRequestIds]
+                properties:
+                  room:
+                    $ref: "#/components/schemas/MatchRoom"
+                  requeuedRequestIds:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Uuid"
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -1214,7 +1318,7 @@ components:
           format: date-time
     MatchRequest:
       type: object
-      required: [requestId, userId, intentSnapshot, status, phase, proactivePushEnabled, activeRoundId, optionsExpiresAt, roomId, createdAt, updatedAt]
+      required: [requestId, userId, intentSnapshot, status, phase, proactivePushEnabled, activeRoundId, optionsExpiresAt, roomId, inviteId, createdAt, updatedAt]
       properties:
         requestId:
           $ref: "#/components/schemas/Uuid"
@@ -1224,7 +1328,7 @@ components:
           $ref: "#/components/schemas/JsonObject"
         status:
           type: string
-          enum: [matching, matched, cancelled, expired]
+          enum: [matching, invited, matched, cancelled, expired]
         phase:
           type: string
           enum: [waiting, offered, selected, settling, push_consent, watching]
@@ -1239,12 +1343,72 @@ components:
         roomId:
           type: [string, "null"]
           format: uuid
+        inviteId:
+          type: [string, "null"]
+          format: uuid
         createdAt:
           type: string
           format: date-time
         updatedAt:
           type: string
           format: date-time
+    MatchInviteParticipant:
+      type: object
+      required: [userId, requestId, displayName, accepted]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        requestId:
+          $ref: "#/components/schemas/Uuid"
+        displayName:
+          type: string
+        accepted:
+          type: boolean
+    MatchInvite:
+      type: object
+      required: [inviteId, kind, roomId, participants, offlineGameId, matchSummary, status, createdAt, resolvedAt]
+      properties:
+        inviteId:
+          $ref: "#/components/schemas/Uuid"
+        kind:
+          type: string
+          enum: [initial_pair, room_join]
+        roomId:
+          type: [string, "null"]
+          format: uuid
+        participants:
+          type: array
+          minItems: 1
+          maxItems: 2
+          items:
+            $ref: "#/components/schemas/MatchInviteParticipant"
+        offlineGameId:
+          type: string
+        matchSummary:
+          type: string
+        status:
+          type: string
+          enum: [pending, accepted, declined, cancelled]
+        createdAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: [string, "null"]
+          format: date-time
+    MatchInviteResolution:
+      type: object
+      required: [invite, room, requeuedRequestIds]
+      properties:
+        invite:
+          $ref: "#/components/schemas/MatchInvite"
+        room:
+          oneOf:
+            - $ref: "#/components/schemas/MatchRoom"
+            - type: "null"
+        requeuedRequestIds:
+          type: array
+          items:
+            $ref: "#/components/schemas/Uuid"
     RoomMember:
       type: object
       required: [userId, displayName, confirmed, participationStatus]
@@ -1260,13 +1424,13 @@ components:
           enum: [invited, confirmed, withdrawn]
     MatchRoom:
       type: object
-      required: [roomId, members, offlineGame, matchSummary, status, sourceDraftId, targetPlayers, recruitmentStatus, version, meetingPoint, createdAt, completedAt]
+      required: [roomId, members, offlineGame, matchSummary, status, sourceDraftId, targetPlayers, recruitmentStatus, version, meetingPoint, matchingStatus, capacity, createdAt, completedAt]
       properties:
         roomId:
           $ref: "#/components/schemas/Uuid"
         members:
           type: array
-          minItems: 3
+          minItems: 2
           maxItems: 10
           items:
             $ref: "#/components/schemas/RoomMember"
@@ -1292,6 +1456,13 @@ components:
           minimum: 0
         meetingPoint:
           type: [string, "null"]
+        matchingStatus:
+          type: string
+          enum: [active, stopped, full]
+        capacity:
+          type: integer
+          minimum: 2
+          maximum: 10
         createdAt:
           type: string
           format: date-time
@@ -1514,11 +1685,15 @@ components:
           description: 当前版本保留字段
     CreateMatchRequestResponse:
       type: object
-      required: [matchRequest, job]
+      required: [matchRequest, invite, job]
       properties:
         matchRequest:
           oneOf:
             - $ref: "#/components/schemas/MatchRequest"
+            - type: "null"
+        invite:
+          oneOf:
+            - $ref: "#/components/schemas/MatchInvite"
             - type: "null"
         job:
           $ref: "#/components/schemas/LlmJob"

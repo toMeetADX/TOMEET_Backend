@@ -27,6 +27,7 @@ function confirmedRoomContext(proactivePushEnabled: boolean): AgentContext {
       activeRoundId: null,
       optionsExpiresAt: null,
       roomId: "room-confirmed",
+      inviteId: null,
       createdAt: now,
       updatedAt: now
     },
@@ -56,6 +57,8 @@ function confirmedRoomContext(proactivePushEnabled: boolean): AgentContext {
       recruitmentStatus: "full",
       version: 0,
       meetingPoint: null,
+      matchingStatus: "full",
+      capacity: 3,
       createdAt: now,
       completedAt: null
     }
@@ -541,6 +544,7 @@ describe("hosted Agent proactive matching actions", () => {
         activeRoundId: null,
         optionsExpiresAt: null,
         roomId: null,
+        inviteId: null,
         createdAt: now,
         updatedAt: now
       }
@@ -831,10 +835,10 @@ describe("hosted vibe matchmaking", () => {
       requestBody = String(init?.body ?? "");
       return new Response(JSON.stringify({
         choices: [{ message: { content: JSON.stringify({
-          memberIds: ["u1", "u2", "u3"],
-          requestIds: ["r1", "r2", "r3"],
+          memberIds: ["u1", "u2"],
+          requestIds: ["r1", "r2"],
           offlineGameId: "game-1",
-          summary: "三个人的表达节奏和相处空间能自然形成流动。"
+          summary: "两个人的表达节奏和相处空间能自然形成流动。"
         }) } }]
       }), { status: 200, headers: { "Content-Type": "application/json" } });
     }));
@@ -858,6 +862,7 @@ describe("hosted vibe matchmaking", () => {
           status: "matching" as const,
           proactivePushEnabled: false,
           roomId: null,
+          inviteId: null,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         },

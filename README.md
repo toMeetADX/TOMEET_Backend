@@ -2,7 +2,7 @@
 
 TOMEET 是一个可以长期对话的社交 Agent。
 
-Agent 通过用户主动提供的文本、图片、短录音和持续对话认识用户。当用户想社交时，系统使用 LLM 匹配合适的 3–10 人，并从人工策划的线下游戏中选择合适的游戏。活动结束后，用户向 Agent 反馈感受，Agent 据此持续对齐用户意图。
+Agent 通过用户主动提供的文本、图片、短录音和持续对话认识用户。当用户想社交时，系统先使用 LLM 贪心选择当前最高匹配的一位用户；双方接受后建立房间，再逐位邀请新用户直至满员或成员明确停止匹配。活动结束后，用户向 Agent 反馈感受，Agent 据此持续对齐用户意图。
 
 ## 当前实现
 
@@ -176,8 +176,8 @@ flowchart LR
     Conversation["与 Agent 长期对话"]
     Understanding["持续认识用户"]
     Intent["用户表达社交意图"]
-    Match["LLM 匹配 3–10 人和线下游戏"]
-    Room["生成匹配房间"]
+    Match["LLM 贪心选择下一位用户"]
+    Room["双边接受后建房并逐位扩充"]
     Offline["线下参与游戏"]
     Feedback["向 Agent 反馈感受"]
     Alignment["更新用户理解和意图"]
@@ -262,13 +262,13 @@ LLM 匹配任务只读取受治理的自然语言输入：
 
 原始 profile、详细记忆、多模态原文、兴趣标签、`intentTags`、`traits`、性格类型、人口属性、关键词计数和标签分数都不会进入匹配模型输入。游戏目录可以保留运营元数据，但匹配只看到自然语言体验说明与硬性人数条件。
 
-LLM 输出结构化 `MatchDecision`：
+初始 LLM 输出结构化 `MatchDecision`：
 
-- 3–10 名成员。
+- 触发用户和当前最高匹配的另一位用户，共 2 人。
 - 选中的线下游戏。
 - 匹配判断摘要。
 
-系统校验成员仍在等待、没有重复分配、人数符合要求、游戏适合该人数后创建房间。
+系统先创建双边邀请，双方接受后才创建房间。房间处于 `active` 时，每次只为当前最高匹配的一位等待用户创建入房邀请；接受后原子加入并继续下一轮。达到 `capacity` 自动变为 `full`，任一成员明确说“停止匹配”等同义指令后变为 `stopped`。
 
 ### Offline Game Catalog
 
@@ -286,9 +286,10 @@ LLM 输出结构化 `MatchDecision`：
 
 匹配房间只保存：
 
-- 3–10 名成员。
+- 2–10 名成员。
 - 选中的线下游戏。
 - 成员确认状态。
+- 持续匹配状态和房间人数上限。
 - 活动完成状态。
 
 房间不承载在线游戏过程。
@@ -369,7 +370,9 @@ export interface MatchRequest {
   requestId: string;
   userId: string;
   intentSnapshot: Record<string, unknown>;
-  status: "matching" | "matched" | "cancelled" | "expired";
+  status: "matching" | "invited" | "matched" | "cancelled" | "expired";
+  roomId: string | null;
+  inviteId: string | null;
 }
 
 export interface MatchDecision {
@@ -383,6 +386,8 @@ export interface MatchRoom {
   memberIds: string[];
   offlineGameId: string;
   status: "confirming" | "confirmed" | "completed";
+  matchingStatus: "active" | "stopped" | "full";
+  capacity: number;
 }
 
 export interface PostEventFeedback {
@@ -404,9 +409,13 @@ POST /agent/multimodal-inputs
 POST /match-requests
 GET  /match-requests/:id
 POST /match-requests/:id/cancel
+GET  /match-invites/:id
+POST /match-invites/:id/accept
+POST /match-invites/:id/decline
 
 GET  /rooms/:id
 POST /rooms/:id/confirm
+POST /rooms/:id/stop-match
 POST /rooms/:id/complete
 POST /rooms/:id/feedback
 ```
@@ -521,6 +530,8 @@ ADVENTUREX_MATCHING_V1
 - 用户能通过 Agent 收到并自然语言选择 1–3 个现场活动候选。
 - 系统只用明确接受的候选原子创建 3–10 人确认房间，并支持合适的开放局补位。
 - 成员、集合信息和招募状态变化能通过幂等 Agent 消息主动通知。
+- LLM 能按贪心机制逐位选择候选用户并选择一款已有线下游戏。
+- 系统能在双边接受后建房，持续邀请新成员，并在满员或收到停止指令后终止匹配。
 - 活动结束后，用户能向 Agent 反馈感受和连接结果。
 - 反馈能更新用户意图，并影响下一次匹配和游戏选择。
 

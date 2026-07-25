@@ -6,6 +6,8 @@ import {
   llmJobSchema,
   matchChoiceSchema,
   matchDraftSchema,
+  matchInviteResolutionSchema,
+  matchInviteSchema,
   matchOptionContextSchema,
   matchOptionOfferSchema,
   matchRequestSchema,
@@ -26,6 +28,8 @@ import {
   type FinalRoomDecision,
   type MatchChoice,
   type MatchDecision,
+  type MatchInvite,
+  type MatchInviteResolution,
   type MatchOptionContext,
   type MatchOptionOffer,
   type MatchRequest,
@@ -34,6 +38,7 @@ import {
   type Message,
   type OfflineGame,
   type PostEventFeedback,
+  type RoomJoinDecision,
   type SaveMatchChoicesInput,
   type SocialHook,
   type SocialHookDraft,
@@ -41,7 +46,7 @@ import {
   type UserMemoryProfile,
   type UserModel
 } from "@tomeet/contracts";
-import type { MatchCandidate } from "@tomeet/matchmaking";
+import type { MatchCandidate, RoomMatchCandidate } from "@tomeet/matchmaking";
 import type {
   ApplyMemoryChangesInput,
   ApplyMemoryChangesResult,
@@ -53,7 +58,8 @@ import type {
   MultimodalRecordInput,
   RoomChangeNotification,
   RoundSettlementState,
-  SaveRoundPlanInput
+  SaveRoundPlanInput,
+  StopRoomMatchingResult
 } from "./store.js";
 import { StoreConflictError, StoreNotFoundError } from "./store.js";
 
@@ -119,8 +125,26 @@ function mapMatchRequest(row: JsonRow): MatchRequest {
     activeRoundId: row.active_round_id ?? row.activeRoundId ?? null,
     optionsExpiresAt: normalizeDateTime(row.options_expires_at ?? row.optionsExpiresAt ?? null),
     roomId: row.room_id ?? row.roomId ?? null,
+    inviteId: row.invite_id ?? row.inviteId ?? null,
     createdAt: normalizeDateTime(row.created_at ?? row.createdAt),
     updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
+  });
+}
+
+function mapMatchInvite(row: JsonRow): MatchInvite {
+  return matchInviteSchema.parse({
+    ...row,
+    createdAt: normalizeDateTime(row.createdAt ?? row.created_at),
+    resolvedAt: normalizeDateTime(row.resolvedAt ?? row.resolved_at ?? null)
+  });
+}
+
+function mapMatchInviteResolution(data: unknown): MatchInviteResolution {
+  const row = unwrapRpcData(data) as JsonRow;
+  return matchInviteResolutionSchema.parse({
+    invite: mapMatchInvite(row.invite as JsonRow),
+    room: row.room ? matchRoomSchema.parse(row.room) : null,
+    requeuedRequestIds: row.requeuedRequestIds ?? row.requeued_request_ids ?? []
   });
 }
 
@@ -938,6 +962,60 @@ export class SupabaseStore implements DataStore {
     return matchRoomSchema.parse(data);
   }
 
+  async getMatchInvite(inviteId: string): Promise<MatchInvite | null> {
+    const { data, error } = await this.client.rpc("get_match_invite", { p_invite_id: inviteId });
+    if (error) this.throwError("读取匹配邀请", error);
+    return data ? mapMatchInvite(unwrapRpcData(data) as JsonRow) : null;
+  }
+
+  async getLatestMatchInviteForUser(userId: string): Promise<MatchInvite | null> {
+    const { data, error } = await this.client
+      .from("match_invites")
+      .select("id")
+      .or(`inviter_user_id.eq.${userId},invitee_user_id.eq.${userId}`)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) this.throwError("读取用户最近匹配邀请", error);
+    return data ? this.getMatchInvite(String(data.id)) : null;
+  }
+
+  async createInitialMatchInvite(decision: MatchDecision, sourceJobId?: string): Promise<MatchInvite> {
+    const { data, error } = await this.client.rpc("create_initial_match_invite", {
+      p_decision: decision,
+      p_source_job_id: sourceJobId ?? null
+    });
+    if (error) this.throwError("创建初始匹配邀请", error);
+    return mapMatchInvite(unwrapRpcData(data) as JsonRow);
+  }
+
+  async createRoomJoinInvite(decision: RoomJoinDecision, sourceJobId?: string): Promise<MatchInvite> {
+    const { data, error } = await this.client.rpc("create_room_join_invite", {
+      p_decision: decision,
+      p_source_job_id: sourceJobId ?? null
+    });
+    if (error) this.throwError("创建入房邀请", error);
+    return mapMatchInvite(unwrapRpcData(data) as JsonRow);
+  }
+
+  async acceptMatchInvite(inviteId: string, userId: string): Promise<MatchInviteResolution> {
+    const { data, error } = await this.client.rpc("accept_match_invite", {
+      p_invite_id: inviteId,
+      p_user_id: userId
+    });
+    if (error) this.throwError("接受匹配邀请", error);
+    return mapMatchInviteResolution(data);
+  }
+
+  async declineMatchInvite(inviteId: string, userId: string): Promise<MatchInviteResolution> {
+    const { data, error } = await this.client.rpc("decline_match_invite", {
+      p_invite_id: inviteId,
+      p_user_id: userId
+    });
+    if (error) this.throwError("拒绝匹配邀请", error);
+    return mapMatchInviteResolution(data);
+  }
+
   async listMatchCandidates(limit = 50): Promise<MatchCandidate[]> {
     const { data, error } = await this.client.rpc("list_match_candidates", { p_limit: Math.min(limit, 100) });
     if (error) this.throwError("读取匹配候选人", error);
@@ -956,19 +1034,36 @@ export class SupabaseStore implements DataStore {
     }));
   }
 
+  async listOpenRoomsForMatching(limit = 20): Promise<RoomMatchCandidate[]> {
+    const { data, error } = await this.client.rpc("list_open_match_rooms", {
+      p_limit: Math.min(limit, 100)
+    });
+    if (error) this.throwError("读取持续匹配房间", error);
+    return ((data ?? []) as Array<{
+      room: JsonRow;
+      members: Array<{
+        request: JsonRow;
+        user_model: JsonRow;
+        matching_narrative?: unknown;
+        social_hooks?: JsonRow[];
+      }>;
+    }>).map((row) => ({
+      room: matchRoomSchema.parse(row.room),
+      members: row.members.map((member) => ({
+        request: mapMatchRequest(member.request),
+        userModel: mapUserModel(member.user_model),
+        matchingNarrative: typeof member.matching_narrative === "string"
+          ? member.matching_narrative
+          : undefined,
+        socialHooks: (member.social_hooks ?? []).map((hook) => mapSocialHook(hook))
+      }))
+    }));
+  }
+
   async listOfflineGames(): Promise<OfflineGame[]> {
     const { data, error } = await this.client.from("offline_games").select("*").eq("active", true).order("name");
     if (error) this.throwError("读取游戏目录", error);
     return (data ?? []).map((row) => mapGame(row));
-  }
-
-  async createRoomFromDecision(decision: MatchDecision, sourceJobId?: string): Promise<string> {
-    const { data, error } = await this.client.rpc("create_match_room", {
-      p_decision: decision,
-      p_source_job_id: sourceJobId ?? null
-    });
-    if (error) this.throwError("创建匹配房间", error);
-    return String(data);
   }
 
   async getRoom(roomId: string): Promise<MatchRoom | null> {
@@ -1075,6 +1170,21 @@ export class SupabaseStore implements DataStore {
       p_user_id: userId
     });
     if (error) this.throwError("标记候选局变化通知", error);
+  }
+
+  async stopRoomMatching(roomId: string, userId: string): Promise<StopRoomMatchingResult> {
+    const { data, error } = await this.client.rpc("stop_room_matching", {
+      p_room_id: roomId,
+      p_user_id: userId
+    });
+    if (error) this.throwError("停止房间匹配", error);
+    const row = unwrapRpcData(data) as JsonRow;
+    return {
+      room: matchRoomSchema.parse(row.room),
+      requeuedRequestIds: Array.isArray(row.requeuedRequestIds)
+        ? row.requeuedRequestIds.map(String)
+        : []
+    };
   }
 
   async completeRoom(roomId: string): Promise<MatchRoom> {

@@ -61,6 +61,8 @@ const room = {
   recruitmentStatus: "closed" as const,
   version: 0,
   meetingPoint: null,
+  matchingStatus: "active" as const,
+  capacity: 6,
   createdAt: new Date().toISOString(),
   completedAt: null
 };
@@ -104,6 +106,7 @@ const candidates = Array.from({ length: 5 }, (_, index) => {
       status: "matching" as const,
       proactivePushEnabled: false,
       roomId: null,
+      inviteId: null,
       createdAt: now,
       updatedAt: now
     },

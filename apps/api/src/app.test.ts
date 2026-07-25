@@ -475,8 +475,14 @@ describe("TOMEET core flow", () => {
 
     const requestId = socialResult.actions[0].matchRequest.requestId as string;
     const requestResponse = await app.inject({ method: "GET", url: `/match-requests/${requestId}` });
-    const roomId = requestResponse.json().matchRequest.roomId as string;
-    expect(roomId).toBeTruthy();
+    expect(requestResponse.json().matchRequest.status).toBe("invited");
+    expect(requestResponse.json().matchRequest.roomId).toBeNull();
+    expect(requestResponse.json().matchRequest.inviteId).toBeTruthy();
+
+    const acceptResponse = await send("接受匹配");
+    expect(acceptResponse.json().job.result.actions[0].type).toBe("accept_match");
+    expect(acceptResponse.json().job.result.actions[0].room.status).toBe("confirmed");
+    const roomId = acceptResponse.json().job.result.actions[0].room.roomId as string;
 
     const duplicateRoomMatch = await app.inject({
       method: "POST",
@@ -486,10 +492,13 @@ describe("TOMEET core flow", () => {
     expect(duplicateRoomMatch.statusCode).toBe(409);
 
     const historyResponse = await app.inject({ method: "GET", url: `/agent/messages/${userId}` });
-    expect(historyResponse.json().messages.some((message: { content: string }) => message.content.includes("匹配已经完成"))).toBe(true);
+    expect(historyResponse.json().messages.some(
+      (message: { content: string }) => message.content.includes("房间已建立")
+    )).toBe(true);
 
-    const confirmResponse = await send("确认参加，没问题");
-    expect(confirmResponse.json().job.result.actions[0].room.status).toBe("confirmed");
+    const stopResponse = await send("停止匹配，不要再往房间里加人了");
+    expect(stopResponse.json().job.result.actions[0].type).toBe("stop_match");
+    expect(stopResponse.json().job.result.actions[0].room.matchingStatus).toBe("stopped");
 
     const completeResponse = await send("活动已经结束了");
     expect(completeResponse.json().job.result.actions[0].room.status).toBe("completed");

@@ -184,6 +184,7 @@ describe("mock agent intelligence", () => {
         activeRoundId: null,
         optionsExpiresAt: null,
         roomId: null,
+        inviteId: null,
         createdAt: nowIso(),
         updatedAt: nowIso()
       }
@@ -208,6 +209,7 @@ describe("mock agent intelligence", () => {
         activeRoundId: null,
         optionsExpiresAt: null,
         roomId: null,
+        inviteId: null,
         createdAt: nowIso(),
         updatedAt: nowIso()
       }
@@ -246,6 +248,8 @@ describe("mock agent intelligence", () => {
       recruitmentStatus: "full" as const,
       version: 0,
       meetingPoint: null,
+      matchingStatus: "full" as const,
+      capacity: 3,
       createdAt: now,
       completedAt: null
     };
@@ -259,6 +263,7 @@ describe("mock agent intelligence", () => {
       activeRoundId: null,
       optionsExpiresAt: null,
       roomId: room.roomId,
+      inviteId: null,
       createdAt: now,
       updatedAt: now
     };

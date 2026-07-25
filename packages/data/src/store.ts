@@ -11,6 +11,8 @@ import type {
   MatchChoice,
   MatchDecision,
   MatchDraft,
+  MatchInvite,
+  MatchInviteResolution,
   MatchOptionContext,
   MatchOptionHook,
   MatchOptionOffer,
@@ -21,6 +23,7 @@ import type {
   Message,
   OfflineGame,
   PostEventFeedback,
+  RoomJoinDecision,
   SaveMatchChoicesInput,
   SocialHook,
   SocialHookDraft,
@@ -31,7 +34,7 @@ import type {
   UserMemorySourceType,
   UserModel
 } from "@tomeet/contracts";
-import type { MatchCandidate } from "@tomeet/matchmaking";
+import type { MatchCandidate, RoomMatchCandidate } from "@tomeet/matchmaking";
 
 export interface EnqueueJobInput {
   type: LlmJobType;
@@ -121,6 +124,11 @@ export interface ApplyMemoryChangesInput {
 export interface ApplyMemoryChangesResult {
   memories: UserMemory[];
   forgottenCount: number;
+}
+
+export interface StopRoomMatchingResult {
+  room: MatchRoom;
+  requeuedRequestIds: string[];
 }
 
 export interface DataStore {
@@ -222,9 +230,15 @@ export interface DataStore {
   settleMatchRound(roundId: string, decisions: FinalRoomDecision[]): Promise<string[]>;
   listSuitableOpenRooms(userId: string, limit?: number): Promise<MatchRoom[]>;
   joinOpenRoom(requestId: string, offerId: string, sourceVersion: number): Promise<MatchRoom>;
+  getMatchInvite(inviteId: string): Promise<MatchInvite | null>;
+  getLatestMatchInviteForUser(userId: string): Promise<MatchInvite | null>;
+  createInitialMatchInvite(decision: MatchDecision, sourceJobId?: string): Promise<MatchInvite>;
+  createRoomJoinInvite(decision: RoomJoinDecision, sourceJobId?: string): Promise<MatchInvite>;
+  acceptMatchInvite(inviteId: string, userId: string): Promise<MatchInviteResolution>;
+  declineMatchInvite(inviteId: string, userId: string): Promise<MatchInviteResolution>;
   listMatchCandidates(limit?: number): Promise<MatchCandidate[]>;
+  listOpenRoomsForMatching(limit?: number): Promise<RoomMatchCandidate[]>;
   listOfflineGames(): Promise<OfflineGame[]>;
-  createRoomFromDecision(decision: MatchDecision, sourceJobId?: string): Promise<string>;
   getRoom(roomId: string): Promise<MatchRoom | null>;
   getLatestRoomForUser(userId: string): Promise<MatchRoom | null>;
   confirmRoom(roomId: string, userId: string): Promise<MatchRoom>;
@@ -235,6 +249,7 @@ export interface DataStore {
   markRoomChangeNotificationDelivered(eventId: string, userId: string): Promise<void>;
   listPendingDraftChangeNotifications(limit?: number): Promise<DraftChangeNotification[]>;
   markDraftChangeNotificationDelivered(eventId: string, userId: string): Promise<void>;
+  stopRoomMatching(roomId: string, userId: string): Promise<StopRoomMatchingResult>;
   completeRoom(roomId: string): Promise<MatchRoom>;
   saveFeedback(feedback: PostEventFeedback): Promise<string>;
   enqueueWechatOutboundMessage(message: Message): Promise<void>;
