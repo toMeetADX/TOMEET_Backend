@@ -55,6 +55,37 @@ describe("SupabaseStore timestamp mapping", () => {
 
     expect(message.createdAt).toBe("2026-07-24T09:52:32.910Z");
   });
+
+  it("normalizes memory profile source watermark offset timestamps", async () => {
+    const store = new SupabaseStore("https://example.supabase.co", "test-service-role-key");
+    const single = vi.fn().mockResolvedValue({
+      data: {
+        user_id: userId,
+        profile_narrative: "",
+        matching_narrative: "",
+        source_memory_ids: [],
+        source_watermark: "2026-07-25 11:54:19.205+00",
+        version: 3,
+        stale: false,
+        updated_at: updatedAt
+      },
+      error: null
+    });
+    const eq = vi.fn().mockReturnValue({ single });
+    const select = vi.fn().mockReturnValue({ eq });
+    Object.defineProperty(store, "client", {
+      value: {
+        from: vi.fn().mockReturnValue({ select }),
+        rpc: vi.fn().mockResolvedValue({ data: null, error: null })
+      }
+    });
+    vi.spyOn(store, "ensureUser").mockResolvedValue(undefined);
+
+    const profile = await store.getMemoryProfile(userId);
+
+    expect(profile.sourceWatermark).toBe("2026-07-25T11:54:19.205Z");
+    expect(profile.updatedAt).toBe("2026-07-24T09:52:32.910Z");
+  });
 });
 
 describe("SupabaseStore user model mapping", () => {
