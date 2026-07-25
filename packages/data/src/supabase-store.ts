@@ -94,7 +94,7 @@ function mapChannelIdentity(row: JsonRow): ChannelIdentity {
 
 function mapUserModel(row: JsonRow): UserModel {
   return userModelSchema.parse({
-    userId: row.user_id ?? row.userId,
+    userId: row.id ?? row.user_id ?? row.userId,
     vibeNarrative: row.vibe_narrative ?? row.vibeNarrative ?? "",
     longTermProfile: row.long_term_profile ?? row.longTermProfile ?? {},
     currentIntent: row.current_intent ?? row.currentIntent ?? {},
