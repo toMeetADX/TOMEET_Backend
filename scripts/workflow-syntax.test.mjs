@@ -10,7 +10,7 @@ test("GitHub Actions workflows are valid YAML with triggers and jobs", async () 
     .sort();
   assert.deepEqual(files, [
     "agent-layer-release.yml",
-    "agent-layer-sync.yml",
+    "main-validation.yml",
     "production-watch.yml"
   ]);
   for (const file of files) {
@@ -22,17 +22,22 @@ test("GitHub Actions workflows are valid YAML with triggers and jobs", async () 
       workflow.jobs && Object.keys(workflow.jobs).length > 0,
       `${file} must have jobs`
     );
-    if (file === "agent-layer-sync.yml") {
+    if (file === "main-validation.yml") {
+      assert.equal(workflow.name, "Main Validation");
       assert.deepEqual(Object.keys(workflow.jobs), ["validate-pr"]);
+      assert.deepEqual(Object.keys(workflow.on), ["pull_request"]);
       assert.doesNotMatch(source, /automation\/agent-sync-main-to-wechat/u);
       assert.doesNotMatch(source, /AGENT_SYNC_PR_TOKEN/u);
       assert.doesNotMatch(source, /sync-main-to-wechat/u);
+      assert.doesNotMatch(source, /\bpush:/u);
     }
     if (file === "agent-layer-release.yml") {
       assert.match(source, /branches:\s*\n\s+- main/u);
       assert.doesNotMatch(source, /branches:\s*\n\s+- feat\/wechat-channel/u);
       assert.doesNotMatch(source, /agent:release:verify/u);
       assert.match(source, /current-release/u);
+      assert.match(source, /SMOKE_FRONTEND_ORIGIN/u);
+      assert.match(source, /pnpm wechat:smoke:qr/u);
     }
   }
 });

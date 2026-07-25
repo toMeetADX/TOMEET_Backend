@@ -1,6 +1,6 @@
 # TOMEET 前后端 API 规范
 
-机器可读规范见 [`docs/openapi.yaml`](openapi.yaml)。当前接口没有 `/v1` 前缀；前端必须统一通过 `NEXT_PUBLIC_API_BASE_URL` 拼接路径，不要把 Railway 域名散落在业务代码中。
+机器可读规范见 [`docs/openapi.yaml`](openapi.yaml)。当前接口没有 `/v1` 前缀；外部客户端必须通过单一 API Base URL 拼接路径，不要把 Railway 域名散落在业务代码中。当前扫码前端只使用 [`wechat-qr-api.md`](wechat-qr-api.md) 中的 `/wechat/connect/sessions*` 接口。
 
 ## 1. 基础约定
 
@@ -10,7 +10,7 @@
 - 时间：ISO 8601 UTC 字符串。
 - 请求追踪：前端可选传 `X-Request-Id`；错误响应总会返回 `requestId`。
 - 除 `GET /health`、`GET /ready` 外，所有接口都必须登录。
-- CORS 只允许 Railway 环境变量 `FRONTEND_ORIGIN` 中列出的 Origin。
+- CORS 只允许 Railway 环境变量 `FRONTEND_ORIGIN` 中列出的 Origin。微信扫码创建可匿名调用，后续状态/SSE/验证码接口使用一次性 `X-WeChat-Session-Token`；其他用户接口仍使用 Supabase Bearer token。
 
 ## 2. 身份认证
 

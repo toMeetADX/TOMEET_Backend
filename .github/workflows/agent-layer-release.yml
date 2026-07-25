@@ -68,6 +68,7 @@ jobs:
       WECHAT_API_READY_URL: ${{ vars.WECHAT_API_READY_URL }}
       SMOKE_WEB_API_URL: ${{ vars.WEB_API_URL }}
       SMOKE_WECHAT_API_URL: ${{ vars.WECHAT_API_URL }}
+      SMOKE_FRONTEND_ORIGIN: ${{ vars.SMOKE_FRONTEND_ORIGIN }}
       STAGING_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       SMOKE_SUPABASE_URL: ${{ vars.SUPABASE_URL }}
@@ -99,7 +100,8 @@ jobs:
             RAILWAY_INTELLIGENCE_SERVICE RAILWAY_WEB_API_SERVICE
             RAILWAY_WECHAT_API_SERVICE RAILWAY_WECHAT_WORKER_SERVICE
             WEB_API_READY_URL WECHAT_API_READY_URL
-            SMOKE_WEB_API_URL SMOKE_WECHAT_API_URL STAGING_DB_URL
+            SMOKE_WEB_API_URL SMOKE_WECHAT_API_URL
+            SMOKE_FRONTEND_ORIGIN STAGING_DB_URL
             RAILWAY_TOKEN SMOKE_SUPABASE_URL
             SMOKE_SUPABASE_PUBLISHABLE_KEY
             SMOKE_SUPABASE_SERVICE_ROLE_KEY SMOKE_INTERNAL_API_TOKEN
@@ -180,6 +182,8 @@ jobs:
           SMOKE_WECHAT_API_URL: ${{ vars.WECHAT_API_URL }}
           SMOKE_RUN_ID: staging-${{ github.run_id }}-${{ github.run_attempt }}
         run: pnpm agent:smoke:cross-channel
+      - name: Run browser-facing WeChat QR Staging smoke
+        run: pnpm wechat:smoke:qr
       - name: Observe Staging for five minutes
         run: |
           node scripts/railway-release.mjs observe \
@@ -207,6 +211,7 @@ jobs:
       WECHAT_API_READY_URL: ${{ vars.WECHAT_API_READY_URL }}
       SMOKE_WEB_API_URL: ${{ vars.WEB_API_URL }}
       SMOKE_WECHAT_API_URL: ${{ vars.WECHAT_API_URL }}
+      SMOKE_FRONTEND_ORIGIN: ${{ vars.SMOKE_FRONTEND_ORIGIN }}
       PRODUCTION_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
       SMOKE_SUPABASE_URL: ${{ vars.SUPABASE_URL }}
@@ -242,7 +247,8 @@ jobs:
             RAILWAY_WEB_API_SERVICE RAILWAY_WECHAT_API_SERVICE
             RAILWAY_WECHAT_WORKER_SERVICE WEB_API_READY_URL
             WECHAT_API_READY_URL SMOKE_WEB_API_URL
-            SMOKE_WECHAT_API_URL PRODUCTION_DB_URL RAILWAY_TOKEN
+            SMOKE_WECHAT_API_URL SMOKE_FRONTEND_ORIGIN
+            PRODUCTION_DB_URL RAILWAY_TOKEN
             SMOKE_SUPABASE_URL SMOKE_SUPABASE_PUBLISHABLE_KEY
             SMOKE_SUPABASE_SERVICE_ROLE_KEY SMOKE_INTERNAL_API_TOKEN
           )
@@ -350,6 +356,12 @@ jobs:
             pnpm agent:smoke:cross-channel || {
               sleep 10
               pnpm agent:smoke:cross-channel
+            } || release_failed=1
+          fi
+          if [ "$release_failed" -eq 0 ]; then
+            pnpm wechat:smoke:qr || {
+              sleep 10
+              pnpm wechat:smoke:qr
             } || release_failed=1
           fi
           if [ "$release_failed" -eq 0 ]; then
