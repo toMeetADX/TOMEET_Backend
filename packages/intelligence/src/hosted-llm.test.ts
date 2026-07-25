@@ -1127,20 +1127,25 @@ describe("hosted Agent product-event composition", () => {
     expect(requestBodies[1]).toContain("这两组都很适合有创造力的你");
   });
 
-  it("rejects a verified candidate message that drops an option number", async () => {
+  it("restores a grounded fallback when verification drops an option number", async () => {
     stubChatResponses(
       {
         content: leftFrame("TOMEET 组局邀请", ["两个候选已经整理好。"]),
         optionPreviews: [{ optionNumber: 1, text: "候选一" }, { optionNumber: 2, text: "候选二" }]
       },
       {
-        content: leftFrame("TOMEET 组局邀请", ["候选已经整理好。"]),
+        content: "候选已经整理好。",
         optionPreviews: [{ optionNumber: 1, text: "候选一" }]
       }
     );
 
-    await expect(hostedWithSearch().composeProductMessage(agentContext(), matchOptionsEvent))
-      .rejects.toThrow("候选文案没有覆盖全部选项");
+    const result = await hostedWithSearch().composeProductMessage(agentContext(), matchOptionsEvent);
+
+    expect(result.optionPreviews.map((option) => option.optionNumber)).toEqual([1, 2]);
+    expect(result.optionPreviews[1]?.text).toContain("共同散步");
+    expect(result.optionPreviews[1]?.text).toContain("边走边聊");
+    expect(result.content).toContain("┃ TOMEET 组局邀请");
+    expect(result.content).toContain("2｜共同散步");
   });
 
   it("drops option previews on non-candidate product events", async () => {
@@ -1158,7 +1163,7 @@ describe("hosted Agent product-event composition", () => {
     expect(result.optionPreviews).toEqual([]);
   });
 
-  it("requires invitation and confirmation cards to omit the right border", async () => {
+  it("repairs invitation cards that include a right border", async () => {
     const invalidRightFrame = [
       "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓",
       "┃ TOMEET 组局邀请            ┃",
@@ -1171,7 +1176,7 @@ describe("hosted Agent product-event composition", () => {
       { content: invalidRightFrame, optionPreviews: [{ optionNumber: 1, text: "故事交换桌" }] }
     );
 
-    await expect(hostedWithSearch().composeProductMessage(agentContext(), {
+    const result = await hostedWithSearch().composeProductMessage(agentContext(), {
       kind: "match_options",
       facts: {
         options: [{
@@ -1182,7 +1187,10 @@ describe("hosted Agent product-event composition", () => {
           possibleFacts: []
         }]
       }
-    })).rejects.toThrow("必须使用无右边框的左框字符卡片");
+    });
+
+    expect(result.content).toContain("┃ TOMEET 组局邀请");
+    expect(result.content).not.toMatch(/[┃│┫┤┓┐┛┘]\s*$/mu);
   });
 
   it("accepts a left-frame-only formed-room confirmation", async () => {

@@ -391,6 +391,28 @@ function assertLeftFrameContent(event: AgentProductEvent, content: string): void
   }
 }
 
+function buildGroundedMatchOptionsFrame(optionPreviews: AgentProductMessage["optionPreviews"]): string {
+  const body = optionPreviews.flatMap((preview) => {
+    const text = preview.text
+      .replace(/```/gu, "")
+      .replace(/\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*/gu, "")
+      .split(/\r?\n/gu)
+      .map((line) => line
+        .replace(/^[\s┏┓┗┛┣┫┃│┌┐└┘├┤]+/gu, "")
+        .replace(/[┃│┫┤┓┐┛┘]\s*$/gu, "")
+        .trim())
+      .filter(Boolean);
+    return text.map((line, index) => index === 0 ? `${preview.optionNumber}｜${line}` : line);
+  });
+  return [
+    "┏━━━━━━━━━━━━",
+    "┃ TOMEET 组局邀请",
+    "┣━━━━━━━━━━━━",
+    ...body.map((line) => `┃ ${line}`),
+    "┗━━━━━━━━━━━━"
+  ].join("\n");
+}
+
 export interface HostedLlmOptions {
   apiKey: string;
   baseUrl: string;
@@ -1258,17 +1280,46 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       { eventKind: event.kind, expectedOptionNumbers },
       { stage: "agent_event.verification", normalize: normalizeProductMessage }
     );
+    let finalized = result;
     if (event.kind === "match_options") {
-      const actual = result.optionPreviews.map((option) => option.optionNumber).sort();
-      const expected = [...expectedOptionNumbers].sort();
-      if (actual.length !== expected.length || actual.some((number, index) => number !== expected[index])) {
-        throw new Error("候选文案没有覆盖全部选项");
-      }
+      const verifiedByNumber = new Map(
+        result.optionPreviews.map((preview) => [preview.optionNumber, preview])
+      );
+      const factsByNumber = new Map(
+        (Array.isArray(event.facts.options) ? event.facts.options : [])
+          .filter(isRecord)
+          .map((option) => [Number(option.optionNumber), option] as const)
+      );
+      finalized = {
+        ...result,
+        optionPreviews: expectedOptionNumbers.map((optionNumber) => {
+          const verified = verifiedByNumber.get(optionNumber);
+          if (verified) return verified;
+          const facts = factsByNumber.get(optionNumber);
+          const activityName = typeof facts?.activityName === "string" ? facts.activityName.trim() : "";
+          const activityDescription = typeof facts?.activityDescription === "string"
+            ? facts.activityDescription.trim()
+            : "";
+          return {
+            optionNumber,
+            text: [activityName, activityDescription].filter(Boolean).join("：") || `Option ${optionNumber}`
+          };
+        })
+      };
     } else if (result.optionPreviews.length > 0) {
       throw new Error("非候选事件不能返回 optionPreviews");
     }
-    assertLeftFrameContent(event, result.content);
-    return result;
+    try {
+      assertLeftFrameContent(event, finalized.content);
+    } catch (error) {
+      if (event.kind !== "match_options") throw error;
+      finalized = {
+        ...finalized,
+        content: buildGroundedMatchOptionsFrame(finalized.optionPreviews)
+      };
+      assertLeftFrameContent(event, finalized.content);
+    }
+    return finalized;
   }
 
   async summarizeConversation(previousSummary: string, messages: Message[]): Promise<string> {
