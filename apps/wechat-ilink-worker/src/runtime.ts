@@ -29,7 +29,10 @@ type RuntimeStore = Pick<
 >;
 
 export interface AgentTextClient {
-  startOnboarding(input: { userId: string }): Promise<string | null>;
+  startOnboarding(input: { userId: string }): Promise<{
+    deliveryId: string;
+    bubbles: string[];
+  } | null>;
   markOnboardingWelcomeDelivered(input: { userId: string }): Promise<void>;
   setResponseGeneration(input: {
     connectionId: string;
@@ -333,12 +336,15 @@ async function sendReplyBubbles(input: {
   dependencies: Pick<WechatRuntimeDependencies, "ilink" | "bubbleDelayMs">;
   connection: WechatConnection;
   botToken: string;
-  reply: string;
+  reply: string | readonly string[];
   contextToken?: string;
   runIdBase: string;
+  clientIdBase?: string;
   shouldContinue?: () => boolean;
 }): Promise<void> {
-  const bubbles = splitWechatBubbles(input.reply);
+  const bubbles = typeof input.reply === "string"
+    ? splitWechatBubbles(input.reply)
+    : [...input.reply];
   for (const [index, bubble] of bubbles.entries()) {
     if (input.shouldContinue && !input.shouldContinue()) return;
     await input.dependencies.ilink.sendText({
@@ -347,7 +353,10 @@ async function sendReplyBubbles(input: {
       toUserId: input.connection.ownerIlinkUserId,
       text: bubble,
       contextToken: input.contextToken,
-      runId: `${input.runIdBase}-bubble-${index + 1}`
+      runId: `${input.runIdBase}-bubble-${index + 1}`,
+      clientId: input.clientIdBase
+        ? `${input.clientIdBase}:bubble:${index + 1}`
+        : undefined
     });
     if (index < bubbles.length - 1) {
       await waitBetweenBubbles(input.dependencies.bubbleDelayMs ?? 0);
@@ -656,30 +665,26 @@ export async function handleWechatMessage(
             userId: connection.userId
           });
       if (welcome) {
+        const deliveryKey = createHash("sha256")
+          .update(`${connection.userId}:${welcome.deliveryId}`)
+          .digest("hex");
         await sendReplyBubbles({
           dependencies,
           connection,
           botToken,
-          reply: welcome,
+          reply: welcome.bubbles,
           contextToken: message.context_token,
-          runIdBase: `first-inbound-welcome-${connection.id}-${id}`
+          runIdBase: `first-inbound-welcome-${deliveryKey}`,
+          clientIdBase: `tomeet:welcome:${deliveryKey}`
         });
       }
-      // Once the opener has been consumed (and any welcome was sent), keep the local transport
-      // guard closed even if a secondary persistence call is temporarily unavailable.
-      connection.lastMessageAt = new Date().toISOString();
       if (welcome) {
         await dependencies.tomeet.markOnboardingWelcomeDelivered({
           userId: connection.userId
-        }).catch((error: unknown) => {
-          (dependencies.logger ?? console).error(JSON.stringify({
-            level: "error",
-            event: "wechat_welcome_delivery_mark_failed",
-            connection: fingerprint(connection.id),
-            errorType: errorName(error)
-          }));
         });
       }
+      // A fully sent welcome is permanently closed regardless of whether the user replies.
+      connection.lastMessageAt = new Date().toISOString();
       await dependencies.store.completeWechatMessage(connection.id, id);
       return true;
     }

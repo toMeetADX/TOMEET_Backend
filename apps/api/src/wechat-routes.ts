@@ -131,7 +131,7 @@ function ensureHttpsBaseUrl(value: string): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
-function webRegistrationLink(baseUrl: string, token: string): string {
+export function webRegistrationLink(baseUrl: string, token: string): string {
   const url = new URL(baseUrl);
   if (
     url.protocol !== "https:"
@@ -163,6 +163,10 @@ async function createWebRegistrationClaim(
     id,
     userId: account.userId,
     tokenHash: hashSessionToken(token),
+    tokenCiphertext: runtime.cipher.encrypt(
+      token,
+      `wechat-web-claim:${id}:token`
+    ),
     accessTokenCiphertext: runtime.cipher.encrypt(
       account.accessToken,
       `wechat-web-claim:${id}:access`
@@ -245,6 +249,13 @@ async function activateSession(
       provisionedAccount = await webRegistration.accountProvisioner.provision();
     } catch (error) {
       reportWebRegistrationError?.(error);
+      return runtime.store.updateWechatSession(session.id, {
+        status: "failed",
+        errorCode: "web_account_provision_failed",
+        errorMessage: "暂时无法创建 TOMEET 账号，请重新生成二维码"
+      }, {
+        ifStatusIn: NON_TERMINAL_SESSION_STATUSES
+      });
     }
   }
   let activation: Awaited<ReturnType<WechatConnectionStore["activateWechatSession"]>>;
@@ -261,6 +272,10 @@ async function activateSession(
       baseUrl
     });
   } catch (error) {
+    if (provisionedAccount && webRegistration) {
+      await webRegistration.accountProvisioner.discard(provisionedAccount.userId)
+        .catch((discardError: unknown) => reportWebRegistrationError?.(discardError));
+    }
     if (error instanceof StoreConflictError) {
       await runtime.store.updateWechatSession(session.id, {
         status: "failed",

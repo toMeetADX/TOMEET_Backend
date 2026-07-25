@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   adventurexWelcomeBubbles,
   adventurexWelcomeContent,
@@ -396,7 +396,10 @@ describe("WeChat worker runtime", () => {
   it("consumes the opening trigger after sending the onboarding welcome", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
-    runtime.tomeet.startOnboarding.mockResolvedValue(adventurexWelcomeContent("zh"));
+    runtime.tomeet.startOnboarding.mockResolvedValue({
+      deliveryId: "welcome-45",
+      bubbles: [...adventurexWelcomeBubbles.zh]
+    });
 
     await handleWechatMessage(runtime.dependencies, activeConnection, "bot-secret", {
       message_id: 45,
@@ -420,12 +423,19 @@ describe("WeChat worker runtime", () => {
       activeConnection.id,
       "45"
     );
-    expect(runtime.ilink.sendText.mock.calls.slice(0, 4).map(([input]) => input.runId)).toEqual([
-      `first-inbound-welcome-${activeConnection.id}-45-bubble-1`,
-      `first-inbound-welcome-${activeConnection.id}-45-bubble-2`,
-      `first-inbound-welcome-${activeConnection.id}-45-bubble-3`,
-      `first-inbound-welcome-${activeConnection.id}-45-bubble-4`
-    ]);
+    const deliveryKey = createHash("sha256")
+      .update(`${activeConnection.userId}:welcome-45`)
+      .digest("hex");
+    expect(runtime.ilink.sendText.mock.calls.slice(0, 4).map(([input]) => input.runId)).toEqual(
+      adventurexWelcomeBubbles.zh.map((_, index) => (
+        `first-inbound-welcome-${deliveryKey}-bubble-${index + 1}`
+      ))
+    );
+    expect(runtime.ilink.sendText.mock.calls.slice(0, 4).map(([input]) => input.clientId)).toEqual(
+      adventurexWelcomeBubbles.zh.map((_, index) => (
+        `tomeet:welcome:${deliveryKey}:bubble:${index + 1}`
+      ))
+    );
     expect(activeConnection.lastMessageAt).not.toBeNull();
 
     runtime.tomeet.startOnboarding.mockClear();
@@ -449,10 +459,13 @@ describe("WeChat worker runtime", () => {
     ]);
   });
 
-  it("does not replay the welcome when persisting its delivery marker fails", async () => {
+  it("retries an unmarked welcome with the same provider idempotency ids", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
-    runtime.tomeet.startOnboarding.mockResolvedValue(adventurexWelcomeContent("zh"));
+    runtime.tomeet.startOnboarding.mockResolvedValue({
+      deliveryId: "welcome-retry",
+      bubbles: [...adventurexWelcomeBubbles.zh]
+    });
     runtime.tomeet.markOnboardingWelcomeDelivered.mockRejectedValue(
       new Error("mark_adventurex_welcome_delivered is unavailable")
     );
@@ -463,48 +476,34 @@ describe("WeChat worker runtime", () => {
       from_user_id: activeConnection.ownerIlinkUserId,
       context_token: "context-opening",
       item_list: [{ type: 1, text_item: { text: "没什么介意的" } }]
-    })).resolves.toBe(true);
+    })).rejects.toThrow("mark_adventurex_welcome_delivered is unavailable");
 
     expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
       ...adventurexWelcomeBubbles.zh
     ]);
     expect(runtime.store.completeWechatMessage).toHaveBeenCalledWith(
       activeConnection.id,
-      "47"
+      "47",
+      "mark_adventurex_welcome_delivered is unavailable"
     );
-    expect(activeConnection.lastMessageAt).not.toBeNull();
-    expect(JSON.stringify(runtime.logger.error.mock.calls)).toContain(
-      "wechat_welcome_delivery_mark_failed"
-    );
+    expect(activeConnection.lastMessageAt).toBeNull();
+    const firstAttemptClientIds = runtime.ilink.sendText.mock.calls.map(([input]) => input.clientId);
 
-    runtime.tomeet.startOnboarding.mockClear();
-    runtime.tomeet.markOnboardingWelcomeDelivered.mockClear();
-    runtime.ilink.sendText.mockClear();
-    runtime.dependencies.downloadImage = vi.fn(async () => ({
-      bytes: Uint8Array.from([8]),
-      mimeType: "image/jpeg" as const
-    }));
+    runtime.tomeet.markOnboardingWelcomeDelivered.mockResolvedValue(undefined);
 
     await expect(handleWechatMessage(runtime.dependencies, activeConnection, "bot-secret", {
-      message_id: 48,
+      message_id: 47,
       message_type: 1,
       from_user_id: activeConnection.ownerIlinkUserId,
-      context_token: "context-image",
-      item_list: [{
-        type: 2,
-        image_item: { media: { encrypt_query_param: "image-8" } }
-      }]
+      context_token: "context-opening",
+      item_list: [{ type: 1, text_item: { text: "没什么介意的" } }]
     })).resolves.toBe(true);
 
-    expect(runtime.tomeet.startOnboarding).not.toHaveBeenCalled();
-    expect(runtime.tomeet.markOnboardingWelcomeDelivered).not.toHaveBeenCalled();
-    expect(runtime.tomeet.sendImages).toHaveBeenCalledWith(expect.objectContaining({
-      images: [{ messageId: "48", bytes: Uint8Array.from([8]), mimeType: "image/jpeg" }],
-      turns: [{ messageId: "48", imageCount: 1 }]
-    }));
-    expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
-      "Image batch reply"
-    ]);
+    expect(runtime.tomeet.startOnboarding).toHaveBeenCalledTimes(2);
+    expect(runtime.tomeet.markOnboardingWelcomeDelivered).toHaveBeenCalledTimes(2);
+    expect(runtime.ilink.sendText.mock.calls.slice(4).map(([input]) => input.clientId))
+      .toEqual(firstAttemptClientIds);
+    expect(activeConnection.lastMessageAt).not.toBeNull();
   });
 
   it("consumes the reconnect opener without restarting onboarding for an existing WeChat user", async () => {

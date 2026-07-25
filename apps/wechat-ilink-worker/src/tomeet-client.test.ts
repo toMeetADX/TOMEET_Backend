@@ -47,7 +47,8 @@ describe("TomeetClient", () => {
           sourceChannel: "system",
           replyToMessageId: null,
           createdAt: now
-        }
+        },
+        bubbles: ["你好呀👋", "注册链接"]
       }), { headers: { "Content-Type": "application/json" } });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -58,7 +59,10 @@ describe("TomeetClient", () => {
 
     await expect(client.startOnboarding({
       userId: "25000000-0000-4000-8000-000000000001"
-    })).resolves.toBe("你好呀👋");
+    })).resolves.toEqual({
+      deliveryId: "welcome-1",
+      bubbles: ["你好呀👋", "注册链接"]
+    });
     expect(requestedUrl).toBe(
       "https://api.example.com/internal/users/25000000-0000-4000-8000-000000000001/adventurex-onboarding/start"
     );

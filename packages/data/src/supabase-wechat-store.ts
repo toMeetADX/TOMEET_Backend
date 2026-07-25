@@ -74,6 +74,7 @@ function mapWebClaim(row: JsonRow): WechatWebClaim {
     id: String(row.id),
     userId: String(row.user_id ?? row.userId),
     tokenHash: String(row.token_hash ?? row.tokenHash),
+    tokenCiphertext: (row.token_ciphertext ?? row.tokenCiphertext ?? null) as string | null,
     accessTokenCiphertext: String(
       row.access_token_ciphertext ?? row.accessTokenCiphertext
     ),
@@ -104,6 +105,7 @@ export class SupabaseWechatStore implements WechatConnectionStore {
         id: input.id,
         user_id: input.userId,
         token_hash: input.tokenHash,
+        token_ciphertext: input.tokenCiphertext,
         access_token_ciphertext: input.accessTokenCiphertext,
         refresh_token_ciphertext: input.refreshTokenCiphertext,
         expires_at: input.expiresAt
@@ -123,6 +125,21 @@ export class SupabaseWechatStore implements WechatConnectionStore {
       .gt("expires_at", new Date().toISOString())
       .maybeSingle();
     if (error) this.throwError("Read WeChat Web claim", error);
+    return data ? mapWebClaim(data as JsonRow) : null;
+  }
+
+  async getLatestWechatWebClaimForUser(userId: string): Promise<WechatWebClaim | null> {
+    const { data, error } = await this.client
+      .from("wechat_web_claims")
+      .select("*")
+      .eq("user_id", userId)
+      .is("consumed_at", null)
+      .not("token_ciphertext", "is", null)
+      .gt("expires_at", new Date().toISOString())
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) this.throwError("Read latest WeChat Web claim", error);
     return data ? mapWebClaim(data as JsonRow) : null;
   }
 

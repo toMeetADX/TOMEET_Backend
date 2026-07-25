@@ -279,6 +279,18 @@ describe("Supabase migration", () => {
     `);
     expect(table.rows[0]?.relrowsecurity).toBe(true);
 
+    const tokenColumn = await db.query<{ data_type: string; is_nullable: string }>(`
+      select data_type, is_nullable
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'wechat_web_claims'
+        and column_name = 'token_ciphertext'
+    `);
+    expect(tokenColumn.rows[0]).toEqual({
+      data_type: "text",
+      is_nullable: "YES"
+    });
+
     const clientGrants = await db.query<{ grantee: string }>(`
       select grantee
       from information_schema.role_table_grants

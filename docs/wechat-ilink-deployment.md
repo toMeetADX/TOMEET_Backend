@@ -190,7 +190,7 @@ WECHAT_WEB_CLAIM_TTL_SECONDS=900
 ```
 
 Supabase Auth 必须开启 Anonymous Sign-Ins。首次扫码会先创建同一 UUID 的匿名 Auth
-用户，开场白再发送一次性注册链接；注册页契约见
+用户并加密保存一次性注册凭证；首次可确认投递的入站握手再发送开场白和注册链接。注册页契约见
 [`wechat-web-registration.md`](wechat-web-registration.md)。
 
 浏览器必须使用 API 的公开 HTTPS 域名。确认 API：
