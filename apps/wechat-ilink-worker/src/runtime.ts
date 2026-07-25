@@ -617,9 +617,14 @@ export async function handleWechatMessage(
     const isOpeningTrigger = Boolean(message.context_token)
       && (openingTrigger ?? !connection.lastMessageAt);
     if (isOpeningTrigger) {
-      const welcome = await dependencies.tomeet.startOnboarding({
-        userId: connection.userId
-      });
+      // Cursor reset happens both for a brand-new identity and for reauthorization of
+      // an existing one. Historical connections still need their iLink opener consumed,
+      // but must not restart onboarding or replay the welcome sequence.
+      const welcome = connection.lastMessageAt
+        ? null
+        : await dependencies.tomeet.startOnboarding({
+            userId: connection.userId
+          });
       if (welcome) {
         await sendReplyBubbles({
           dependencies,
@@ -780,8 +785,9 @@ export async function monitorWechatConnection(
     turnBatcher = new WechatTurnBatcher(dependencies, connection, botToken);
     let cursor = connection.syncCursor;
     // Activating or reactivating an iLink connection resets its cursor. The first new inbound
-    // message after that reset opens the conversation and must not be sent to the Agent, even
-    // when this WeChat identity has older message history.
+    // message after that reset opens the conversation and must not be sent to the Agent. For a
+    // historical identity it is consumed silently; only a genuinely new conversation can start
+    // onboarding.
     let openingTriggerPending = cursor.length === 0;
     while (!signal.aborted) {
       const renewed = await dependencies.store.renewWechatConnectionLease(

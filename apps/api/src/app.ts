@@ -294,7 +294,10 @@ export async function buildApp(options: BuildAppOptions) {
         language: adventurexLanguageSchema.default("zh")
       }).parse(request.body ?? {});
       const state = await options.store.ensureAdventurexOnboardingState(userId);
-      if (state.welcomeDeliveredAt) return { message: null };
+      // A reconnect must never replay the opening sequence. `welcomeSentAt` is the
+      // durable one-shot boundary; delivery acknowledgement is useful telemetry, but
+      // losing it must not make an existing WeChat user look new again.
+      if (state.welcomeSentAt) return { message: null };
       const message = await options.store.startAdventurexOnboarding(userId, language);
       return { message };
     }
@@ -312,7 +315,7 @@ export async function buildApp(options: BuildAppOptions) {
     ),
     onActivated: async ({ userId, deliverText, webRegistrationUrl }) => {
       const onboardingState = await options.store.ensureAdventurexOnboardingState(userId);
-      if (onboardingState.welcomeDeliveredAt) return;
+      if (onboardingState.welcomeSentAt) return;
       const message = await options.store.startAdventurexOnboarding(userId, "zh");
       if (!message || !deliverText) return;
       const bubbles = message.content.split(/\n\s*\n+/u).filter(Boolean);

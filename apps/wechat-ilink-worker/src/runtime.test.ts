@@ -505,7 +505,7 @@ describe("WeChat worker runtime", () => {
     ]);
   });
 
-  it("consumes the first new message after reactivation even with older message history", async () => {
+  it("consumes the reconnect opener without restarting onboarding for an existing WeChat user", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
     activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
@@ -547,7 +547,7 @@ describe("WeChat worker runtime", () => {
       turnBatchWindowMs: 0
     });
 
-    expect(runtime.tomeet.startOnboarding).toHaveBeenCalledTimes(1);
+    expect(runtime.tomeet.startOnboarding).not.toHaveBeenCalled();
     expect(runtime.tomeet.sendTextBatch).not.toHaveBeenCalled();
     expect(runtime.tomeet.sendImages).toHaveBeenCalledWith(expect.objectContaining({
       images: [{ messageId: "50", bytes: Uint8Array.from([9]), mimeType: "image/jpeg" }],
