@@ -57,6 +57,18 @@ const turnBatchWindowMs = integerEnvironment(
   100,
   10_000
 );
+const turnProgressDelayMs = integerEnvironment(
+  "WECHAT_TURN_PROGRESS_DELAY_MS",
+  1500,
+  0,
+  60_000
+);
+const turnProgressIntervalMs = integerEnvironment(
+  "WECHAT_TURN_PROGRESS_INTERVAL_MS",
+  5000,
+  250,
+  60_000
+);
 const claimIntervalMs = integerEnvironment(
   "WECHAT_WORKER_CLAIM_INTERVAL_MS",
   1000,
@@ -108,6 +120,8 @@ async function monitorConnection(connection: WechatConnection): Promise<void> {
     tomeet,
     bubbleDelayMs,
     turnBatchWindowMs,
+    turnProgressDelayMs,
+    turnProgressIntervalMs,
     imageCdnBaseUrl: process.env.WECHAT_ILINK_CDN_BASE_URL
   });
 }
@@ -165,7 +179,9 @@ async function run(): Promise<void> {
     concurrency,
     outboundConcurrency,
     bubbleDelayMs,
-    turnBatchWindowMs
+    turnBatchWindowMs,
+    turnProgressDelayMs,
+    turnProgressIntervalMs
   }));
   while (!abortController.signal.aborted) {
     const capacity = concurrency - active.size;

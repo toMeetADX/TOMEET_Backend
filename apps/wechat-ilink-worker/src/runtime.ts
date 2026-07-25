@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   channelSupportedInputs,
   channelTurnFailureNotice,
+  channelTurnProgressNotices,
   type AdventurexLanguage
 } from "@tomeet/contracts";
 import type { WechatConnectionStore } from "@tomeet/data";
@@ -99,6 +100,8 @@ export interface WechatRuntimeDependencies {
   logger?: WorkerLogger;
   bubbleDelayMs?: number;
   turnBatchWindowMs?: number;
+  turnProgressDelayMs?: number;
+  turnProgressIntervalMs?: number;
   imageBatchWindowMs?: number;
   imageCdnBaseUrl?: string;
   downloadImage?: typeof downloadWechatImage;
@@ -127,6 +130,8 @@ function errorName(error: unknown): string {
 
 const WECHAT_BUBBLE_MAX_CHARS = 260;
 const WECHAT_IMAGE_BATCH_MAX = 9;
+const WECHAT_TURN_PROGRESS_DELAY_MS = 1500;
+const WECHAT_TURN_PROGRESS_INTERVAL_MS = 5000;
 
 function stripTerminalPeriods(content: string): string {
   return content.trim().replace(/[。.]+$/u, "").trimEnd();
@@ -221,6 +226,78 @@ interface WechatTurnBatchSink {
   flush(): Promise<void>;
 }
 
+class WechatTurnProgressNotifier {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private inFlight: Promise<void> | null = null;
+  private stopped = false;
+  private noticeIndex = 0;
+
+  constructor(
+    private readonly dependencies: WechatRuntimeDependencies,
+    private readonly connection: WechatConnection,
+    private readonly botToken: string,
+    private readonly contextToken: string | undefined,
+    private readonly runIdBase: string,
+    private readonly shouldContinue: () => boolean
+  ) {}
+
+  start(): void {
+    this.schedule(this.dependencies.turnProgressDelayMs ?? WECHAT_TURN_PROGRESS_DELAY_MS);
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    await this.inFlight?.catch(() => undefined);
+  }
+
+  private schedule(delayMs: number): void {
+    if (this.stopped || !this.shouldContinue()) return;
+    const notices = channelTurnProgressNotices[this.dependencies.noticeLanguage ?? "zh"];
+    if (this.noticeIndex >= notices.length) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.stopped || !this.shouldContinue()) return;
+      const index = this.noticeIndex;
+      const notice = notices[index];
+      if (!notice) return;
+      this.noticeIndex += 1;
+      this.inFlight = this.dependencies.ilink.sendText({
+        baseUrl: this.connection.baseUrl,
+        botToken: this.botToken,
+        toUserId: this.connection.ownerIlinkUserId,
+        text: notice,
+        contextToken: this.contextToken,
+        runId: `${this.runIdBase}-progress-${index + 1}`
+      }).then(() => {
+        (this.dependencies.logger ?? console).info(JSON.stringify({
+          level: "info",
+          event: "wechat_turn_progress_sent",
+          connection: fingerprint(this.connection.id),
+          noticeIndex: index + 1
+        }));
+      }).catch((error: unknown) => {
+        (this.dependencies.logger ?? console).error(JSON.stringify({
+          level: "error",
+          event: "wechat_turn_progress_failed",
+          connection: fingerprint(this.connection.id),
+          noticeIndex: index + 1,
+          errorType: errorName(error)
+        }));
+      }).finally(() => {
+        this.inFlight = null;
+        this.schedule(
+          this.dependencies.turnProgressIntervalMs ?? WECHAT_TURN_PROGRESS_INTERVAL_MS
+        );
+      });
+    }, Math.max(0, delayMs));
+    this.timer.unref?.();
+  }
+}
+
 async function sendReplyBubbles(input: {
   dependencies: Pick<WechatRuntimeDependencies, "ilink" | "bubbleDelayMs">;
   connection: WechatConnection;
@@ -254,6 +331,7 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
   private activeBatch: WechatTurnBatch | null = null;
   private latestGenerationToken: string | null = null;
   private notifiedFailureGeneration: string | null = null;
+  private activeProgressNotifier: WechatTurnProgressNotifier | null = null;
 
   constructor(
     private readonly dependencies: WechatRuntimeDependencies,
@@ -264,6 +342,9 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
   async supersede(): Promise<string> {
     const generationToken = randomUUID();
     this.latestGenerationToken = generationToken;
+    const activeProgressNotifier = this.activeProgressNotifier;
+    this.activeProgressNotifier = null;
+    await activeProgressNotifier?.stop();
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -329,6 +410,8 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
   private async deliver(batch: WechatTurnBatch): Promise<void> {
     const messageIds = batch.messages.map((message) => message.messageId);
     const latest = batch.messages.at(-1)!;
+    const batchKey = createHash("sha256").update(messageIds.join(":"))
+      .digest("hex").slice(0, 20);
     try {
       const images = batch.messages
         .flatMap((message) => message.images.map((image) => ({
@@ -341,22 +424,40 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
         ...(message.content ? { content: message.content } : {}),
         imageCount: message.images.length
       }));
-      const result = images.length > 0
-        ? await this.dependencies.tomeet.sendImages({
-            connectionId: this.connection.id,
-            generationToken: latest.generationToken,
-            userId: this.connection.userId,
-            images,
-            turns
-          })
-        : await this.dependencies.tomeet.sendTextBatch({
-            connectionId: this.connection.id,
-            generationToken: latest.generationToken,
-            userId: this.connection.userId,
-            turns: turns.flatMap((turn) => turn.content
-              ? [{ messageId: turn.messageId, content: turn.content }]
-              : [])
-          });
+      const progressNotifier = new WechatTurnProgressNotifier(
+        this.dependencies,
+        this.connection,
+        this.botToken,
+        latest.contextToken,
+        `turn-batch-${this.connection.id}-${batchKey}`,
+        () => this.latestGenerationToken === latest.generationToken
+      );
+      this.activeProgressNotifier = progressNotifier;
+      progressNotifier.start();
+      let result: { reply: string | null; stale: boolean };
+      try {
+        result = images.length > 0
+          ? await this.dependencies.tomeet.sendImages({
+              connectionId: this.connection.id,
+              generationToken: latest.generationToken,
+              userId: this.connection.userId,
+              images,
+              turns
+            })
+          : await this.dependencies.tomeet.sendTextBatch({
+              connectionId: this.connection.id,
+              generationToken: latest.generationToken,
+              userId: this.connection.userId,
+              turns: turns.flatMap((turn) => turn.content
+                ? [{ messageId: turn.messageId, content: turn.content }]
+                : [])
+            });
+      } finally {
+        await progressNotifier.stop();
+        if (this.activeProgressNotifier === progressNotifier) {
+          this.activeProgressNotifier = null;
+        }
+      }
       batch.settled = true;
       if (
         result.stale
@@ -374,8 +475,6 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
         }));
         return;
       }
-      const batchKey = createHash("sha256").update(messageIds.join(":"))
-        .digest("hex").slice(0, 20);
       await sendReplyBubbles({
         dependencies: this.dependencies,
         connection: this.connection,

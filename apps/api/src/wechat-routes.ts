@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import type { WechatConnectionStore } from "@tomeet/data";
+import { StoreConflictError, type WechatConnectionStore } from "@tomeet/data";
 import {
   CredentialCipher,
   hashSessionToken,
@@ -173,17 +173,31 @@ async function activateSession(
   const shouldSendActivationWelcome = onActivated && isNewWechatIdentity
     ? await isNewWechatIdentity(credentials.ilinkUserId)
     : true;
-  const activation = await runtime.store.activateWechatSession({
-    sessionId: session.id,
-    newUserId: randomUUID(),
-    ownerIlinkUserId: credentials.ilinkUserId,
-    ilinkBotId: credentials.ilinkBotId,
-    botTokenCiphertext: runtime.cipher.encrypt(
-      credentials.botToken,
-      `wechat-connection:${credentials.ilinkUserId}`
-    ),
-    baseUrl
-  });
+  let activation: Awaited<ReturnType<WechatConnectionStore["activateWechatSession"]>>;
+  try {
+    activation = await runtime.store.activateWechatSession({
+      sessionId: session.id,
+      newUserId: randomUUID(),
+      ownerIlinkUserId: credentials.ilinkUserId,
+      ilinkBotId: credentials.ilinkBotId,
+      botTokenCiphertext: runtime.cipher.encrypt(
+        credentials.botToken,
+        `wechat-connection:${credentials.ilinkUserId}`
+      ),
+      baseUrl
+    });
+  } catch (error) {
+    if (error instanceof StoreConflictError) {
+      await runtime.store.updateWechatSession(session.id, {
+        status: "failed",
+        errorCode: "profile_binding_conflict",
+        errorMessage: error.message
+      }, {
+        ifStatusIn: NON_TERMINAL_SESSION_STATUSES
+      });
+    }
+    throw error;
+  }
   if (
     activation.session.userId
     && onActivated
@@ -481,7 +495,9 @@ export function registerWechatRoutes(
           message: "当前账户不能使用路演二维码模式"
         });
       }
-      const created = await createSession(request.authUserId);
+      // The bearer token authorizes the roadshow operator to create unlimited
+      // QR codes. It does not identify the visitor who scans the displayed QR.
+      const created = await createSession();
       if (!created) {
         return reply.code(503).send({
           error: "wechat_connect_disabled",

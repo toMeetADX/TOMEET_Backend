@@ -236,6 +236,8 @@ WECHAT_WORKER_CONCURRENCY=8
 WECHAT_OUTBOUND_CONCURRENCY=20
 WECHAT_WORKER_CLAIM_INTERVAL_MS=1000
 WECHAT_TURN_BATCH_WINDOW_MS=1200
+WECHAT_TURN_PROGRESS_DELAY_MS=1500
+WECHAT_TURN_PROGRESS_INTERVAL_MS=5000
 WECHAT_ILINK_CDN_BASE_URL=https://novac2c.cdn.weixin.qq.com/c2c
 ```
 
@@ -243,6 +245,10 @@ WECHAT_ILINK_CDN_BASE_URL=https://novac2c.cdn.weixin.qq.com/c2c
 同一轮里的多张图片会一次性交给视觉模型综合分析，并只生成一组回复。新消息在首个
 回复气泡发出前到达时，会使正在生成的旧回复失效并重新计算。图片 CDN 地址通常保持
 腾讯默认值，仅在 iLink 上游明确调整时修改。
+
+当 Agent 生成时间超过 `WECHAT_TURN_PROGRESS_DELAY_MS` 时，worker 会直接在微信聊天框
+发送“正在思考”进度气泡；仍未完成时按 `WECHAT_TURN_PROGRESS_INTERVAL_MS` 继续发送下一阶段
+提示，最多三条。最终回复、失败或新输入抢占旧轮次时会立即停止，短请求不会额外打扰用户。
 
 上例假设 Railway API service 名称严格为 `api`；若实际名称不同，变量引用中的
 service 名称也必须按大小写替换。service-to-service 流量使用 Railway 私网，

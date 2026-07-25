@@ -147,7 +147,7 @@ describe("WeChat one-time QR onboarding", () => {
   it("allows only the roadshow account to bypass the public QR creation limit", async () => {
     const roadshowUserId = randomUUID();
     const otherUserId = randomUUID();
-    const { app } = await setup(
+    const { app, wechatStore } = await setup(
       [],
       undefined,
       undefined,
@@ -203,6 +203,10 @@ describe("WeChat one-time QR onboarding", () => {
     expect(first.statusCode).toBe(201);
     expect(second.statusCode).toBe(201);
     expect(first.json().sessionId).not.toBe(second.json().sessionId);
+    expect(await wechatStore.getWechatSession(first.json().sessionId))
+      .toMatchObject({ requestedUserId: null });
+    expect(await wechatStore.getWechatSession(second.json().sessionId))
+      .toMatchObject({ requestedUserId: null });
   });
 
   it("creates a profile and reuses it when the same WeChat identity reconnects", async () => {
@@ -284,6 +288,65 @@ describe("WeChat one-time QR onboarding", () => {
     expect(sentMessageTexts(sentMessages)).toEqual(adventurexWelcomeBubbles.zh);
     expect(await store.listRecentMessages(firstUserId)).toHaveLength(1);
     expect(verifyAccessToken).not.toHaveBeenCalled();
+  });
+
+  it("reuses the scanner profile instead of binding it to the roadshow operator", async () => {
+    const roadshowUserId = randomUUID();
+    const owner = "wechat-owner-roadshow-reconnect";
+    const confirmed = {
+      status: "confirmed",
+      bot_token: "bot-secret",
+      ilink_bot_id: "bot-roadshow-1",
+      baseurl: "https://ilink-api.example.com",
+      ilink_user_id: owner
+    };
+    const { app, store } = await setup(
+      [confirmed, {
+        ...confirmed,
+        bot_token: "rotated-secret",
+        ilink_bot_id: "bot-roadshow-2"
+      }],
+      undefined,
+      undefined,
+      undefined,
+      {
+        rapidQrTokens: ["roadshow-token"],
+        userByToken: { "roadshow-token": roadshowUserId }
+      }
+    );
+
+    const firstCreated = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    const first = firstCreated.json();
+    const firstActivated = await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${first.sessionId}`,
+      headers: { "x-wechat-session-token": first.sessionToken }
+    });
+    expect(firstActivated.json()).toMatchObject({ status: "active" });
+    const scannerUserId = (await store.resolveChannelIdentity("wechat", owner))!.userId;
+    expect(scannerUserId).not.toBe(roadshowUserId);
+
+    const secondCreated = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions/demo",
+      headers: { authorization: "Bearer roadshow-token" },
+      payload: {}
+    });
+    const second = secondCreated.json();
+    const secondActivated = await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${second.sessionId}`,
+      headers: { "x-wechat-session-token": second.sessionToken }
+    });
+
+    expect(secondActivated.statusCode).toBe(200);
+    expect(secondActivated.json()).toMatchObject({ status: "active" });
+    expect(await store.resolveChannelIdentity("wechat", owner))
+      .toMatchObject({ userId: scannerUserId });
   });
 
   it("claims activation once when concurrent QR polls both observe confirmation", async () => {
@@ -874,6 +937,15 @@ describe("WeChat one-time QR onboarding", () => {
     });
 
     expect(conflict.statusCode).toBe(409);
+    expect(await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${second.sessionId}`,
+      headers: { "x-wechat-session-token": second.sessionToken }
+    }).then((response) => response.json())).toMatchObject({
+      status: "failed",
+      errorCode: "profile_binding_conflict",
+      errorMessage: "该微信已关联其他 TOMEET profile"
+    });
   });
 
   it("limits public QR creation to thirty attempts per ten minutes", async () => {
