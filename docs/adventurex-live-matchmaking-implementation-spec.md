@@ -507,7 +507,7 @@ create table public.match_drafts (
   status text not null default 'collecting'
     check (status in ('collecting','formed','expired')),
   version integer not null default 0 check (version >= 0),
-  target_players smallint not null check (target_players between 3 and 10),
+  target_players smallint not null check (target_players between 2 and 10),
   expires_at timestamptz not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -584,7 +584,7 @@ create table public.match_choice_required_hooks (
 ~~~sql
 alter table public.match_rooms
   add column source_draft_id uuid unique references public.match_drafts(id),
-  add column target_players smallint check (target_players between 3 and 10),
+  add column target_players smallint check (target_players between 2 and 10),
   add column recruitment_status text not null default 'closed'
     check (recruitment_status in ('open','full','closed')),
   add column version integer not null default 0 check (version >= 0);
