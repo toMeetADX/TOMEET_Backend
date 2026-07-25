@@ -5,7 +5,9 @@ user first and uses that user's UUID as the canonical TOMEET `user_id`. The
 WeChat identity, conversation, memory, matchmaking state, and future Web login
 therefore belong to the same account without moving data after registration.
 
-The activation welcome appends three bubbles:
+The API does not send before the WeChat conversation is writable. The first
+inbound iLink handshake claims one idempotent welcome package: four onboarding
+bubbles followed by these three registration bubbles:
 
 ```text
 想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！
@@ -15,10 +17,20 @@ The activation welcome appends three bubbles:
 点这里为当前账号添加网页登录：https://tomeet.chat/register#claim=<one-time-token>
 ```
 
-The claim is random, single-use, and valid for 15 minutes by default. It is
+The plaintext claim is retained only as ciphertext so the authenticated worker
+can recover the same link for that first handshake. The claim is random,
+single-use, and valid for 15 minutes by default. It is
 placed in the URL fragment so it is not sent in the initial HTTP request,
 Vercel access logs, or referrer headers. Do not copy it into analytics,
 `localStorage`, error reports, or server-rendered markup.
+
+After every bubble is accepted by iLink, the API records the welcome as
+delivered. User silence, worker restarts, and later QR scans never replay it.
+If a delivery attempt is interrupted, retries reuse the same provider client
+IDs for each bubble so already accepted bubbles remain idempotent.
+The inbound message that triggered this first delivery is consumed as the
+conversation opener; it is not stored as user dialogue or submitted to the
+Agent. Normal conversation begins with the user's following message.
 
 ## Registration page contract
 

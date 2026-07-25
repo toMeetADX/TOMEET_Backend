@@ -31,6 +31,7 @@ export class MemoryWechatStore implements WechatConnectionStore {
     }
     const claim: WechatWebClaim = {
       ...input,
+      exposedAt: null,
       consumedAt: null,
       createdAt: new Date().toISOString()
     };
@@ -44,6 +45,29 @@ export class MemoryWechatStore implements WechatConnectionStore {
       return null;
     }
     return structuredClone(claim);
+  }
+
+  async exposeLatestWechatWebClaimForUser(
+    userId: string,
+    ttlMs: number
+  ): Promise<WechatWebClaim | null> {
+    const now = Date.now();
+    const claim = [...this.webClaims.values()]
+      .filter((item) => (
+        item.userId === userId
+        && !item.consumedAt
+        && item.tokenCiphertext
+        && new Date(item.expiresAt).getTime() > now
+      ))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    if (claim && !claim.exposedAt) {
+      claim.exposedAt = new Date(now).toISOString();
+      claim.expiresAt = new Date(Math.min(
+        new Date(claim.expiresAt).getTime(),
+        now + ttlMs
+      )).toISOString();
+    }
+    return claim ? structuredClone(claim) : null;
   }
 
   async consumeWechatWebClaim(tokenHash: string): Promise<WechatWebClaim | null> {

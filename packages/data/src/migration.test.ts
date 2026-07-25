@@ -279,6 +279,23 @@ describe("Supabase migration", () => {
     `);
     expect(table.rows[0]?.relrowsecurity).toBe(true);
 
+    const recoveryColumns = await db.query<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }>(`
+      select column_name, data_type, is_nullable
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'wechat_web_claims'
+        and column_name in ('token_ciphertext', 'exposed_at')
+      order by column_name
+    `);
+    expect(recoveryColumns.rows).toEqual([
+      { column_name: "exposed_at", data_type: "timestamp with time zone", is_nullable: "YES" },
+      { column_name: "token_ciphertext", data_type: "text", is_nullable: "YES" }
+    ]);
+
     const clientGrants = await db.query<{ grantee: string }>(`
       select grantee
       from information_schema.role_table_grants
