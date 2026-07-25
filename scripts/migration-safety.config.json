@@ -8,6 +8,9 @@
     "20260723160425_wechat_ilink_connections.sql": "3fcf38ed5b3fff5d17f657e2a391944fe5627bb7a7163d61f7915cbc254713a9",
     "20260724090000_sync_auth_users.sql": "18e75b00d66e17bb55c9548e844fb072abb35f9069eb66e3a76e0196f63d6b20"
   },
+  "approvedMigrationRenames": {
+    "20260726140000_wechat_welcome_claim_recovery.sql": "20260726145000_wechat_welcome_claim_recovery.sql"
+  },
   "approvedDestructiveMigrations": {
     "20260724180000_adventurex_live_matchmaking_v1.sql": {
       "sha256": "3c4599e99b226afc4d9a62e32e843791ad6aab7b03e04d66897d3b77a2e0e92b",

@@ -151,6 +151,13 @@ async function loadConfig(path = defaultConfigPath) {
   ) {
     throw new Error("approvedDestructiveMigrations must be an object");
   }
+  if (
+    config.approvedMigrationRenames !== undefined &&
+    (typeof config.approvedMigrationRenames !== "object" ||
+      config.approvedMigrationRenames === null)
+  ) {
+    throw new Error("approvedMigrationRenames must be an object");
+  }
   return config;
 }
 
@@ -240,6 +247,45 @@ export async function checkMigrations({
   for (const candidate of candidates) {
     const name = basename(candidate.path);
     if (candidate.status === "D") {
+      const replacementName = config.approvedMigrationRenames?.[name];
+      if (typeof replacementName === "string") {
+        const baseRef = options.staged
+          ? "HEAD"
+          : options.base ?? "origin/main";
+        const originalContent = git(
+          ["show", `${baseRef}:${candidate.path}`],
+          { cwd: repoRoot, allowFailure: true }
+        );
+        let replacementContent = null;
+        try {
+          replacementContent = await readFile(
+            resolve(repoRoot, migrationsDirectory, replacementName),
+            "utf8"
+          );
+        } catch {
+          // Report the missing replacement below.
+        }
+        if (!originalContent || replacementContent === null) {
+          violations.push({
+            file: candidate.path,
+            code: "approved-migration-rename-missing",
+            excerpt: `Approved replacement migration is missing: ${replacementName}`
+          });
+        } else if (sha256(originalContent) !== sha256(replacementContent)) {
+          violations.push({
+            file: candidate.path,
+            code: "approved-migration-rename-content-mismatch",
+            excerpt: `Approved rename must preserve SQL exactly: ${replacementName}`
+          });
+        } else {
+          inspected.push({
+            file: candidate.path,
+            renamedTo: `${migrationsDirectory}/${replacementName}`,
+            contentHash: sha256(replacementContent)
+          });
+        }
+        continue;
+      }
       violations.push({
         file: candidate.path,
         code: "immutable-migration-deleted",
