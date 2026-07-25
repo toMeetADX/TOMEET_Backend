@@ -466,16 +466,16 @@ export class JobProcessor {
       this.store.listActiveSocialHooks(userId, 16),
       this.store.listOfflineGames()
     ]);
-    const [messages, checkpoint] = await Promise.all([
+    const [messages, conversationState] = await Promise.all([
       this.store.listRecentMessages(userId, 32),
-      this.updateConversationCheckpoint(userId)
+      this.store.getConversationState(userId)
     ]);
     const context = buildAgentContext(messages, model, {
       matchRequest: initialMatchRequest,
       matchInvite: initialMatchInvite,
       room: initialRoom,
       availableGames,
-      checkpoint,
+      checkpoint: conversationState.rollingSummary,
       memoryProfile,
       matchOptions,
       onboardingState,
@@ -604,6 +604,7 @@ export class JobProcessor {
           partitionKey: `user:${userId}`
         })
       : null;
+    this.deferConversationCheckpointUpdate(userId);
     return {
       message,
       userModel: updatedModel,
@@ -618,6 +619,16 @@ export class JobProcessor {
       usedMemoryCount: insight.usedMemoryIds.length,
       savedSocialHookCount: savedSocialHooks.length
     };
+  }
+
+  private deferConversationCheckpointUpdate(userId: string): void {
+    void this.updateConversationCheckpoint(userId).catch((error: unknown) => {
+      console.warn(JSON.stringify({
+        level: "warn",
+        event: "conversation_summary_deferred",
+        error: error instanceof Error ? error.message : String(error)
+      }));
+    });
   }
 
   private async updateConversationCheckpoint(userId: string): Promise<string> {
