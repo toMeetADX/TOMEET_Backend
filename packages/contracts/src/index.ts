@@ -223,8 +223,8 @@ export const matchDraftSchema = z.object({
   offlineGameId: idSchema,
   status: z.enum(["collecting", "formed", "expired"]),
   version: z.number().int().nonnegative(),
-  targetPlayers: z.number().int().min(3).max(10),
-  candidateRequestIds: z.array(idSchema).min(3).max(12),
+  targetPlayers: z.number().int().min(2).max(10),
+  candidateRequestIds: z.array(idSchema).min(2).max(12),
   rationale: z.string().min(1).max(1_000).default("现场互动候选局"),
   createdAt: z.string().datetime(),
   expiresAt: z.string().datetime()
@@ -298,8 +298,8 @@ export const matchRoundProposalSchema = z.object({
   drafts: z.array(z.object({
     tempDraftId: z.string().min(1).max(64),
     offlineGameId: idSchema,
-    targetPlayers: z.number().int().min(3).max(10),
-    candidateRequestIds: z.array(idSchema).min(3).max(12),
+    targetPlayers: z.number().int().min(2).max(10),
+    candidateRequestIds: z.array(idSchema).min(2).max(12),
     rationale: z.string().min(1).max(1_000)
   })).min(1).max(30),
   userOptions: z.array(z.object({
@@ -319,9 +319,9 @@ export type GroupActivityJudgement = z.infer<typeof groupActivityJudgementSchema
 export const finalRoomDecisionSchema = z.object({
   draftId: idSchema,
   offlineGameId: idSchema,
-  requestIds: z.array(idSchema).min(3).max(10),
-  memberIds: z.array(idSchema).min(3).max(10),
-  targetPlayers: z.number().int().min(3).max(10),
+  requestIds: z.array(idSchema).min(2).max(10),
+  memberIds: z.array(idSchema).min(2).max(10),
+  targetPlayers: z.number().int().min(2).max(10),
   summary: z.string().min(1).max(2_000)
 });
 export type FinalRoomDecision = z.infer<typeof finalRoomDecisionSchema>;
@@ -381,7 +381,7 @@ export const offlineGameSchema = z.object({
   id: idSchema,
   name: z.string(),
   description: z.string(),
-  minPlayers: z.number().int().min(3),
+  minPlayers: z.number().int().min(2),
   maxPlayers: z.number().int().max(10),
   intentTags: z.array(z.string()),
   traits: z.array(z.string()),
@@ -449,7 +449,7 @@ export const matchRoomSchema = z.object({
   matchSummary: z.string(),
   status: z.enum(["confirming", "confirmed", "completed"]),
   sourceDraftId: idSchema.nullable().default(null),
-  targetPlayers: z.number().int().min(3).max(10).nullable().default(null),
+  targetPlayers: z.number().int().min(2).max(10).nullable().default(null),
   recruitmentStatus: z.enum(["open", "full", "closed"]).default("closed"),
   version: z.number().int().nonnegative().default(0),
   meetingPoint: z.string().max(500).nullable().default(null),
