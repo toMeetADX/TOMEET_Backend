@@ -10,6 +10,134 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("hosted structured output compatibility", () => {
+  it("includes a lowercase json marker when requesting json_object output", async () => {
+    const now = new Date().toISOString();
+    const requestBodies = stubChatResponses({
+      drafts: [{
+        tempDraftId: "draft-1",
+        offlineGameId: "game-story-table",
+        targetPlayers: [2],
+        candidateRequestIds: ["request-1", "request-2"],
+        rationale: "A two-person activity"
+      }],
+      userOptions: [
+        { requestId: "request-1", tempDraftIds: ["draft-1"] },
+        { requestId: "request-2", tempDraftIds: ["draft-1"] }
+      ]
+    });
+    const candidates: MatchCandidate[] = ["1", "2"].map((suffix) => {
+      const userId = `user-${suffix}`;
+      return {
+        request: {
+          requestId: `request-${suffix}`,
+          userId,
+          intentSnapshot: { rawText: `intent-${suffix}` },
+          status: "matching" as const,
+          phase: "waiting" as const,
+          proactivePushEnabled: false,
+          activeRoundId: null,
+          optionsExpiresAt: null,
+          roomId: null,
+          inviteId: null,
+          createdAt: now,
+          updatedAt: now
+        },
+        userModel: createDefaultUserModel(userId),
+        matchingNarrative: `narrative-${suffix}`
+      };
+    });
+    const games: OfflineGame[] = [{
+      id: "game-story-table",
+      name: "Story table",
+      description: "A guided conversation",
+      minPlayers: 2,
+      maxPlayers: 6,
+      intentTags: [],
+      traits: [],
+      requirements: [],
+      instructions: []
+    }, {
+      id: "game-walk",
+      name: "Guided walk",
+      description: "A guided walk",
+      minPlayers: 2,
+      maxPlayers: 6,
+      intentTags: [],
+      traits: [],
+      requirements: [],
+      instructions: []
+    }];
+
+    const proposal = await hostedWithSearch().proposeMatchRound(candidates, games);
+
+    const payload = JSON.parse(requestBodies[0]!) as {
+      response_format: { type: string };
+      messages: Array<{ content: string }>;
+    };
+    expect(payload.response_format.type).toBe("json_object");
+    expect(payload.messages[1]?.content).toContain("json");
+    expect(proposal?.drafts[0]?.targetPlayers).toBe(2);
+  });
+
+  it("uses the only compatible activity for an exact two-person pool", async () => {
+    const now = new Date().toISOString();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const candidates: MatchCandidate[] = ["1", "2"].map((suffix) => {
+      const userId = `user-${suffix}`;
+      return {
+        request: {
+          requestId: `request-${suffix}`,
+          userId,
+          intentSnapshot: { rawText: `intent-${suffix}` },
+          status: "matching" as const,
+          phase: "waiting" as const,
+          proactivePushEnabled: false,
+          activeRoundId: null,
+          optionsExpiresAt: null,
+          roomId: null,
+          inviteId: null,
+          createdAt: now,
+          updatedAt: now
+        },
+        userModel: createDefaultUserModel(userId),
+        matchingNarrative: `narrative-${suffix}`
+      };
+    });
+    const games: OfflineGame[] = [{
+      id: "game-story-table",
+      name: "Story table",
+      description: "A guided conversation",
+      minPlayers: 2,
+      maxPlayers: 6,
+      intentTags: [],
+      traits: [],
+      requirements: [],
+      instructions: []
+    }, {
+      id: "game-group-only",
+      name: "Group activity",
+      description: "Requires a larger group",
+      minPlayers: 4,
+      maxPlayers: 8,
+      intentTags: [],
+      traits: [],
+      requirements: [],
+      instructions: []
+    }];
+
+    const proposal = await hostedWithSearch().proposeMatchRound(candidates, games);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(proposal?.drafts[0]).toMatchObject({
+      offlineGameId: "game-story-table",
+      targetPlayers: 2,
+      candidateRequestIds: ["request-1", "request-2"]
+    });
+  });
+});
+
 function agentContext(): AgentContext {
   return buildAgentContext([], createDefaultUserModel("u1"));
 }
@@ -1015,17 +1143,19 @@ describe("hosted Agent product-event composition", () => {
       .rejects.toThrow("候选文案没有覆盖全部选项");
   });
 
-  it("rejects option previews on non-candidate product events", async () => {
+  it("drops option previews on non-candidate product events", async () => {
     const invalid = {
       content: "这次匹配已经结束。",
       optionPreviews: [{ optionNumber: 1, text: "不应出现的候选" }]
     };
     stubChatResponses(invalid, invalid);
 
-    await expect(hostedWithSearch().composeProductMessage(agentContext(), {
+    const result = await hostedWithSearch().composeProductMessage(agentContext(), {
       kind: "match_expired",
       facts: { reason: "selection_timeout", canRematch: true, rematchRequiresExplicitUserRequest: true }
-    })).rejects.toThrow("非候选事件不能返回 optionPreviews");
+    });
+
+    expect(result.optionPreviews).toEqual([]);
   });
 
   it("requires invitation and confirmation cards to omit the right border", async () => {

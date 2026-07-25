@@ -835,7 +835,11 @@ export class SupabaseStore implements DataStore {
       p_owner_user_id: ownerUserId
     });
     if (error) this.throwError("读取虚拟测试用户池", error);
-    return adventurexTestPoolStatusSchema.parse(unwrapRpcData(data));
+    const row = unwrapRpcData(data) as JsonRow;
+    return adventurexTestPoolStatusSchema.parse({
+      ...row,
+      updatedAt: normalizeDateTime(row.updatedAt ?? row.updated_at)
+    });
   }
 
   async configureAdventurexTestPool(
@@ -848,7 +852,11 @@ export class SupabaseStore implements DataStore {
       p_desired_user_count: input.desiredUserCount
     });
     if (error) this.throwError("配置虚拟测试用户池", error);
-    return adventurexTestPoolStatusSchema.parse(unwrapRpcData(data));
+    const row = unwrapRpcData(data) as JsonRow;
+    return adventurexTestPoolStatusSchema.parse({
+      ...row,
+      updatedAt: normalizeDateTime(row.updatedAt ?? row.updated_at)
+    });
   }
 
   async prepareAdventurexTestPool(ownerUserId: string): Promise<MatchRequest[]> {
