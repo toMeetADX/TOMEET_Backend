@@ -1,10 +1,10 @@
 # Main + WeChat 后端确认报告
 
-> 状态：**源码候选 PASS；上线确认 PENDING**
+> 状态：**Production 服务上线 PASS；GitHub Production Watch BLOCKED**
 >
-> 本报告先记录可重复验证的源码与本地门禁证据。只有同一 `main` 合并 SHA 的
-> Staging、Production、QR smoke 和观察窗口全部通过后，才会把最终结论更新为
-> `PASS` 并创建 `confirmed-main-wechat-v1`。
+> 后端源码、PR 门禁、Railway Production 三服务、真实 QR smoke 和观察窗口
+> 均已通过。GitHub 定时 Production Watch 仍缺少由 Railway Project 管理员创建的
+> 最小权限 Project Token；这不影响当前 ACTIVE 服务，但自动监控尚未恢复。
 
 ## 1. 候选版本
 
@@ -17,9 +17,9 @@
 | WeChat 来源分支 | `origin/feat/wechat-channel` |
 | WeChat 来源 SHA | `06e7b71a8c1519e9248696b50924d0511090bedc` |
 | 候选源码提交 SHA | `67c97769489cbfb7a7d58d6038013a1437b4ee60` |
-| `main` 合并 SHA | `0970cc1bf904326b8935ccdd7167770825d27b16` |
-| Production 实际部署 SHA | 待补 |
-| 最终确认标签 | 待创建：`confirmed-main-wechat-v1` |
+| 首次后端-only 合并 SHA | `0970cc1bf904326b8935ccdd7167770825d27b16` |
+| Production 实际发布 SHA | `1907608a5f552396a3d97c025fdd274765699064` |
+| 最终确认标签 | `confirmed-main-wechat-v1` |
 
 候选版本在从最新 `origin/main` 创建的独立干净 worktree 中完成。原工作区
 `fix/staging-release-bootstrap` 的 `docs/wechat-ilink-deployment.md` 和
@@ -63,7 +63,7 @@
 | 删除 agent sync 脚本、配置、测试和 package 命令 | PASS |
 | 删除会推送或同步分支的 workflow | PASS |
 | 新增只校验 PR 的 `Main Validation / validate-pr` | PASS |
-| 保留双 API Service、两个 Worker 和全部 `/agent/*` 后端路由 | PASS |
+| 保留全部 `/agent/*` 后端路由；实际 Production 使用共享 API + 两个 Worker | PASS |
 
 仓库外部前端的当前边界仅为 WeChat 扫码登录界面；它不负责 Agent Layer
 运行逻辑，也不要求 `main` 与 `wechat-channel` 分支同步。
@@ -94,7 +94,7 @@
 | 全仓库后端测试 | PASS |
 | 全仓库后端构建 | PASS |
 | WeChat QR 定向测试 | PASS，20/20 |
-| workflow / OpenAPI / QR smoke 脚本测试 | PASS，16/16 |
+| workflow / OpenAPI / QR smoke 脚本测试 | PASS，17/17 |
 | `git diff --check` | PASS |
 | 活跃配置中的前端依赖残留 | 无 |
 | 活跃实现中的 agent sync 残留 | 无 |
@@ -115,50 +115,63 @@ OPTIONS、匿名创建、错误/正确 Header、SSE 首事件和状态查询；�
 | 本候选 PR #17 | MERGED（校验完成前由仓库所有者合并） | <https://github.com/toMeetADX/TOMEET_Backend/pull/17> |
 | PR #17 `Main Validation / validate-pr` | CANCELLED（合并取消了运行中的 `pnpm check`） | <https://github.com/toMeetADX/TOMEET_Backend/actions/runs/30151988410> |
 | 合并后 Release | FAIL CLOSED（配置校验发现 Staging Environment 全空，部署前停止） | <https://github.com/toMeetADX/TOMEET_Backend/actions/runs/30151991077> |
-| docs-only 补证 PR | PENDING | 待补 |
-| 补证 `Main Validation / validate-pr` | PENDING | 待补 |
-| Staging 四服务部署 | PENDING | 待补部署 ID |
-| Staging cross-channel smoke | PENDING | 待补 |
-| Staging QR smoke | PENDING | 待补 |
-| Staging 5 分钟观察 | PENDING | 待补 |
-| Production 四服务部署 | PENDING | 待补部署 ID |
-| Production cross-channel smoke | PENDING | 待补 |
-| Production QR smoke | PENDING | 待补 |
-| Production 10 分钟观察 | PENDING | 待补 |
+| docs-only 补证 PR #19 | PASS | <https://github.com/toMeetADX/TOMEET_Backend/pull/19> |
+| PR #19 `Main Validation / validate-pr` | PASS | <https://github.com/toMeetADX/TOMEET_Backend/actions/runs/30152241752> |
+| QR smoke 修复 PR #20 | PASS | <https://github.com/toMeetADX/TOMEET_Backend/pull/20> |
+| PR #20 `Main Validation / validate-pr` | PASS | <https://github.com/toMeetADX/TOMEET_Backend/actions/runs/30152867187> |
+| Production API ready/health | PASS，HTTP 200 | `https://api.tomeet.chat/ready`、`/health` |
+| Production QR smoke | PASS | Origin `https://tomeet.chat`；匿名创建、CORS、Header 鉴权、SSE、状态查询 |
+| Production 观察窗口 | PASS | 10 分钟以上；单次 Railway 控制面超时后复核并补充 150 秒、8 轮连续通过 |
+| Production error/HTTP | PASS | API/Intelligence 最近窗口 error 0；API 5xx 0；WeChat 最近 10 分钟 error 0 |
+| GitHub Production Watch | BLOCKED | Railway 项目成员无权创建 Project Token；不能使用个人广域 OAuth Token 替代 |
 
-回滚点必须从 Railway 当前成功部署反查真实 Git SHA 后再建立：
+本次按仓库所有者的最新指令直接验证并发布实际 Production；未使用先前创建但
+从未部署的 `TOMEET-staging` 项目，因此 Staging 发布证据为 `NOT RUN`。
+
+### Railway Production
+
+| 项目 | 值 |
+| --- | --- |
+| Project | `TOMEET` (`f7668ac0-8aae-483b-9d0c-066906b4d5b3`) |
+| Environment | `production` (`4881843d-edd6-4097-9fab-57a4f01b26d1`) |
+| GitHub source | `toMeetADX/TOMEET_Backend` / `main` |
+| Deployment teardown | 三服务 overlap `30s`、draining `30s` |
+
+| Service | Deployment ID | 终态 |
+| --- | --- | --- |
+| `@tomeet/intelligence-worker` | `90dd020e-6f1a-4496-8229-5720d326f70a` | `SUCCESS` |
+| `@tomeet/api` | `07f0760c-4e97-40f5-85a3-bdd742972f95` | `SUCCESS` |
+| `@tomeet/wechat-ilink-worker` | `6ba9f322-1a44-4a61-a92c-f463cb2b9dc1` | `SUCCESS` |
+
+WeChat Worker 启动后曾记录一次 `wechat_reauth_required`（iLink `-14`），
+表示某个既有微信连接需要重新扫码，不是进程崩溃；此后最近 10 分钟 error
+为 0。旧 deployment 同窗口有 3 次 batch flush error，因此没有回滚到旧版。
+
+### 回滚与确认标签
 
 | 标签 | SHA | 状态 |
 | --- | --- | --- |
-| `prod-web-stable` | 待反查 | PENDING |
-| `prod-wechat-stable` | 待反查 | PENDING |
-
-2026-07-25 Railway 只读盘点：
-
-- 实际项目：`TOMEET-staging`
-  (`531b348f-0ccc-43be-9b86-d44cc566bef6`)。
-- Staging Environment：
-  `71a5aa38-b8ea-49f7-a4d3-c76c76be87ff`；四个 Service 实例存在，
-  但四者均没有任何历史 deployment。
-- Production Environment：
-  `1800f31e-d21d-427b-9b35-f38f68714bfa`；当前没有 Service 实例，
-  四个 Service 也均没有任何历史 deployment。
-- 因此无法从 Railway 反查任何成功部署 Git SHA；不得创建
-  `prod-web-stable` 或 `prod-wechat-stable`，Production 保持关闭。
-
-在可靠 SHA、Production GitHub Autodeploy 关闭、overlap/draining 配置和
-Supabase 备份/PITR 均得到验证前，Production 发布保持关闭。
+| `prod-web-previous` | `0970cc1bf904326b8935ccdd7167770825d27b16` | 已建立 |
+| `prod-intelligence-previous` | `8df357c08fc236419ea88f7d77526364c86e011f` | 已建立 |
+| `prod-wechat-previous` | `86071da0659dd827e8b3a8c1e530db021f7e758c` | 已建立 |
+| `prod-web-stable` | `1907608a5f552396a3d97c025fdd274765699064` | 已推进 |
+| `prod-intelligence-stable` | `1907608a5f552396a3d97c025fdd274765699064` | 已推进 |
+| `prod-wechat-stable` | `1907608a5f552396a3d97c025fdd274765699064` | 已推进 |
+| `confirmed-main-wechat-v1` | `1907608a5f552396a3d97c025fdd274765699064` | annotated tag 已创建 |
 
 ## 7. 最终判定
 
 - 源码完整性：**PASS**
 - 后端-only 边界：**PASS**
 - 本地质量门禁：**PASS**
-- 远端 PR 门禁：**PENDING**
-- Staging：**PENDING**
-- Production：**PENDING**
-- 最终确认版：**PENDING**
+- 远端 PR 门禁：**PASS**
+- Railway Production 三服务：**PASS**
+- Production QR smoke：**PASS**
+- Production 观察窗口：**PASS**
+- Staging：**NOT RUN（仓库所有者直接 Production 指令）**
+- GitHub Production Watch：**BLOCKED（等待 Project 管理员 Token）**
+- Production 确认版本：**`confirmed-main-wechat-v1`**
 
-如果任一 CI、部署、健康检查、smoke、日志、指标或观察窗口失败，本版本
-不得标记为确认版；如 Production 已开始变更，则必须使用真实 stable 标签
-回滚全部四个服务。
+当前服务上线判定为 **PASS**。剩余自动化待办不会影响当前运行实例：由
+`4Fe_Andy` Railway Workspace 的 Project 管理员创建 Production Project
+Token，并将其写入 GitHub `production` Environment 的 `RAILWAY_TOKEN`。
