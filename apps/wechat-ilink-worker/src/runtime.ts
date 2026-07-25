@@ -174,7 +174,7 @@ function splitLongBubble(content: string, maxChars = WECHAT_BUBBLE_MAX_CHARS): s
 }
 
 function splitParagraphSentences(paragraph: string): string[] {
-  const characters = Array.from(paragraph.replace(/\s*\n\s*/gu, " ").trim());
+  const characters = Array.from(paragraph.trim());
   const sentences: string[] = [];
   let current = "";
   for (let index = 0; index < characters.length; index += 1) {
@@ -198,12 +198,26 @@ function splitParagraphSentences(paragraph: string): string[] {
   return sentences;
 }
 
+function splitExplicitBubbleSegments(content: string): string[] {
+  return content
+    // Models do not always preserve the requested blank line. A single line break still
+    // represents an explicit WeChat bubble boundary.
+    .split(/\s*\n+\s*/u)
+    // Chinese prose normally has no ASCII spaces between clauses, so a space between two
+    // Han segments is usually a flattened paragraph separator. Keep ordinary English word
+    // spaces intact.
+    .flatMap((line) => line.split(
+      /(?<=[\p{Script=Han}，。！？!?…])[ \t\u3000]+(?=[\p{Script=Han}])/u
+    ))
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
 export function splitWechatBubbles(content: string): string[] {
   const trimmed = content.trim();
   if (!trimmed) return [];
   if (trimmed.startsWith("┏")) return [trimmed];
-  const bubbles = trimmed
-    .split(/\n\s*\n+/u)
+  const bubbles = splitExplicitBubbleSegments(trimmed)
     .flatMap((paragraph) => splitParagraphSentences(paragraph))
     .flatMap((sentence) => splitLongBubble(sentence))
     .filter(Boolean);

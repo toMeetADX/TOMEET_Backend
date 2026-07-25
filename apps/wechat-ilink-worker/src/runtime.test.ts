@@ -105,6 +105,14 @@ describe("WeChat worker runtime", () => {
       "第二句话！",
       "Third sentence"
     ]);
+    expect(splitWechatBubbles("收到 我先看看\n然后告诉你")).toEqual([
+      "收到",
+      "我先看看",
+      "然后告诉你"
+    ]);
+    expect(splitWechatBubbles("I can help with that")).toEqual([
+      "I can help with that"
+    ]);
     const card = [
       "┏━━━━━━━━━━━━",
       "┃ TOMEET 成局确认函",
