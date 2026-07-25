@@ -10,6 +10,8 @@ import type {
   MatchChoice,
   MatchDecision,
   MatchDraft,
+  MatchInvite,
+  MatchInviteResolution,
   MatchOptionContext,
   MatchOptionOffer,
   MatchRequest,
@@ -18,6 +20,7 @@ import type {
   Message,
   OfflineGame,
   PostEventFeedback,
+  RoomJoinDecision,
   SaveMatchChoicesInput,
   SocialHook,
   SocialHookDraft,
@@ -27,10 +30,11 @@ import type {
 } from "@tomeet/contracts";
 import { adventurexWelcomeContent } from "@tomeet/contracts";
 import { curatedGames } from "@tomeet/game-catalog";
-import type { MatchCandidate } from "@tomeet/matchmaking";
+import type { MatchCandidate, RoomMatchCandidate } from "@tomeet/matchmaking";
 import {
   validateFinalRoomDecision,
-  validateMatchDecision
+  validateMatchDecision,
+  validateRoomJoinDecision
 } from "@tomeet/matchmaking";
 import { createDefaultUserModel } from "@tomeet/user-model";
 import type {
@@ -43,7 +47,8 @@ import type {
   MultimodalRecordInput,
   RoomChangeNotification,
   RoundSettlementState,
-  SaveRoundPlanInput
+  SaveRoundPlanInput,
+  StopRoomMatchingResult
 } from "./store.js";
 import { StoreConflictError, StoreNotFoundError } from "./store.js";
 
@@ -56,11 +61,18 @@ interface MemoryUser {
   };
 }
 
+interface MemoryMatchInvite {
+  invite: MatchInvite;
+  participantRequestIds: Record<string, string>;
+  sourceJobId?: string;
+}
+
 export class MemoryStore implements DataStore {
   private readonly users = new Map<string, MemoryUser>();
   private readonly messages: Message[] = [];
   private readonly wechatResponseGenerations = new Map<string, string>();
   private readonly matchRequests = new Map<string, MatchRequest>();
+  private readonly matchInvites = new Map<string, MemoryMatchInvite>();
   private readonly rooms = new Map<string, MatchRoom>();
   private readonly jobs = new Map<string, LlmJob>();
   private readonly jobLocks = new Map<string, { workerId: string; lockedAt: string }>();
@@ -68,7 +80,7 @@ export class MemoryStore implements DataStore {
   private readonly multimodal = new Map<string, MultimodalRecordInput & { understanding?: Record<string, unknown> }>();
   private readonly uploadedFiles = new Map<string, { mimeType: string; bytes: Uint8Array }>();
   private readonly feedbackKeys = new Map<string, string>();
-  private readonly sourceJobRooms = new Map<string, string>();
+  private readonly sourceJobInvites = new Map<string, string>();
   private readonly userMemories = new Map<string, UserMemory>();
   private readonly memoryProfiles = new Map<string, UserMemoryProfile>();
   private readonly channelIdentities = new Map<string, ChannelIdentity>();
@@ -158,6 +170,7 @@ export class MemoryStore implements DataStore {
         activeRoundId: null,
         optionsExpiresAt: null,
         roomId: null,
+        inviteId: null,
         createdAt: now,
         updatedAt: now
       });
@@ -608,7 +621,8 @@ export class MemoryStore implements DataStore {
     );
     if (activeRoom) throw new StoreConflictError("你还有一个未结束的匹配房间");
     const existing = [...this.matchRequests.values()].find(
-      (request) => request.userId === userId && request.status === "matching"
+      (request) => request.userId === userId
+        && (request.status === "matching" || request.status === "invited")
     );
     if (existing) return structuredClone(existing);
     const now = new Date().toISOString();
@@ -622,6 +636,7 @@ export class MemoryStore implements DataStore {
       activeRoundId: null,
       optionsExpiresAt: null,
       roomId: null,
+      inviteId: null,
       createdAt: now,
       updatedAt: now
     };
@@ -650,6 +665,7 @@ export class MemoryStore implements DataStore {
     request.proactivePushEnabled = false;
     request.activeRoundId = null;
     request.optionsExpiresAt = null;
+    request.inviteId = null;
     request.updatedAt = new Date().toISOString();
     for (const offer of this.offers.values()) {
       if (offer.requestId === requestId && offer.status === "offered") offer.status = "expired";
@@ -1080,6 +1096,10 @@ export class MemoryStore implements DataStore {
         recruitmentStatus: decision.memberIds.length < Math.min(decision.targetPlayers, game.maxPlayers) ? "open" : "full",
         version: 0,
         meetingPoint: "TOMEET 集合点",
+        matchingStatus: decision.memberIds.length < Math.min(decision.targetPlayers, game.maxPlayers)
+          ? "active"
+          : "full",
+        capacity: Math.min(decision.targetPlayers, game.maxPlayers),
         createdAt: now,
         completedAt: null
       };
@@ -1185,6 +1205,265 @@ export class MemoryStore implements DataStore {
     return structuredClone(room);
   }
 
+  async getMatchInvite(inviteId: string): Promise<MatchInvite | null> {
+    const record = this.matchInvites.get(inviteId);
+    return record ? structuredClone(record.invite) : null;
+  }
+
+  async getLatestMatchInviteForUser(userId: string): Promise<MatchInvite | null> {
+    const record = [...this.matchInvites.values()]
+      .filter(({ invite }) => invite.participants.some((participant) => participant.userId === userId))
+      .sort((a, b) => b.invite.createdAt.localeCompare(a.invite.createdAt))[0];
+    return record ? structuredClone(record.invite) : null;
+  }
+
+  async createInitialMatchInvite(decision: MatchDecision, sourceJobId?: string): Promise<MatchInvite> {
+    if (sourceJobId) {
+      const existingId = this.sourceJobInvites.get(sourceJobId);
+      if (existingId) return structuredClone(this.matchInvites.get(existingId)!.invite);
+    }
+    const requests = decision.requestIds.map((id) => this.matchRequests.get(id)).filter(Boolean) as MatchRequest[];
+    const game = curatedGames.find((item) => item.id === decision.offlineGameId);
+    validateMatchDecision(decision, requests, game);
+    const inviteId = randomUUID();
+    const now = new Date().toISOString();
+    const participants = decision.memberIds.map((userId, index) => ({
+      userId,
+      requestId: decision.requestIds[index]!,
+      displayName: this.users.get(userId)?.displayName ?? "成员",
+      accepted: userId.startsWith("demo-")
+    }));
+    const invite: MatchInvite = {
+      inviteId,
+      kind: "initial_pair",
+      roomId: null,
+      participants,
+      offlineGameId: decision.offlineGameId,
+      matchSummary: decision.summary,
+      status: "pending",
+      createdAt: now,
+      resolvedAt: null
+    };
+    this.matchInvites.set(inviteId, {
+      invite,
+      participantRequestIds: Object.fromEntries(
+        participants.map((participant) => [participant.userId, participant.requestId])
+      ),
+      sourceJobId
+    });
+    if (sourceJobId) this.sourceJobInvites.set(sourceJobId, inviteId);
+    for (const request of requests) {
+      request.status = "invited";
+      request.inviteId = inviteId;
+      request.updatedAt = now;
+    }
+    return structuredClone(invite);
+  }
+
+  async createRoomJoinInvite(decision: RoomJoinDecision, sourceJobId?: string): Promise<MatchInvite> {
+    if (sourceJobId) {
+      const existingId = this.sourceJobInvites.get(sourceJobId);
+      if (existingId) return structuredClone(this.matchInvites.get(existingId)!.invite);
+    }
+    const request = this.matchRequests.get(decision.requestId);
+    const room = this.rooms.get(decision.roomId);
+    validateRoomJoinDecision(decision, request ? [request] : [], room ? [room] : []);
+    if ([...this.matchInvites.values()].some(
+      ({ invite }) => invite.kind === "room_join"
+        && invite.roomId === decision.roomId
+        && invite.status === "pending"
+    )) {
+      throw new StoreConflictError("目标房间已有待处理邀请");
+    }
+    const inviteId = randomUUID();
+    const now = new Date().toISOString();
+    const participant = {
+      userId: decision.userId,
+      requestId: decision.requestId,
+      displayName: this.users.get(decision.userId)?.displayName ?? "成员",
+      accepted: decision.userId.startsWith("demo-")
+    };
+    const invite: MatchInvite = {
+      inviteId,
+      kind: "room_join",
+      roomId: decision.roomId,
+      participants: [participant],
+      offlineGameId: room!.offlineGame.id,
+      matchSummary: decision.summary,
+      status: "pending",
+      createdAt: now,
+      resolvedAt: null
+    };
+    this.matchInvites.set(inviteId, {
+      invite,
+      participantRequestIds: { [participant.userId]: participant.requestId },
+      sourceJobId
+    });
+    if (sourceJobId) this.sourceJobInvites.set(sourceJobId, inviteId);
+    request!.status = "invited";
+    request!.inviteId = inviteId;
+    request!.updatedAt = now;
+    if (participant.accepted) {
+      return (await this.acceptMatchInvite(inviteId, participant.userId)).invite;
+    }
+    return structuredClone(invite);
+  }
+
+  async acceptMatchInvite(inviteId: string, userId: string): Promise<MatchInviteResolution> {
+    const record = this.matchInvites.get(inviteId);
+    if (!record) throw new StoreNotFoundError("匹配邀请不存在");
+    const { invite } = record;
+    const participant = invite.participants.find((item) => item.userId === userId);
+    if (!participant) throw new StoreConflictError("用户不在该匹配邀请中");
+    if (invite.status === "accepted") {
+      return {
+        invite: structuredClone(invite),
+        room: invite.roomId ? structuredClone(this.rooms.get(invite.roomId) ?? null) : null,
+        requeuedRequestIds: []
+      };
+    }
+    if (invite.status !== "pending") throw new StoreConflictError("该匹配邀请已失效");
+    participant.accepted = true;
+    if (!invite.participants.every((item) => item.accepted)) {
+      return { invite: structuredClone(invite), room: null, requeuedRequestIds: [] };
+    }
+
+    const now = new Date().toISOString();
+    let room: MatchRoom;
+    if (invite.kind === "initial_pair") {
+      const game = curatedGames.find((item) => item.id === invite.offlineGameId);
+      if (!game) throw new StoreNotFoundError("线下游戏不存在");
+      const roomId = randomUUID();
+      const capacity = game.maxPlayers;
+      room = {
+        roomId,
+        members: invite.participants.map((item) => ({
+          userId: item.userId,
+          displayName: item.displayName,
+          confirmed: true,
+          participationStatus: "confirmed"
+        })),
+        offlineGame: structuredClone(game),
+        matchSummary: invite.matchSummary,
+        status: "confirmed",
+        sourceDraftId: null,
+        targetPlayers: capacity,
+        recruitmentStatus: invite.participants.length >= capacity ? "full" : "open",
+        version: 0,
+        meetingPoint: null,
+        matchingStatus: invite.participants.length >= capacity ? "full" : "active",
+        capacity,
+        createdAt: now,
+        completedAt: null
+      };
+      this.rooms.set(roomId, room);
+      invite.roomId = roomId;
+      for (const requestId of Object.values(record.participantRequestIds)) {
+        const request = this.matchRequests.get(requestId);
+        if (!request) continue;
+        request.status = "matched";
+        request.phase = "settling";
+        request.roomId = roomId;
+        request.updatedAt = now;
+        const user = this.users.get(request.userId);
+        if (user && !user.model.socialHistory.includes(roomId)) {
+          user.model.socialHistory = [...user.model.socialHistory, roomId].slice(-50);
+          user.model.version += 1;
+          user.model.updatedAt = now;
+        }
+      }
+    } else {
+      room = this.rooms.get(invite.roomId!)!;
+      const activeMembers = room?.members.filter((member) => member.participationStatus !== "withdrawn") ?? [];
+      if (!room || room.status === "completed" || room.matchingStatus !== "active") {
+        throw new StoreConflictError("目标房间已停止匹配");
+      }
+      if (activeMembers.length >= room.capacity) {
+        room.matchingStatus = "full";
+        room.recruitmentStatus = "full";
+        throw new StoreConflictError("目标房间已满");
+      }
+      const existing = room.members.find((member) => member.userId === participant.userId);
+      if (existing) {
+        existing.confirmed = true;
+        existing.participationStatus = "confirmed";
+      } else {
+        room.members.push({
+          userId: participant.userId,
+          displayName: participant.displayName,
+          confirmed: true,
+          participationStatus: "confirmed"
+        });
+      }
+      const request = this.matchRequests.get(participant.requestId)!;
+      request.status = "matched";
+      request.phase = "settling";
+      request.roomId = room.roomId;
+      request.updatedAt = now;
+      room.version += 1;
+      const memberCount = room.members.filter((member) => member.participationStatus !== "withdrawn").length;
+      if (memberCount >= room.capacity) {
+        room.matchingStatus = "full";
+        room.recruitmentStatus = "full";
+      }
+      this.recordRoomChange(room, "member_joined", {
+        joinedUserId: participant.userId,
+        memberCount
+      });
+      const user = this.users.get(participant.userId);
+      if (user && !user.model.socialHistory.includes(room.roomId)) {
+        user.model.socialHistory = [...user.model.socialHistory, room.roomId].slice(-50);
+        user.model.version += 1;
+        user.model.updatedAt = now;
+      }
+    }
+    invite.status = "accepted";
+    invite.resolvedAt = now;
+    return {
+      invite: structuredClone(invite),
+      room: structuredClone(room),
+      requeuedRequestIds: []
+    };
+  }
+
+  async declineMatchInvite(inviteId: string, userId: string): Promise<MatchInviteResolution> {
+    const record = this.matchInvites.get(inviteId);
+    if (!record) throw new StoreNotFoundError("匹配邀请不存在");
+    const { invite } = record;
+    const participant = invite.participants.find((item) => item.userId === userId);
+    if (!participant) throw new StoreConflictError("用户不在该匹配邀请中");
+    if (invite.status !== "pending") throw new StoreConflictError("该匹配邀请已失效");
+    const now = new Date().toISOString();
+    const request = this.matchRequests.get(participant.requestId);
+    if (request) {
+      request.status = "cancelled";
+      request.phase = "waiting";
+      request.inviteId = null;
+      request.updatedAt = now;
+    }
+    const requeuedRequestIds: string[] = [];
+    if (invite.kind === "initial_pair") {
+      for (const other of invite.participants.filter((item) => item.userId !== userId)) {
+        const otherRequest = this.matchRequests.get(other.requestId);
+        if (!otherRequest || otherRequest.status !== "invited") continue;
+        otherRequest.status = "matching";
+        otherRequest.phase = "waiting";
+        otherRequest.activeRoundId = null;
+        otherRequest.optionsExpiresAt = null;
+        otherRequest.inviteId = null;
+        otherRequest.updatedAt = now;
+        requeuedRequestIds.push(otherRequest.requestId);
+      }
+    }
+    invite.status = "declined";
+    invite.resolvedAt = now;
+    return {
+      invite: structuredClone(invite),
+      room: invite.roomId ? structuredClone(this.rooms.get(invite.roomId) ?? null) : null,
+      requeuedRequestIds
+    };
+  }
+
   async listMatchCandidates(limit = 50): Promise<MatchCandidate[]> {
     const requests = [...this.matchRequests.values()]
       .filter((request) => request.status === "matching")
@@ -1207,53 +1486,47 @@ export class MemoryStore implements DataStore {
     }));
   }
 
-  async listOfflineGames(): Promise<OfflineGame[]> {
-    return structuredClone(curatedGames);
+  async listOpenRoomsForMatching(limit = 20): Promise<RoomMatchCandidate[]> {
+    return [...this.rooms.values()]
+      .filter((room) => {
+        const memberCount = room.members.filter(
+          (member) => member.participationStatus !== "withdrawn"
+        ).length;
+        return room.status !== "completed"
+          && room.matchingStatus === "active"
+          && memberCount < room.capacity
+          && ![...this.matchInvites.values()].some(
+            ({ invite }) => invite.kind === "room_join"
+              && invite.roomId === room.roomId
+              && invite.status === "pending"
+          );
+      })
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(0, limit)
+      .map((room) => ({
+        room: structuredClone(room),
+        members: room.members
+          .filter((member) => member.participationStatus !== "withdrawn")
+          .flatMap((member) => {
+            const request = [...this.matchRequests.values()]
+              .filter((item) => item.userId === member.userId && item.roomId === room.roomId)
+              .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+            if (!request) return [];
+            return [{
+              request: structuredClone(request),
+              userModel: structuredClone(this.users.get(member.userId)!.model),
+              matchingNarrative: this.memoryProfiles.get(member.userId)?.matchingNarrative
+                || this.users.get(member.userId)!.model.vibeNarrative,
+              socialHooks: [...this.socialHooks.values()]
+                .filter((hook) => hook.userId === member.userId && hook.status === "active")
+                .map((hook) => structuredClone(hook))
+            }];
+          })
+      }));
   }
 
-  async createRoomFromDecision(decision: MatchDecision, sourceJobId?: string): Promise<string> {
-    if (sourceJobId && this.sourceJobRooms.has(sourceJobId)) return this.sourceJobRooms.get(sourceJobId)!;
-    const requests = decision.requestIds.map((id) => this.matchRequests.get(id)).filter(Boolean) as MatchRequest[];
-    const game = curatedGames.find((item) => item.id === decision.offlineGameId);
-    validateMatchDecision(decision, requests, game);
-    if (!game) throw new StoreNotFoundError("线下游戏不存在");
-
-    const roomId = randomUUID();
-    const now = new Date().toISOString();
-    const members = decision.memberIds.map((userId) => ({
-      userId,
-      displayName: this.users.get(userId)?.displayName ?? "成员",
-      confirmed: userId.startsWith("demo-"),
-      participationStatus: userId.startsWith("demo-") ? "confirmed" as const : "invited" as const
-    }));
-    const room: MatchRoom = {
-      roomId,
-      members,
-      offlineGame: structuredClone(game),
-      matchSummary: decision.summary,
-      status: members.every((member) => member.confirmed) ? "confirmed" : "confirming",
-      sourceDraftId: null,
-      targetPlayers: decision.memberIds.length,
-      recruitmentStatus: "closed",
-      version: 0,
-      meetingPoint: null,
-      createdAt: now,
-      completedAt: null
-    };
-    this.rooms.set(roomId, room);
-    if (sourceJobId) this.sourceJobRooms.set(sourceJobId, roomId);
-    for (const request of requests) {
-      request.status = "matched";
-      request.roomId = roomId;
-      request.updatedAt = now;
-      const user = this.users.get(request.userId);
-      if (user && !user.model.socialHistory.includes(roomId)) {
-        user.model.socialHistory = [...user.model.socialHistory, roomId].slice(-50);
-        user.model.version += 1;
-        user.model.updatedAt = now;
-      }
-    }
-    return roomId;
+  async listOfflineGames(): Promise<OfflineGame[]> {
+    return structuredClone(curatedGames);
   }
 
   async getRoom(roomId: string): Promise<MatchRoom | null> {
@@ -1300,7 +1573,10 @@ export class MemoryStore implements DataStore {
     room.version += 1;
     const remaining = room.members.filter((item) => item.participationStatus === "confirmed").length;
     room.status = remaining >= room.offlineGame.minPlayers ? "confirmed" : "confirming";
-    if (remaining < (room.targetPlayers ?? room.offlineGame.maxPlayers)) room.recruitmentStatus = "open";
+    if (remaining < room.capacity && room.matchingStatus !== "stopped") {
+      room.recruitmentStatus = "open";
+      room.matchingStatus = "active";
+    }
     const request = [...this.matchRequests.values()].find((item) => item.roomId === roomId && item.userId === userId);
     if (request) {
       request.status = request.proactivePushEnabled ? "matching" : "cancelled";
@@ -1308,6 +1584,7 @@ export class MemoryStore implements DataStore {
       request.roomId = null;
       request.activeRoundId = null;
       request.optionsExpiresAt = null;
+      request.inviteId = null;
       request.updatedAt = new Date().toISOString();
     }
     this.recordRoomChange(room, "member_withdrawn", { withdrawnUserId: userId, memberCount: remaining });
@@ -1361,6 +1638,37 @@ export class MemoryStore implements DataStore {
     this.deliveredDraftNotifications.add(key);
   }
 
+  async stopRoomMatching(roomId: string, userId: string): Promise<StopRoomMatchingResult> {
+    const room = this.rooms.get(roomId);
+    if (!room || room.status === "completed") throw new StoreNotFoundError("房间不存在或已经结束");
+    if (!room.members.some(
+      (member) => member.userId === userId && member.participationStatus !== "withdrawn"
+    )) {
+      throw new StoreConflictError("用户不在房间中");
+    }
+    if (room.matchingStatus === "active") room.matchingStatus = "stopped";
+    if (room.recruitmentStatus === "open") room.recruitmentStatus = "closed";
+    const now = new Date().toISOString();
+    const requeuedRequestIds: string[] = [];
+    for (const { invite } of this.matchInvites.values()) {
+      if (invite.kind !== "room_join" || invite.roomId !== roomId || invite.status !== "pending") continue;
+      invite.status = "cancelled";
+      invite.resolvedAt = now;
+      for (const participant of invite.participants) {
+        const request = this.matchRequests.get(participant.requestId);
+        if (!request || request.status !== "invited") continue;
+        request.status = "matching";
+        request.phase = "waiting";
+        request.activeRoundId = null;
+        request.optionsExpiresAt = null;
+        request.inviteId = null;
+        request.updatedAt = now;
+        requeuedRequestIds.push(request.requestId);
+      }
+    }
+    return { room: structuredClone(room), requeuedRequestIds };
+  }
+
   async completeRoom(roomId: string): Promise<MatchRoom> {
     const room = this.rooms.get(roomId);
     if (!room) throw new StoreNotFoundError("房间不存在");
@@ -1369,6 +1677,8 @@ export class MemoryStore implements DataStore {
       throw new StoreConflictError("所有成员确认后才能完成活动");
     }
     room.status = "completed";
+    if (room.matchingStatus !== "full") room.matchingStatus = "stopped";
+    room.recruitmentStatus = room.matchingStatus === "full" ? "full" : "closed";
     room.completedAt ??= new Date().toISOString();
     for (const member of room.members) {
       const user = this.users.get(member.userId);

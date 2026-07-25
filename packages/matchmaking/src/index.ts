@@ -5,13 +5,14 @@ import type {
   MatchDecision,
   MatchDraft,
   MatchRequest,
+  MatchRoom,
   MatchRoundProposal,
   OfflineGame,
+  RoomJoinDecision,
   SocialHook,
   UserModel
 } from "@tomeet/contracts";
 import { matchRoundProposalSchema } from "@tomeet/contracts";
-import { gamesSupportingPlayerCount } from "@tomeet/game-catalog";
 
 export interface MatchCandidate {
   request: Omit<MatchRequest, "phase" | "activeRoundId" | "optionsExpiresAt"> &
@@ -22,10 +23,21 @@ export interface MatchCandidate {
   matchingPriority?: "active_waiting" | "confirmation_follow_up" | "watching";
 }
 
+export interface RoomMatchCandidate {
+  room: MatchRoom;
+  members: MatchCandidate[];
+}
+
 export interface MatchmakingIntelligence {
   decide(candidates: MatchCandidate[], games: OfflineGame[], requiredRequestId?: string): Promise<MatchDecision | null>;
   proposeMatchRound(candidates: MatchCandidate[], games: OfflineGame[]): Promise<MatchRoundProposal | null>;
   judgeGroup(candidates: MatchCandidate[], game: OfflineGame): Promise<GroupActivityJudgement>;
+  decideRoomJoin(
+    candidates: MatchCandidate[],
+    rooms: RoomMatchCandidate[],
+    requiredRequestId?: string,
+    requiredRoomId?: string
+  ): Promise<RoomJoinDecision | null>;
 }
 
 export const MATCH_UTILITY_WEIGHTS = {
@@ -42,17 +54,33 @@ export class MockMatchmakingIntelligence implements MatchmakingIntelligence {
     const waiting = candidates
       .filter(({ request }) => request.status === "matching")
       .sort((a, b) => Number(b.request.requestId === requiredRequestId) - Number(a.request.requestId === requiredRequestId))
-      .slice(0, 10);
-    if (waiting.length < 3) return null;
-    const desiredSize = waiting.length >= 5 ? 5 : waiting.length;
-    const selected = waiting.slice(0, desiredSize);
-    const game = gamesSupportingPlayerCount(games, selected.length)[0];
+      .slice(0, 2);
+    if (waiting.length < 2) return null;
+    const selected = waiting;
+    const game = games.find((item) => item.maxPlayers >= 2);
     if (!game) return null;
     return {
       memberIds: selected.map(({ request }) => request.userId),
       requestIds: selected.map(({ request }) => request.requestId),
       offlineGameId: game.id,
-      summary: `根据本次意图选择 ${selected.length} 人小组；${game.name}支持当前人数，并能通过共同任务降低初次见面的交流压力。`
+      summary: `先邀请当前最合适的两位用户建立房间，再按相同匹配机制逐位扩充至 ${game.maxPlayers} 人。`
+    };
+  }
+
+  async decideRoomJoin(
+    candidates: MatchCandidate[],
+    rooms: RoomMatchCandidate[],
+    requiredRequestId?: string,
+    requiredRoomId?: string
+  ): Promise<RoomJoinDecision | null> {
+    const room = rooms.find((item) => item.room.roomId === requiredRoomId) ?? rooms[0];
+    const candidate = candidates.find((item) => item.request.requestId === requiredRequestId) ?? candidates[0];
+    if (!room || !candidate) return null;
+    return {
+      roomId: room.room.roomId,
+      userId: candidate.request.userId,
+      requestId: candidate.request.requestId,
+      summary: `邀请当前队列中与房间整体氛围最匹配的下一位用户加入。`
     };
   }
 
@@ -116,7 +144,9 @@ export function validateMatchDecision(
   game: OfflineGame | undefined,
   requiredRequestId?: string
 ): void {
-  if (decision.memberIds.length < 3 || decision.memberIds.length > 10) throw new Error("匹配人数必须在 3–10 人之间");
+  if (decision.memberIds.length !== 2 || decision.requestIds.length !== 2) {
+    throw new Error("初始匹配必须且只能包含两位用户");
+  }
   if (new Set(decision.memberIds).size !== decision.memberIds.length) throw new Error("匹配成员不能重复");
   if (new Set(decision.requestIds).size !== decision.requestIds.length) throw new Error("匹配请求不能重复");
   if (decision.memberIds.length !== decision.requestIds.length) throw new Error("成员和请求数量不一致");
@@ -132,8 +162,34 @@ export function validateMatchDecision(
   });
 
   if (!game || game.id !== decision.offlineGameId) throw new Error("只能选择目录中的线下游戏");
-  if (decision.memberIds.length < game.minPlayers || decision.memberIds.length > game.maxPlayers) {
-    throw new Error("线下游戏不支持当前人数");
+  if (game.maxPlayers < decision.memberIds.length) {
+    throw new Error("线下游戏房间上限小于初始匹配人数");
+  }
+}
+
+export function validateRoomJoinDecision(
+  decision: RoomJoinDecision,
+  waitingRequests: MatchRequest[],
+  rooms: MatchRoom[],
+  requiredRequestId?: string,
+  requiredRoomId?: string
+): void {
+  const request = waitingRequests.find((item) => item.requestId === decision.requestId);
+  if (!request || request.status !== "matching") throw new Error("入房候选请求已不在等待中");
+  if (request.userId !== decision.userId) throw new Error("入房候选用户和请求不对应");
+  if (requiredRequestId && decision.requestId !== requiredRequestId) {
+    throw new Error("入房邀请必须使用触发本次任务的用户");
+  }
+  const room = rooms.find((item) => item.roomId === decision.roomId);
+  if (!room || room.status === "completed" || room.matchingStatus !== "active") {
+    throw new Error("目标房间已停止匹配");
+  }
+  if (requiredRoomId && room.roomId !== requiredRoomId) {
+    throw new Error("入房邀请必须使用触发本次任务的房间");
+  }
+  if (room.members.length >= room.capacity) throw new Error("目标房间已满");
+  if (room.members.some((member) => member.userId === decision.userId)) {
+    throw new Error("候选用户已经在目标房间中");
   }
 }
 

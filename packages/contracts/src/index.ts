@@ -167,12 +167,13 @@ export const matchRequestSchema = z.object({
   requestId: idSchema,
   userId: idSchema,
   intentSnapshot: z.record(z.unknown()),
-  status: z.enum(["matching", "matched", "cancelled", "expired"]),
+  status: z.enum(["matching", "invited", "matched", "cancelled", "expired"]),
   phase: matchRequestPhaseSchema.default("waiting"),
   proactivePushEnabled: z.boolean().default(false),
   activeRoundId: idSchema.nullable().default(null),
   optionsExpiresAt: z.string().datetime().nullable().default(null),
   roomId: idSchema.nullable(),
+  inviteId: idSchema.nullable(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime()
 });
@@ -308,12 +309,41 @@ export const finalRoomDecisionSchema = z.object({
 export type FinalRoomDecision = z.infer<typeof finalRoomDecisionSchema>;
 
 export const matchDecisionSchema = z.object({
-  memberIds: z.array(idSchema).min(3).max(10),
-  requestIds: z.array(idSchema).min(3).max(10),
+  memberIds: z.array(idSchema).length(2),
+  requestIds: z.array(idSchema).length(2),
   offlineGameId: idSchema,
   summary: z.string().min(1).max(2_000)
 });
 export type MatchDecision = z.infer<typeof matchDecisionSchema>;
+
+export const roomJoinDecisionSchema = z.object({
+  roomId: idSchema,
+  userId: idSchema,
+  requestId: idSchema,
+  summary: z.string().min(1).max(2_000)
+});
+export type RoomJoinDecision = z.infer<typeof roomJoinDecisionSchema>;
+
+export const matchInviteParticipantSchema = z.object({
+  userId: idSchema,
+  requestId: idSchema,
+  displayName: z.string(),
+  accepted: z.boolean()
+});
+export type MatchInviteParticipant = z.infer<typeof matchInviteParticipantSchema>;
+
+export const matchInviteSchema = z.object({
+  inviteId: idSchema,
+  kind: z.enum(["initial_pair", "room_join"]),
+  roomId: idSchema.nullable(),
+  participants: z.array(matchInviteParticipantSchema).min(1).max(2),
+  offlineGameId: idSchema,
+  matchSummary: z.string(),
+  status: z.enum(["pending", "accepted", "declined", "cancelled"]),
+  createdAt: z.string().datetime(),
+  resolvedAt: z.string().datetime().nullable()
+});
+export type MatchInvite = z.infer<typeof matchInviteSchema>;
 
 export const offlineGameSchema = z.object({
   id: idSchema,
@@ -338,7 +368,7 @@ export type RoomMember = z.infer<typeof roomMemberSchema>;
 
 export const matchRoomSchema = z.object({
   roomId: idSchema,
-  members: z.array(roomMemberSchema).min(3).max(10),
+  members: z.array(roomMemberSchema).min(2).max(10),
   offlineGame: offlineGameSchema,
   matchSummary: z.string(),
   status: z.enum(["confirming", "confirmed", "completed"]),
@@ -347,10 +377,19 @@ export const matchRoomSchema = z.object({
   recruitmentStatus: z.enum(["open", "full", "closed"]).default("closed"),
   version: z.number().int().nonnegative().default(0),
   meetingPoint: z.string().max(500).nullable().default(null),
+  matchingStatus: z.enum(["active", "stopped", "full"]),
+  capacity: z.number().int().min(2).max(10),
   createdAt: z.string().datetime(),
   completedAt: z.string().datetime().nullable()
 });
 export type MatchRoom = z.infer<typeof matchRoomSchema>;
+
+export const matchInviteResolutionSchema = z.object({
+  invite: matchInviteSchema,
+  room: matchRoomSchema.nullable(),
+  requeuedRequestIds: z.array(idSchema)
+});
+export type MatchInviteResolution = z.infer<typeof matchInviteResolutionSchema>;
 
 export const postEventFeedbackSchema = z.object({
   userId: idSchema,

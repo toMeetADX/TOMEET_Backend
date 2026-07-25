@@ -53,9 +53,9 @@ describe("Supabase migration", () => {
     const result = await db.query<{ table_name: string }>(`
       select table_name from information_schema.tables
       where table_schema = 'public'
-        and table_name in ('users','messages','user_models','match_requests','match_rooms','room_members','offline_games','post_event_feedback','llm_jobs')
+        and table_name in ('users','messages','user_models','match_requests','match_rooms','room_members','match_invites','offline_games','post_event_feedback','llm_jobs')
     `);
-    expect(result.rows).toHaveLength(9);
+    expect(result.rows).toHaveLength(10);
     const memoryTables = await db.query<{ table_name: string }>(`
       select table_name from information_schema.tables
       where table_schema = 'public'
@@ -1125,6 +1125,33 @@ describe("Supabase migration", () => {
     });
   });
 
+  it("keeps dynamic matchmaking state and RPCs service-role only", async () => {
+    const privileges = await db.query<{
+      rls_enabled: boolean;
+      anon_table: boolean;
+      authenticated_table: boolean;
+      anon_accept: boolean;
+      authenticated_stop: boolean;
+      service_accept: boolean;
+    }>(`
+      select
+        (select relrowsecurity from pg_class where oid = 'public.match_invites'::regclass) as rls_enabled,
+        has_table_privilege('anon', 'public.match_invites', 'select') as anon_table,
+        has_table_privilege('authenticated', 'public.match_invites', 'select') as authenticated_table,
+        has_function_privilege('anon', 'public.accept_match_invite(uuid,uuid)', 'execute') as anon_accept,
+        has_function_privilege('authenticated', 'public.stop_room_matching(uuid,uuid)', 'execute') as authenticated_stop,
+        has_function_privilege('service_role', 'public.accept_match_invite(uuid,uuid)', 'execute') as service_accept
+    `);
+    expect(privileges.rows[0]).toEqual({
+      rls_enabled: true,
+      anon_table: false,
+      authenticated_table: false,
+      anon_accept: false,
+      authenticated_stop: false,
+      service_accept: true
+    });
+  });
+
   it("enforces the aligned match, room, history, and feedback lifecycle", async () => {
     const userIds = [
       "60000000-0000-4000-8000-000000000001",
@@ -1195,5 +1222,151 @@ describe("Supabase migration", () => {
       connectionUserIds: [userIds[0]],
       nextIntent: "下次继续"
     })])).rejects.toThrow("连接用户不能包含自己");
+  });
+
+  it("creates a room only after bilateral acceptance and fills it one invite at a time", async () => {
+    const userIds = Array.from(
+      { length: 7 },
+      (_, index) => `70000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`
+    );
+    const requestIds: string[] = [];
+    for (const [index, userId] of userIds.slice(0, 2).entries()) {
+      await db.query("select ensure_tomeet_user($1::uuid, $2)", [userId, `动态用户${index + 1}`]);
+      const request = await db.query<{ create_match_request: { id: string } }>(
+        "select create_match_request($1::uuid, $2::jsonb)",
+        [userId, JSON.stringify({ rawText: `动态匹配用户${index + 1}` })]
+      );
+      requestIds.push(request.rows[0]!.create_match_request.id);
+    }
+
+    const pairInvite = await db.query<{ create_initial_match_invite: { inviteId: string } }>(
+      "select create_initial_match_invite($1::jsonb, null)",
+      [JSON.stringify({
+        memberIds: userIds.slice(0, 2),
+        requestIds,
+        offlineGameId: "game-story-table",
+        summary: "先匹配当前最合适的两位用户"
+      })]
+    );
+    const inviteId = pairInvite.rows[0]!.create_initial_match_invite.inviteId;
+    const firstAccepted = await db.query<{
+      accept_match_invite: { room: null };
+    }>("select accept_match_invite($1::uuid, $2::uuid)", [inviteId, userIds[0]]);
+    expect(firstAccepted.rows[0]!.accept_match_invite.room).toBeNull();
+
+    const secondAccepted = await db.query<{
+      accept_match_invite: {
+        room: {
+          roomId: string;
+          matchingStatus: string;
+          capacity: number;
+          members: Array<{ userId: string }>;
+        };
+      };
+    }>("select accept_match_invite($1::uuid, $2::uuid)", [inviteId, userIds[1]]);
+    const initialRoom = secondAccepted.rows[0]!.accept_match_invite.room;
+    expect(initialRoom.members).toHaveLength(2);
+    expect(initialRoom.matchingStatus).toBe("active");
+    expect(initialRoom.capacity).toBe(6);
+
+    let latestRoom = initialRoom;
+    for (const [offset, userId] of userIds.slice(2, 6).entries()) {
+      await db.query("select ensure_tomeet_user($1::uuid, $2)", [userId, `扩房用户${offset + 3}`]);
+      const request = await db.query<{ create_match_request: { id: string } }>(
+        "select create_match_request($1::uuid, $2::jsonb)",
+        [userId, JSON.stringify({ rawText: `加入动态房间${offset + 3}` })]
+      );
+      const requestId = request.rows[0]!.create_match_request.id;
+      const joinInvite = await db.query<{ create_room_join_invite: { inviteId: string } }>(
+        "select create_room_join_invite($1::jsonb, null)",
+        [JSON.stringify({
+          roomId: initialRoom.roomId,
+          userId,
+          requestId,
+          summary: "当前队列里的最高匹配用户"
+        })]
+      );
+      const accepted = await db.query<{
+        accept_match_invite: { room: typeof initialRoom };
+      }>(
+        "select accept_match_invite($1::uuid, $2::uuid)",
+        [joinInvite.rows[0]!.create_room_join_invite.inviteId, userId]
+      );
+      latestRoom = accepted.rows[0]!.accept_match_invite.room;
+    }
+    expect(latestRoom.members).toHaveLength(6);
+    expect(latestRoom.matchingStatus).toBe("full");
+
+    await db.query("select ensure_tomeet_user($1::uuid, $2)", [userIds[6], "满员后用户"]);
+    const extraRequest = await db.query<{ create_match_request: { id: string } }>(
+      "select create_match_request($1::uuid, $2::jsonb)",
+      [userIds[6], JSON.stringify({ rawText: "房间满员后请求" })]
+    );
+    await expect(db.query("select create_room_join_invite($1::jsonb, null)", [JSON.stringify({
+      roomId: initialRoom.roomId,
+      userId: userIds[6],
+      requestId: extraRequest.rows[0]!.create_match_request.id,
+      summary: "不应进入满员房间"
+    })])).rejects.toThrow("停止匹配");
+  });
+
+  it("lets any room member stop matching and requeues a pending invitee", async () => {
+    const userIds = [
+      "80000000-0000-4000-8000-000000000001",
+      "80000000-0000-4000-8000-000000000002",
+      "80000000-0000-4000-8000-000000000003"
+    ];
+    const requestIds: string[] = [];
+    for (const [index, userId] of userIds.entries()) {
+      await db.query("select ensure_tomeet_user($1::uuid, $2)", [userId, `停止测试用户${index + 1}`]);
+      const request = await db.query<{ create_match_request: { id: string } }>(
+        "select create_match_request($1::uuid, $2::jsonb)",
+        [userId, JSON.stringify({ rawText: `停止测试${index + 1}` })]
+      );
+      requestIds.push(request.rows[0]!.create_match_request.id);
+    }
+    const pairInvite = await db.query<{ create_initial_match_invite: { inviteId: string } }>(
+      "select create_initial_match_invite($1::jsonb, null)",
+      [JSON.stringify({
+        memberIds: userIds.slice(0, 2),
+        requestIds: requestIds.slice(0, 2),
+        offlineGameId: "game-city-clues",
+        summary: "停止测试初始匹配"
+      })]
+    );
+    const pairInviteId = pairInvite.rows[0]!.create_initial_match_invite.inviteId;
+    await db.query("select accept_match_invite($1::uuid, $2::uuid)", [pairInviteId, userIds[0]]);
+    const accepted = await db.query<{
+      accept_match_invite: { room: { roomId: string } };
+    }>("select accept_match_invite($1::uuid, $2::uuid)", [pairInviteId, userIds[1]]);
+    const roomId = accepted.rows[0]!.accept_match_invite.room.roomId;
+
+    const joinInvite = await db.query<{ create_room_join_invite: { inviteId: string } }>(
+      "select create_room_join_invite($1::jsonb, null)",
+      [JSON.stringify({
+        roomId,
+        userId: userIds[2],
+        requestId: requestIds[2],
+        summary: "停止前的待处理邀请"
+      })]
+    );
+    const stopped = await db.query<{
+      stop_room_matching: {
+        room: { matchingStatus: string };
+        requeuedRequestIds: string[];
+      };
+    }>("select stop_room_matching($1::uuid, $2::uuid)", [roomId, userIds[0]]);
+    expect(stopped.rows[0]!.stop_room_matching.room.matchingStatus).toBe("stopped");
+    expect(stopped.rows[0]!.stop_room_matching.requeuedRequestIds).toContain(requestIds[2]);
+
+    const requeued = await db.query<{ status: string; invite_id: string | null }>(
+      "select status, invite_id from match_requests where id = $1::uuid",
+      [requestIds[2]]
+    );
+    expect(requeued.rows[0]).toMatchObject({ status: "matching", invite_id: null });
+    await expect(db.query(
+      "select accept_match_invite($1::uuid, $2::uuid)",
+      [joinInvite.rows[0]!.create_room_join_invite.inviteId, userIds[2]]
+    )).rejects.toThrow("失效");
   });
 });

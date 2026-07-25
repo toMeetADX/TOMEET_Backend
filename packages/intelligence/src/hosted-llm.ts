@@ -15,6 +15,7 @@ import {
   memoryProfileDraftSchema,
   matchDecisionSchema,
   matchRoundProposalSchema,
+  roomJoinDecisionSchema,
   socialHookDraftSchema,
   type MemoryExtractionResult,
   type AdventurexLanguage,
@@ -27,13 +28,18 @@ import {
   type Message,
   type OfflineGame,
   type PostEventFeedback,
+  type RoomJoinDecision,
   type UserMemory,
   type UserMemoryProfile,
   type UserModel,
   type WebSearchMeta,
   type WebSearchSource
 } from "@tomeet/contracts";
-import type { MatchCandidate, MatchmakingIntelligence } from "@tomeet/matchmaking";
+import type {
+  MatchCandidate,
+  MatchmakingIntelligence,
+  RoomMatchCandidate
+} from "@tomeet/matchmaking";
 import { z } from "zod";
 import {
   prepareWebSearchResults,
@@ -50,6 +56,9 @@ const conversationPlanSchema = z.object({
   currentIntent: z.record(z.unknown()).optional(),
   actions: z.array(z.discriminatedUnion("type", [
     z.object({ type: z.literal("start_match"), intent: z.record(z.unknown()) }),
+    z.object({ type: z.literal("accept_match") }),
+    z.object({ type: z.literal("decline_match") }),
+    z.object({ type: z.literal("stop_match") }),
     z.object({
       type: z.literal("select_match_options"),
       preferredOptionNumber: z.union([z.literal(1), z.literal(2), z.literal(3)]).nullable(),
@@ -469,8 +478,10 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         "用户要求围绕某个活动的地点、日期或日程约酒、组局、找搭子，也属于明确社交意图：同时输出 start_match 和用于核实活动事实的 searchPlan；不得等搜索完成后再决定是否开始匹配。",
         "只有假设、将来可能、泛泛讨论社交，或只是说喜欢某个兴趣而没有想认识人的表达，socialIntentDetected 才为 false。",
         "回复自然、克制，不虚构尚未发生的匹配或状态变化。所有产品操作必须通过 actions 输出，由系统执行。",
-        "可用 action：start_match、select_match_options、explain_match_option、refresh_match_options、cancel_match、restart_match、enable_match_push、disable_match_push、activate_match、leave_room、complete_room、submit_feedback。没有操作时 actions=[]。",
+        "可用 action：start_match、accept_match、decline_match、stop_match、select_match_options、explain_match_option、refresh_match_options、cancel_match、restart_match、enable_match_push、disable_match_push、activate_match、leave_room、confirm_room、complete_room、submit_feedback。没有操作时 actions=[]。",
         "只有用户明确表达现在想社交，且没有等待中的请求或未结束房间时，才输出 start_match，并把本次意图放入 intent。",
+        "当前有 pending 匹配邀请时，用户明确接受就输出 accept_match，明确拒绝就输出 decline_match。",
+        "用户明确说“停止匹配”“不要再找人”“停止加人”等同义指令时输出 stop_match；它表示停止等待或停止当前房间继续扩充，不等于线下活动已经结束。",
         "runtime.matchOptions 存在时，把数字、中文序号、多选偏好和人物描述映射到稳定 optionNumber。‘3’只接受3；‘3优先，1也行’接受[3,1]；‘都可以’接受所有当前选项。",
         "用户明确因为某个人物事实选择时，requiredHookIds 只能从所选 option.hooks 中复制对应 hookId；绝不能编造 ID。用户只是追问某个候选详情、多讲一点、再介绍一下时，输出 explain_match_option 并填对应 optionNumber，不要同时输出 select_match_options。",
         "用户要求换一批时输出 refresh_match_options；等待/候选阶段说不去了输出 cancel_match；请求取消或超时后，只有用户明确说重新匹配、再来三个时才输出 restart_match。",
@@ -514,25 +525,33 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
     const roomExitPolicy = exitRequiresReason
       ? "leave_room 仅在用户当前消息提供非空退出理由时允许；只说退出或不去了时必须 actions=[] 并追问一个简单理由。reason 必须来自当前消息，不得编造。退出后不得询问重新匹配。"
       : "leave_room 只在用户明确要退出当前房间时允许；退出后不得询问重新匹配。";
-    const actionPolicy = context.room?.status === "confirming"
-      ? (this.options.adventurexMatchingV1
-        ? `当前房间人数未达活动最低要求，仍在补位。只允许 actions=[] 或 leave_room；禁止 confirm_room。${roomExitPolicy}`
-        : `当前只允许 actions=[]、leave_room 或 confirm_room。${roomExitPolicy}`)
-      : context.room?.status === "confirmed"
-        ? `当前只允许 actions=[]、leave_room 或 complete_room。${roomExitPolicy}`
-      : context.room?.status === "completed"
-          ? "当前只允许 actions=[] 或 submit_feedback；禁止 confirm_room 和 complete_room。"
-          : context.matchRequest?.status === "cancelled" || context.matchRequest?.status === "expired"
-            ? "当前只允许 actions=[] 或 restart_match。"
-            : context.matchOptions
-              ? "当前只允许 actions=[]、select_match_options、explain_match_option、refresh_match_options 或 cancel_match。"
-          : context.matchRequest?.status === "matching" && context.matchRequest.phase === "push_consent"
-            ? "当前只允许 actions=[]、enable_match_push、disable_match_push、activate_match 或 cancel_match。"
-          : context.matchRequest?.status === "matching" && context.matchRequest.phase === "watching"
-            ? "当前只允许 actions=[]、activate_match、disable_match_push 或 cancel_match。"
-          : context.matchRequest?.status === "matching"
-            ? "当前只允许 actions=[] 或 cancel_match。"
-            : "没有活动房间时，只允许 actions=[] 或 start_match。";
+    const actionPolicy = context.room?.status === "completed"
+      ? "当前只允许 actions=[] 或 submit_feedback；禁止 confirm_room 和 complete_room。"
+      : context.matchInvite?.status === "pending"
+        ? "当前只允许 actions=[]、accept_match、decline_match 或 stop_match。"
+        : context.room?.status === "confirming"
+          ? this.options.adventurexMatchingV1
+            ? context.room.matchingStatus === "active"
+              ? `当前房间人数未达活动最低要求，仍在补位。只允许 actions=[]、leave_room 或 stop_match；禁止 confirm_room。${roomExitPolicy}`
+              : `当前房间人数未达活动最低要求，仍在补位。只允许 actions=[] 或 leave_room；禁止 confirm_room。${roomExitPolicy}`
+            : context.room.matchingStatus === "active"
+              ? `当前只允许 actions=[]、leave_room、confirm_room 或 stop_match。${roomExitPolicy}`
+              : `当前只允许 actions=[]、leave_room 或 confirm_room。${roomExitPolicy}`
+          : context.room?.status === "confirmed"
+            ? context.room.matchingStatus === "active"
+              ? `当前只允许 actions=[]、leave_room、complete_room 或 stop_match。${roomExitPolicy}`
+              : `当前只允许 actions=[]、leave_room 或 complete_room。${roomExitPolicy}`
+            : context.matchRequest?.status === "cancelled" || context.matchRequest?.status === "expired"
+              ? "当前只允许 actions=[] 或 restart_match。"
+              : context.matchOptions
+                ? "当前只允许 actions=[]、select_match_options、explain_match_option、refresh_match_options、cancel_match 或 stop_match。"
+                : context.matchRequest?.status === "matching" && context.matchRequest.phase === "push_consent"
+                  ? "当前只允许 actions=[]、enable_match_push、disable_match_push、activate_match、cancel_match 或 stop_match。"
+                  : context.matchRequest?.status === "matching" && context.matchRequest.phase === "watching"
+                    ? "当前只允许 actions=[]、activate_match、disable_match_push、cancel_match 或 stop_match。"
+                    : context.matchRequest?.status === "matching" || context.matchRequest?.status === "invited"
+                      ? "当前只允许 actions=[]、cancel_match 或 stop_match。"
+                      : "没有活动房间时，只允许 actions=[] 或 start_match。";
     let insight = await this.parseOrRepair(
       plannedConversationInsightSchema,
       result,
@@ -857,7 +876,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
   }
 
   async decide(candidates: MatchCandidate[], games: OfflineGame[], requiredRequestId?: string): Promise<MatchDecision | null> {
-    if (candidates.length < 3) return null;
+    if (candidates.length < 2) return null;
     const matchingInput = {
       requiredRequestId,
       candidates: candidates.map(({ request, userModel, matchingNarrative }) => ({
@@ -880,18 +899,65 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       [
         "你负责 TOMEET 线下社交的纯 vibe 匹配。只能选择输入中的等待用户和已有游戏。",
         "requiredRequestId 是触发本次匹配的请求，输出的 requestIds 必须包含它，对应的用户也必须包含在 memberIds。",
-        "选择 3–10 人。只根据每个人当下原话 currentVibe 和经过治理的连续自然语言 matchingNarrative 判断相处是否自然。",
+        "这是贪心匹配的第一步：必须选择触发用户和当前队列中与其最合适的唯一一位用户，一共正好 2 人。",
+        "只根据每个人当下原话 currentVibe 和经过治理的连续自然语言 matchingNarrative，整体判断哪一位与触发用户相处最自然。",
         "严禁使用兴趣标签重合、intentTags、traits、性格分类、人口属性、关键词计数、向量标签或任何打分维度。不要因为提到相同名词就判定合适。",
         "关注表达节奏、能量互补、关系距离、好奇心方向、线下相处画面与潜在互动流动；不要推断敏感属性。",
-        "输入已有至少 3 位候选人时必须给出一个 3–10 人的小组，memberIds 与 requestIds 数量必须相同且按同一顺序一一对应，不能只返回触发用户。",
-        "游戏人数必须覆盖成员数。只输出 JSON：memberIds, requestIds, offlineGameId, summary。"
+        "输入已有至少 2 位候选人时必须给出正好 2 人；memberIds 与 requestIds 按同一顺序一一对应。",
+        "选择一个 maxPlayers 至少为 2 的游戏，其 maxPlayers 同时作为后续房间人数上限。只输出 JSON：memberIds, requestIds, offlineGameId, summary。"
       ].join("\n"),
       JSON.stringify(matchingInput)
     );
     return this.parseOrRepair(
       matchDecisionSchema,
       result,
-      "只输出 memberIds, requestIds, offlineGameId, summary；必须选择 3–10 人，成员与请求数量相同、顺序一一对应，并包含 requiredRequestId。",
+      "只输出 memberIds, requestIds, offlineGameId, summary；必须正好选择 2 人，成员与请求顺序一一对应，并包含 requiredRequestId。",
+      matchingInput
+    );
+  }
+
+  async decideRoomJoin(
+    candidates: MatchCandidate[],
+    rooms: RoomMatchCandidate[],
+    requiredRequestId?: string,
+    requiredRoomId?: string
+  ): Promise<RoomJoinDecision | null> {
+    if (candidates.length === 0 || rooms.length === 0) return null;
+    const matchingInput = {
+      requiredRequestId,
+      requiredRoomId,
+      candidates: candidates.map(({ request, userModel, matchingNarrative }) => ({
+        requestId: request.requestId,
+        userId: request.userId,
+        currentVibe: typeof request.intentSnapshot.rawText === "string" ? request.intentSnapshot.rawText : "",
+        matchingNarrative: matchingNarrative || userModel.vibeNarrative
+      })),
+      rooms: rooms.map(({ room, members }) => ({
+        roomId: room.roomId,
+        capacity: room.capacity,
+        memberCount: room.members.length,
+        members: members.map(({ request, userModel, matchingNarrative }) => ({
+          userId: request.userId,
+          currentVibe: typeof request.intentSnapshot.rawText === "string" ? request.intentSnapshot.rawText : "",
+          matchingNarrative: matchingNarrative || userModel.vibeNarrative
+        }))
+      }))
+    };
+    const result = await this.chatJson(
+      [
+        "你负责 TOMEET 动态房间的下一位用户贪心匹配。只能选择输入中的 active 房间和 matching 用户。",
+        "每次只选择一个 roomId 和一个候选用户；这一步必须是当前可选组合里整体相处最自然的一组。",
+        "requiredRequestId 非空时必须选择该请求；requiredRoomId 非空时必须选择该房间。",
+        "只根据 currentVibe 和 matchingNarrative 判断表达节奏、能量互补、关系距离与线下互动流动。",
+        "严禁使用人口属性、兴趣标签重合、关键词计数、向量标签或拆分打分维度。",
+        "只输出 JSON：roomId, userId, requestId, summary。"
+      ].join("\n"),
+      JSON.stringify(matchingInput)
+    );
+    return this.parseOrRepair(
+      roomJoinDecisionSchema,
+      result,
+      "只输出 roomId, userId, requestId, summary；必须满足 requiredRequestId 和 requiredRoomId。",
       matchingInput
     );
   }
@@ -1029,12 +1095,20 @@ function isActionAllowed(
   const roomExitAllowed = type === "leave_room"
     && hasRoomExitIntent(context, userContent)
     && (!roomExitRequiresReason(context) || Boolean(action.reason?.trim()));
-  if (context.room?.status === "confirming") {
-    if (adventurexMatchingV1) return roomExitAllowed;
-    return type === "confirm_room" || roomExitAllowed;
-  }
-  if (context.room?.status === "confirmed") return type === "complete_room" || roomExitAllowed;
   if (context.room?.status === "completed") return type === "submit_feedback";
+  if (context.matchInvite?.status === "pending") {
+    return type === "accept_match" || type === "decline_match" || type === "stop_match";
+  }
+  if (context.room?.status === "confirming") {
+    return (!adventurexMatchingV1 && type === "confirm_room")
+      || roomExitAllowed
+      || (type === "stop_match" && context.room.matchingStatus === "active");
+  }
+  if (context.room?.status === "confirmed") {
+    return type === "complete_room"
+      || roomExitAllowed
+      || (type === "stop_match" && context.room.matchingStatus === "active");
+  }
   if (context.matchRequest?.status === "cancelled" || context.matchRequest?.status === "expired") {
     return type === "restart_match";
   }
@@ -1043,15 +1117,17 @@ function isActionAllowed(
       return action.type === "explain_match_option"
         && context.matchOptions.options.some((option) => option.optionNumber === action.optionNumber);
     }
-    return ["select_match_options", "refresh_match_options", "cancel_match"].includes(type);
+    return ["select_match_options", "refresh_match_options", "cancel_match", "stop_match"].includes(type);
   }
   if (context.matchRequest?.status === "matching" && context.matchRequest.phase === "push_consent") {
-    return ["enable_match_push", "disable_match_push", "activate_match", "cancel_match"].includes(type);
+    return ["enable_match_push", "disable_match_push", "activate_match", "cancel_match", "stop_match"].includes(type);
   }
   if (context.matchRequest?.status === "matching" && context.matchRequest.phase === "watching") {
-    return ["activate_match", "disable_match_push", "cancel_match"].includes(type);
+    return ["activate_match", "disable_match_push", "cancel_match", "stop_match"].includes(type);
   }
-  if (context.matchRequest?.status === "matching") return type === "cancel_match";
+  if (context.matchRequest?.status === "matching" || context.matchRequest?.status === "invited") {
+    return type === "cancel_match" || type === "stop_match";
+  }
   return type === "start_match";
 }
 

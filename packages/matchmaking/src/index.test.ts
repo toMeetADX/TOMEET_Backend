@@ -11,8 +11,8 @@ import {
 describe("match decision validation", () => {
   it("rejects duplicated members", () => {
     expect(() => validateMatchDecision({
-      memberIds: ["u1", "u1", "u3"],
-      requestIds: ["r1", "r2", "r3"],
+      memberIds: ["u1", "u1"],
+      requestIds: ["r1", "r2"],
       offlineGameId: "game-story-table",
       summary: "test"
     }, [], curatedGames[1])).toThrow("不能重复");
@@ -52,6 +52,7 @@ describe("match decision validation", () => {
       activeRoundId: "round1",
       optionsExpiresAt: new Date(Date.now() + 60_000).toISOString(),
       roomId: null,
+      inviteId: null,
       createdAt: now,
       updatedAt: now
     }));

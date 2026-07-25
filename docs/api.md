@@ -266,11 +266,15 @@ await supabase.storage
 }
 ```
 
-也可显式传入 `intent` 对象。没有明确社交意图、存在未结束房间时返回 `409`。启用 `ADVENTUREX_MATCHING_V1=true` 后，请求进入下一个 30 秒后台清算 tick；该 tick 不是用户等待倒计时。只有真实候选发送成功后才开始 90 秒选择窗口。
+也可显式传入 `intent` 对象。没有明确社交意图、存在未结束房间时返回 `409`。
+
+默认流程先按贪心机制选择当前最匹配的一位用户，创建双边邀请；双方接受后才创建房间。响应为 `{ "matchRequest": MatchRequest, "invite": MatchInvite | null, "job": LlmJob }`，等待或已发出邀请时返回 `202`，已进入房间时返回 `201`。
+
+启用 `ADVENTUREX_MATCHING_V1=true` 后，请求进入下一个 30 秒后台清算 tick；该 tick 不是用户等待倒计时。只有真实候选发送成功后才开始 90 秒选择窗口。
 
 ### `GET /match-requests/:id`
 
-返回 `{ "matchRequest": MatchRequest }`。`status` 为 `matching | matched | cancelled | expired`；其中 `expired` 表示候选窗口结束后本次请求未成局且没有保留主动推送授权。活跃请求另有 `phase=waiting | offered | selected | settling | push_consent | watching`，并通过 `proactivePushEnabled` 表示是否允许微信主动推送。匹配成功时 `roomId` 非空。
+返回 `{ "matchRequest": MatchRequest }`。`status` 为 `matching | invited | matched | cancelled | expired`；`invited` 时 `inviteId` 非空，进入房间后 `roomId` 非空。`expired` 表示候选窗口结束后本次请求未成局且没有保留主动推送授权。活跃请求另有 `phase=waiting | offered | selected | settling | push_consent | watching`，并通过 `proactivePushEnabled` 表示是否允许微信主动推送。
 
 ### `GET /match-requests/:id/options`
 
@@ -316,9 +320,17 @@ await supabase.storage
 
 该接口同时要求正常 Supabase Bearer 登录和 `ADVENTUREX_TEST_POOL_EMAIL` 邮箱白名单。未配置 `ADVENTUREX_TEST_POOL_ENABLED=true` 时返回 `503`，非白名单账号返回 `403`。测试用户只会进入所有者的 `adventurex-test:<owner>:<tick>` 隔离轮次。
 
-### `POST /match-requests/:id/cancel`
+### `GET /match-invites/:id`
 
-无请求体。只能取消 `matching` 状态，响应为 `{ "matchRequest": MatchRequest, "canRematch": true }`。
+仅邀请参与者可读取，返回 `{ "invite": MatchInvite }`。
+
+### `POST /match-invites/:id/accept`
+
+请求体为 `{ "userId": "UUID" }`。初始邀请需双方接受才会原子建房；入房邀请由候选用户接受后原子加入。返回 `{ "invite": MatchInvite, "room": MatchRoom | null, "requeuedRequestIds": string[] }`。
+
+### `POST /match-invites/:id/decline`
+
+请求体为 `{ "userId": "UUID" }`。初始邀请被拒绝时，拒绝方请求取消，另一方重新进入队列；入房邀请被拒绝时，房间保持持续匹配。
 
 ## 9. 房间与反馈
 
@@ -345,6 +357,10 @@ AdventureX 新流程中，用户对候选的选择已构成参加意愿，最终
 正式成局确认函发出后，`reason` 必须是去除首尾空白后的非空字符串，最长 500 字；系统只要求用户给出一个简单理由，不判断其充分性。理由仅用于内部记录，不会出现在其他成员收到的变化通知中。
 
 成员行保留并标记为 `withdrawn`，房间 `version` 增加；有空位时重新开放招募。退出用户不会再次收到同一个开放局。剩余确认成员通过 Agent 消息收到一次幂等变化通知。响应包含 `canRematch=false`、最新 `matchRequest` 与 `interestState`：此前已授权主动推送时请求变为 `matching/watching`，否则变为 `cancelled`，且不会自动询问或启动重新匹配。
+
+### `POST /rooms/:id/stop-match`
+
+请求体为 `{ "userId": "UUID" }`。任一在房成员可停止继续加人；房间 `matchingStatus` 变为 `stopped`，待处理的入房邀请被取消，其候选请求重新入队。达到 `capacity` 时房间自动变为 `full`。
 
 ### `POST /rooms/:id/complete`
 

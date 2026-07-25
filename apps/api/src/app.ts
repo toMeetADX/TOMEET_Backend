@@ -208,6 +208,37 @@ export async function buildApp(options: BuildAppOptions) {
     return scheduleAdventurexMatchRequest(options.store, matchRequest);
   }
 
+  async function enqueueRoomContinuation(roomId: string, memberCount: number, reason: string): Promise<void> {
+    const room = await options.store.getRoom(roomId);
+    if (
+      !room
+      || room.status === "completed"
+      || room.matchingStatus !== "active"
+      || room.members.length >= room.capacity
+    ) return;
+    const job = await options.store.enqueueJob({
+      type: "matchmaking",
+      payload: { roomId },
+      idempotencyKey: `match:room:${roomId}:${memberCount}:${reason}`,
+      partitionKey: `room:${roomId}`
+    });
+    await runInline(job.id);
+  }
+
+  async function enqueueRequeuedRequests(requestIds: string[], reason: string): Promise<void> {
+    await Promise.all(requestIds.map(async (requestId) => {
+      const matchRequest = await options.store.getMatchRequest(requestId);
+      if (!matchRequest || matchRequest.status !== "matching") return;
+      const job = await options.store.enqueueJob({
+        type: "matchmaking",
+        payload: { requestId },
+        idempotencyKey: `match:${requestId}:${reason}`,
+        partitionKey: `user:${matchRequest.userId}`
+      });
+      await runInline(job.id);
+    }));
+  }
+
   app.get("/health", { config: { rateLimit: false } }, async () => ({
     status: "ok",
     service: "tomeet-api",
@@ -655,7 +686,12 @@ export async function buildApp(options: BuildAppOptions) {
     }
     const currentJob = await runInline(job.id);
     const latestRequest = await options.store.getMatchRequest(matchRequest.requestId);
-    return reply.code(latestRequest?.status === "matched" ? 201 : 202).send({ matchRequest: latestRequest, job: currentJob });
+    const invite = await options.store.getLatestMatchInviteForUser(input.userId);
+    return reply.code(latestRequest?.status === "matched" ? 201 : 202).send({
+      matchRequest: latestRequest,
+      invite,
+      job: currentJob
+    });
   });
 
   app.get("/match-requests/:id", async (request) => {
@@ -762,6 +798,49 @@ export async function buildApp(options: BuildAppOptions) {
     return { room };
   });
 
+  app.get("/match-invites/:id", async (request) => {
+    const { id } = z.object({ id: uuidSchema }).parse(request.params);
+    const invite = await options.store.getMatchInvite(id);
+    if (!invite) throw new StoreNotFoundError("匹配邀请不存在");
+    if (request.authUserId && !invite.participants.some(
+      (participant) => participant.userId === request.authUserId
+    )) {
+      throw new StoreNotFoundError("匹配邀请不存在");
+    }
+    return { invite };
+  });
+
+  app.post("/match-invites/:id/accept", async (request) => {
+    const { id } = z.object({ id: uuidSchema }).parse(request.params);
+    const { userId } = z.object({ userId: uuidSchema }).parse(request.body);
+    assertCurrentUser(request, userId);
+    const resolution = await options.store.acceptMatchInvite(id, userId);
+    if (resolution.room) {
+      await enqueueRoomContinuation(
+        resolution.room.roomId,
+        resolution.room.members.length,
+        `api-accepted:${id}`
+      );
+    }
+    return resolution;
+  });
+
+  app.post("/match-invites/:id/decline", async (request) => {
+    const { id } = z.object({ id: uuidSchema }).parse(request.params);
+    const { userId } = z.object({ userId: uuidSchema }).parse(request.body);
+    assertCurrentUser(request, userId);
+    const resolution = await options.store.declineMatchInvite(id, userId);
+    await enqueueRequeuedRequests(resolution.requeuedRequestIds, `api-declined:${id}`);
+    if (resolution.room) {
+      await enqueueRoomContinuation(
+        resolution.room.roomId,
+        resolution.room.members.length,
+        `api-declined:${id}`
+      );
+    }
+    return resolution;
+  });
+
   async function getJob(request: FastifyRequest) {
     const { id } = z.object({ id: uuidSchema }).parse(request.params);
     const job = await options.store.getJob(id);
@@ -817,6 +896,15 @@ export async function buildApp(options: BuildAppOptions) {
       canRematch: false,
       interestState: matchRequest?.status === "matching" ? matchRequest.phase : "ended"
     };
+  });
+
+  app.post("/rooms/:id/stop-match", async (request) => {
+    const { id } = z.object({ id: uuidSchema }).parse(request.params);
+    const { userId } = z.object({ userId: uuidSchema }).parse(request.body);
+    assertCurrentUser(request, userId);
+    const stopped = await options.store.stopRoomMatching(id, userId);
+    await enqueueRequeuedRequests(stopped.requeuedRequestIds, `api-room-stopped:${id}`);
+    return stopped;
   });
 
   app.post("/rooms/:id/complete", async (request) => {

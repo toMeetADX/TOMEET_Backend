@@ -561,6 +561,21 @@ describe("WeChat one-time QR onboarding", () => {
       expect(response.statusCode).toBe(200);
     }
 
+    for (const webUser of webUsers) {
+      const accepted = await app.inject({
+        method: "POST",
+        url: "/agent/messages",
+        headers: { authorization: `Bearer ${webUser.token}` },
+        payload: {
+          userId: webUser.userId,
+          displayName: webUser.displayName,
+          content: "接受匹配",
+          idempotencyKey: randomUUID()
+        }
+      });
+      expect(accepted.statusCode).toBe(200);
+    }
+
     const wechatResponse = await app.inject({
       method: "POST",
       url: "/internal/agent/messages",
@@ -573,6 +588,19 @@ describe("WeChat one-time QR onboarding", () => {
       }
     });
     expect(wechatResponse.statusCode).toBe(200);
+
+    const wechatAccepted = await app.inject({
+      method: "POST",
+      url: "/internal/agent/messages",
+      headers: { "x-tomeet-internal-token": internalApiToken },
+      payload: {
+        userId: wechatUserId,
+        displayName: "微信用户",
+        content: "接受邀请",
+        idempotencyKey: randomUUID()
+      }
+    });
+    expect(wechatAccepted.statusCode).toBe(200);
 
     const allUserIds = [...webUsers.map((user) => user.userId), wechatUserId];
     const rooms = await Promise.all(
@@ -591,7 +619,7 @@ describe("WeChat one-time QR onboarding", () => {
       });
       expect(history.statusCode).toBe(200);
       expect(history.json().messages.some(
-        (message: { content: string }) => message.content.includes("匹配已经完成")
+        (message: { content: string }) => message.content.includes("房间已建立")
       )).toBe(true);
     }
 
@@ -602,7 +630,7 @@ describe("WeChat one-time QR onboarding", () => {
     });
     expect(wechatHistory.statusCode).toBe(200);
     expect(wechatHistory.json().messages.some(
-      (message: { content: string }) => message.content.includes("匹配已经完成")
+      (message: { content: string }) => message.content.includes("已接受邀请并进入房间")
     )).toBe(true);
   });
 

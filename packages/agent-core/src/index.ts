@@ -24,6 +24,9 @@ export * from "./memory.js";
 
 export type AgentAction =
   | { type: "start_match"; intent: Record<string, unknown> }
+  | { type: "accept_match" }
+  | { type: "decline_match" }
+  | { type: "stop_match" }
   | {
       type: "select_match_options";
       preferredOptionNumber: 1 | 2 | 3 | null;
@@ -210,6 +213,9 @@ export class MockAgentIntelligence implements AgentIntelligence {
     const actions: AgentAction[] = [];
     const socialHooks: SocialHookDraft[] = [];
     const normalized = userContent.trim();
+    const stopMatchRequested = /(停止|结束|取消|不要|别再|不用再).{0,8}(匹配|找人|加人)|(匹配|找人|加人).{0,8}(停止|结束|取消)/u.test(normalized);
+    const acceptMatchRequested = /(接受|同意|愿意|可以|确认).{0,8}(匹配|邀请|加入)|(匹配|邀请).{0,8}(接受|同意|确认)/u.test(normalized);
+    const declineMatchRequested = /(拒绝|不接受|不同意|不参加|不加入|算了).{0,8}(匹配|邀请|加入)?/u.test(normalized);
     let onboardingTransition: ConversationInsight["onboardingTransition"] = "none";
     const previousAssistantMessage = [...context.recentMessages]
       .reverse()
@@ -233,6 +239,24 @@ export class MockAgentIntelligence implements AgentIntelligence {
       onboardingTransition = "engaged";
       reply = /建议的追问方向：(.+)/u.exec(normalized)?.[1]?.trim()
         || "你刚发的这些里，哪一件是你自己在做的？";
+    } else if (
+      stopMatchRequested
+      && (
+        context.room?.matchingStatus === "active"
+        || context.matchRequest?.status === "matching"
+        || context.matchRequest?.status === "invited"
+      )
+    ) {
+      actions.push({ type: "stop_match" });
+      reply = "收到，我会停止当前匹配流程。";
+    } else if (context.matchInvite?.status === "pending" && acceptMatchRequested) {
+      actions.push({ type: "accept_match" });
+      reply = context.matchInvite.kind === "initial_pair"
+        ? "好的，我会接受这次匹配；双方都接受后就建立房间。"
+        : "好的，我会接受邀请并加入这个房间。";
+    } else if (context.matchInvite?.status === "pending" && declineMatchRequested) {
+      actions.push({ type: "decline_match" });
+      reply = "收到，我会拒绝这次匹配邀请。";
     } else if (context.onboardingState && /(英文|英语|用 English|use English|speak English|in English)/iu.test(normalized)) {
       onboardingTransition = "language_en";
       reply = "Okay, I'll continue in English. What part of what you just shared feels most representative of you?";
