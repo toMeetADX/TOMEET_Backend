@@ -1,34 +1,6 @@
 name: Agent Layer Release
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/**"
-      - "apps/api/**"
-      - "apps/intelligence-worker/**"
-      - "apps/wechat-ilink-worker/**"
-      - "packages/agent-core/**"
-      - "packages/intelligence/**"
-      - "packages/user-model/**"
-      - "packages/matchmaking/**"
-      - "packages/feedback/**"
-      - "packages/contracts/**"
-      - "packages/data/**"
-      - "packages/game-catalog/**"
-      - "packages/room/**"
-      - "packages/wechat-ilink/**"
-      - "supabase/migrations/**"
-      - "scripts/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - "tsconfig.base.json"
-      - "eslint.config.mjs"
-      - "railway.api.toml"
-      - "railway.worker.toml"
-      - "railway.wechat.toml"
   workflow_dispatch:
     inputs:
       release_ref:
