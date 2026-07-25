@@ -1,6 +1,15 @@
 [build]
 builder = "NIXPACKS"
 buildCommand = "corepack pnpm install --frozen-lockfile && corepack pnpm --filter @tomeet/intelligence-worker... typecheck"
+watchPatterns = [
+  "/apps/intelligence-worker/**",
+  "/packages/**",
+  "/package.json",
+  "/pnpm-lock.yaml",
+  "/pnpm-workspace.yaml",
+  "/tsconfig.base.json",
+  "/railway.worker.toml",
+]
 
 [deploy]
 startCommand = "corepack pnpm --filter @tomeet/intelligence-worker start"

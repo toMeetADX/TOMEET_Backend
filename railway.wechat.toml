@@ -1,6 +1,15 @@
 [build]
 builder = "RAILPACK"
 buildCommand = "corepack enable && pnpm install --frozen-lockfile"
+watchPatterns = [
+  "/apps/wechat-ilink-worker/**",
+  "/packages/**",
+  "/package.json",
+  "/pnpm-lock.yaml",
+  "/pnpm-workspace.yaml",
+  "/tsconfig.base.json",
+  "/railway.wechat.toml",
+]
 
 [deploy]
 startCommand = "pnpm --filter @tomeet/wechat-ilink-worker start"
