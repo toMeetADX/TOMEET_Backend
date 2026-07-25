@@ -7,5 +7,11 @@
     "20260723131218_wechat_channel_identities.sql": "3504eb523de14bc831c3d230aeb0653b8d26c2f16cd0a6b840c29f58cee84a76",
     "20260723160425_wechat_ilink_connections.sql": "3fcf38ed5b3fff5d17f657e2a391944fe5627bb7a7163d61f7915cbc254713a9",
     "20260724090000_sync_auth_users.sql": "18e75b00d66e17bb55c9548e844fb072abb35f9069eb66e3a76e0196f63d6b20"
+  },
+  "approvedDestructiveMigrations": {
+    "20260725220000_shared_channel_data_model.sql": {
+      "sha256": "78028d94efb0ca232bc587a3688b9b219b20f65000c872020d925aaa7bb156ee",
+      "reason": "Backfill canonical users and channel delivery records transactionally, then replace four duplicate business tables with compatibility views."
+    }
   }
 }

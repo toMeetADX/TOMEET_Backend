@@ -1,6 +1,6 @@
 # Railway 生产上线手册
 
-本项目在同一个 Railway Project 中部署两个 Service：`tomeet-api` 和 `tomeet-intelligence-worker`。数据库与私有文件存储使用 Supabase，前端继续部署在 Vercel。
+本项目在同一个 Railway Project 中部署三个 Service：`tomeet-api`、`tomeet-intelligence-worker` 和 `tomeet-wechat-ilink-worker`。数据库与私有文件存储使用 Supabase，前端继续部署在 Vercel。
 
 ## 上线前置条件
 
@@ -24,7 +24,7 @@ supabase db push
 
 ## 2. 创建 Railway Services
 
-在 Railway 的 production environment 中创建两个 Service，均连接仓库根目录。
+在 Railway 的 production environment 中创建三个 Service，均连接仓库根目录。
 
 ### API Service
 
@@ -42,6 +42,9 @@ SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<secret>
 FRONTEND_ORIGIN=https://<vercel-production-domain>
 RATE_LIMIT_MAX=120
+ADVENTUREX_MATCHING_V1=true
+ADVENTUREX_TEST_POOL_ENABLED=false
+ADVENTUREX_TEST_POOL_EMAIL=andy4fe0119@gmail.com
 ```
 
 `RATE_LIMIT_MAX` 是每个客户端 IP 每分钟允许的请求数；Railway 代理地址通过 Fastify `trustProxy` 正确还原。
@@ -75,9 +78,46 @@ TAVILY_API_KEY=<optional-secret>
 TAVILY_API_BASE_URL=https://api.tavily.com
 WORKER_CONCURRENCY=8
 WORKER_POLL_INTERVAL_MS=1000
+ADVENTUREX_MATCHING_V1=true
 ```
 
 `WORKER_CONCURRENCY` 允许 1–32；`WORKER_POLL_INTERVAL_MS` 允许 100–60000。变量非法时 Worker 会直接退出，让 Railway 明确标记部署失败，而不是启动一个不消费任务的空进程。
+
+`ADVENTUREX_MATCHING_V1` 必须在 API 与 Worker 使用相同值。`true` 启用轮次、候选、多选、开放局与原子结算；紧急回滚时两处同时改为 `false`，旧即时匹配路径仍保留。
+
+### WeChat iLink Worker Service
+
+- Service 名：`tomeet-wechat-ilink-worker`
+- Config file path：`/railway.wechat.toml`
+- 不需要生成公网域名
+
+环境变量：
+
+```text
+NODE_ENV=production
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<secret>
+TOMEET_API_URL=https://<api-domain>
+TOMEET_INTERNAL_API_TOKEN=<shared-server-secret>
+WECHAT_CREDENTIAL_ENCRYPTION_KEY=<shared-encryption-key>
+WECHAT_WORKER_CONCURRENCY=8
+WECHAT_OUTBOUND_CONCURRENCY=20
+WECHAT_WORKER_CLAIM_INTERVAL_MS=1000
+WECHAT_BUBBLE_DELAY_MS=200
+```
+
+`WECHAT_BUBBLE_DELAY_MS` 控制一句话气泡之间的渐进发送间隔，允许 `0–5000` 毫秒，生产建议约 `180–220` 毫秒，测试使用 `0`。组局邀请和成局确认函字符卡片不会被拆分。
+
+冷启动测试时可仅在 API 设置 `ADVENTUREX_TEST_POOL_ENABLED=true`。受保护开关只允许 `ADVENTUREX_TEST_POOL_EMAIL` 对应账号使用；正式真实用户池验收前应保持关闭。微信主动消息 Worker 使用 `WECHAT_OUTBOUND_CONCURRENCY` 并发发送候选、成局、超时和房间变化等异步通知。
+
+如需按本次 AdventureX 冷启动验收要求清空已有聊天派生数据并重建所有者虚拟测试用户，先暂停 Intelligence Worker 和微信 Worker，再在可信本机使用生产 Supabase 服务端变量执行：
+
+```bash
+pnpm adventurex:reset-chat-data -- --owner-email=andy4fe0119@gmail.com --desired-users=5
+pnpm adventurex:reset-chat-data -- --owner-email=andy4fe0119@gmail.com --desired-users=5 --execute
+```
+
+第一条只输出删除前计数；第二条才真正执行。脚本不会删除真实用户、既有房间、已完成匹配或微信连接，但会结束仍在进行的旧匹配请求，并重置对话摘要、消息来源记忆、社交钩子和首次欢迎状态。
 
 ## 3. 部署顺序
 

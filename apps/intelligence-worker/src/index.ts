@@ -33,7 +33,9 @@ const hosted = new HostedLlmIntelligence({
 });
 
 const store = new SupabaseStore(supabaseUrl, serviceRoleKey);
-const processor = new JobProcessor(store, hosted, hosted);
+const processor = new JobProcessor(store, hosted, hosted, {
+  adventurexMatchingV1: process.env.ADVENTUREX_MATCHING_V1 === "true"
+});
 const workerId = `${process.env.RAILWAY_REPLICA_ID ?? "local"}:${randomUUID().slice(0, 8)}`;
 
 function parseIntegerInRange(

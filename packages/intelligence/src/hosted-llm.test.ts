@@ -14,12 +14,62 @@ function agentContext(): AgentContext {
   return buildAgentContext([], createDefaultUserModel("u1"));
 }
 
+function confirmedRoomContext(proactivePushEnabled: boolean): AgentContext {
+  const now = new Date().toISOString();
+  return buildAgentContext([], createDefaultUserModel("u1"), {
+    matchRequest: {
+      requestId: "request-room",
+      userId: "u1",
+      intentSnapshot: { rawText: "想参加现场活动" },
+      status: "matched",
+      phase: "settling",
+      proactivePushEnabled,
+      activeRoundId: null,
+      optionsExpiresAt: null,
+      roomId: "room-confirmed",
+      createdAt: now,
+      updatedAt: now
+    },
+    room: {
+      roomId: "room-confirmed",
+      members: ["u1", "u2", "u3"].map((userId) => ({
+        userId,
+        displayName: userId,
+        confirmed: true,
+        participationStatus: "confirmed" as const
+      })),
+      offlineGame: {
+        id: "game-story-table",
+        name: "故事交换桌",
+        description: "轮流分享现场故事",
+        minPlayers: 3,
+        maxPlayers: 6,
+        intentTags: [],
+        traits: [],
+        requirements: [],
+        instructions: []
+      },
+      matchSummary: "已经正式成局",
+      status: "confirmed",
+      sourceDraftId: null,
+      targetPlayers: 3,
+      recruitmentStatus: "full",
+      version: 0,
+      meetingPoint: null,
+      createdAt: now,
+      completedAt: null
+    }
+  });
+}
+
 function plannedReply(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     replyDraft: "我会先联网核实。",
     socialIntentDetected: false,
     actions: [],
     memoryPlan: { queries: [], reviewSuggested: false },
+    socialHooks: [],
+    onboardingTransition: "none",
     searchPlan: {
       required: true,
       queries: [{ query: "AdventureX 2026 活动日期和地点", topic: "general" }]
@@ -63,6 +113,16 @@ function hostedWithSearch(provider?: WebSearchProvider): HostedLlmIntelligence {
     now: () => new Date("2026-07-23T04:00:00.000Z"),
     timeZone: "Asia/Shanghai"
   });
+}
+
+function leftFrame(title: "TOMEET 组局邀请" | "TOMEET 成局确认函", lines: string[]): string {
+  return [
+    "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    `┃ ${title}`,
+    "┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    ...lines.map((line) => `┃ ${line}`),
+    "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  ].join("\n");
 }
 
 describe("hosted Agent web search", () => {
@@ -382,7 +442,389 @@ describe("hosted Agent memory isolation", () => {
   });
 });
 
+describe("hosted Agent proactive matching actions", () => {
+  it("instructs the model to switch language, replay onboarding, and ask boundaries once", async () => {
+    const now = new Date().toISOString();
+    const context = buildAgentContext([], createDefaultUserModel("u1"), {
+      onboardingState: {
+        userId: "u1",
+        stage: "exploring",
+        imageDeclined: false,
+        preferredLanguage: "zh",
+        boundaryPromptedAt: null,
+        welcomeSentAt: now,
+        updatedAt: now
+      }
+    });
+    const requestBodies = stubChatResponses(
+      plannedReply({
+        replyDraft: "Hi there 👋",
+        onboardingTransition: "language_en",
+        searchPlan: { required: false, queries: [] }
+      }),
+      verifiedReply("Hi there 👋")
+    );
+
+    const insight = await hostedWithSearch().reply(context, "Please use English");
+
+    expect(insight.onboardingTransition).toBe("language_en");
+    expect(requestBodies[0]).toContain("preferredLanguage");
+    expect(requestBodies[0]).toContain("boundaryPromptedAt=null");
+    expect(requestBodies[0]).toContain("雷点");
+    expect(requestBodies[0]).toContain("一句话一个段落");
+    expect(requestBodies[0]).toContain("英文句点");
+    expect(requestBodies[0]).toContain("画像信息是否已经可用于匹配");
+    expect(requestBodies[0]).toContain("回答逐渐变短且含糊");
+    expect(requestBodies[0]).toContain("直接告诉用户现有信息已经可以进入匹配阶段");
+    expect(requestBodies[0]).toContain("直接询问是否愿意用当前信息开始匹配");
+    expect(requestBodies[0]).toContain("完全没有可用于区分候选人与活动的具体非敏感事实");
+    expect(requestBodies[0]).toContain("必须等用户明确同意");
+    expect(requestBodies[0]).toContain("按明确社交意图立即输出 start_match");
+  });
+
+  it("asks for a reason instead of executing a reasonless confirmed-room exit", async () => {
+    const requestBodies = stubChatResponses(
+      plannedReply({
+        replyDraft: "好，我已经帮你退出了。",
+        actions: [{ type: "leave_room", reason: "模型猜测的原因" }],
+        searchPlan: { required: false, queries: [] }
+      }),
+      plannedReply({
+        replyDraft: "可以，简单说一下这次退出的理由就行。",
+        actions: [],
+        searchPlan: { required: false, queries: [] }
+      }),
+      verifiedReply("可以，简单说一下这次退出的理由就行。")
+    );
+
+    const insight = await hostedWithSearch().reply(confirmedRoomContext(false), "我不去了");
+
+    expect(insight.actions).toEqual([]);
+    expect(insight.reply).toContain("理由");
+    expect(insight.reply).not.toContain("重新匹配");
+    expect(requestBodies[1]).toContain("reason 必须来自当前消息");
+  });
+
+  it("uses the user's actual exit reason and keeps authorized users in passive watching", async () => {
+    const requestBodies = stubChatResponses(
+      plannedReply({
+        replyDraft: "好，我会记录原因并退出这个局，之后继续替你留意。",
+        actions: [{ type: "leave_room", reason: "模型猜测的原因" }],
+        searchPlan: { required: false, queries: [] }
+      }),
+      verifiedReply("好，这次退出原因已经记录。之后有真正合适的安排时，我再主动告诉你。")
+    );
+
+    const insight = await hostedWithSearch().reply(
+      confirmedRoomContext(true),
+      "临时有事，我不去了"
+    );
+
+    expect(insight.actions).toEqual([{ type: "leave_room", reason: "临时有事" }]);
+    expect(insight.reply).toContain("主动告诉你");
+    expect(insight.reply).not.toContain("重新匹配");
+    const verifierPayload = JSON.parse(requestBodies[1]!) as { messages: Array<{ content: string }> };
+    expect(verifierPayload.messages[1]?.content).toContain('"reason":"临时有事"');
+    expect(requestBodies[0]).toContain("proactivePushEnabled");
+  });
+
+  it("allows explicit proactive-push consent only in push_consent state", async () => {
+    const now = new Date().toISOString();
+    const context = buildAgentContext([], createDefaultUserModel("u1"), {
+      matchRequest: {
+        requestId: "request-1",
+        userId: "u1",
+        intentSnapshot: { rawText: "想认识一些人" },
+        status: "matching",
+        phase: "push_consent",
+        proactivePushEnabled: false,
+        activeRoundId: null,
+        optionsExpiresAt: null,
+        roomId: null,
+        createdAt: now,
+        updatedAt: now
+      }
+    });
+    const requestBodies = stubChatResponses(
+      plannedReply({
+        replyDraft: "可以，有合适的我再来告诉你。",
+        actions: [{ type: "enable_match_push" }],
+        searchPlan: { required: false, queries: [] }
+      }),
+      verifiedReply("可以，有合适的我再来告诉你。")
+    );
+
+    const insight = await hostedWithSearch().reply(context, "好，有合适的主动告诉我");
+
+    expect(insight.actions).toEqual([{ type: "enable_match_push" }]);
+    expect(requestBodies[0]).toContain("push_consent");
+    expect(requestBodies[0]).toContain("proactivePushEnabled");
+  });
+});
+
+describe("hosted Agent product-event composition", () => {
+  const matchOptionsEvent = {
+    kind: "match_options" as const,
+    facts: {
+      options: [{
+        optionNumber: 1,
+        activityName: "故事交换桌",
+        activityDescription: "围绕现场故事卡自然交流",
+        confirmedFacts: [{ hookText: "独立完成过一款游戏" }],
+        possibleFacts: [{ hookText: "正式参加过黑客松" }]
+      }, {
+        optionNumber: 2,
+        activityName: "共同散步",
+        activityDescription: "边走边聊",
+        confirmedFacts: [],
+        possibleFacts: []
+      }]
+    }
+  };
+
+  it("personalizes from structured facts and verifies away unsupported labels", async () => {
+    const requestBodies = stubChatResponses(
+      {
+        content: leftFrame("TOMEET 组局邀请", ["这两组都很适合有创造力的你。"]),
+        optionPreviews: [{ optionNumber: 1, text: "第一组都是很有创造力的人。" }, { optionNumber: 2, text: "第二组也很适合你。" }]
+      },
+      {
+        content: leftFrame("TOMEET 组局邀请", ["结合你刚才想自然认识人的表达，我把两个现场候选整理好了。"]),
+        optionPreviews: [{
+          optionNumber: 1,
+          text: "故事交换桌：这里已有独立完成过一款游戏的人确认参加，你还可能遇见正式参加过黑客松的人。"
+        }, {
+          optionNumber: 2,
+          text: "共同散步：边走边聊。"
+        }]
+      }
+    );
+
+    const result = await hostedWithSearch().composeProductMessage(agentContext(), matchOptionsEvent);
+
+    expect(result.optionPreviews.map((option) => option.optionNumber)).toEqual([1, 2]);
+    expect(result.optionPreviews[0]?.text).toContain("已有");
+    expect(result.optionPreviews[0]?.text).toContain("还可能");
+    expect(JSON.stringify(result)).not.toContain("有创造力");
+    expect(requestBodies[1]).toContain("candidateMessage");
+    expect(requestBodies[1]).toContain("不得从人物事实推断人格");
+    expect(requestBodies[1]).toContain("这两组都很适合有创造力的你");
+  });
+
+  it("rejects a verified candidate message that drops an option number", async () => {
+    stubChatResponses(
+      {
+        content: leftFrame("TOMEET 组局邀请", ["两个候选已经整理好。"]),
+        optionPreviews: [{ optionNumber: 1, text: "候选一" }, { optionNumber: 2, text: "候选二" }]
+      },
+      {
+        content: leftFrame("TOMEET 组局邀请", ["候选已经整理好。"]),
+        optionPreviews: [{ optionNumber: 1, text: "候选一" }]
+      }
+    );
+
+    await expect(hostedWithSearch().composeProductMessage(agentContext(), matchOptionsEvent))
+      .rejects.toThrow("候选文案没有覆盖全部选项");
+  });
+
+  it("rejects option previews on non-candidate product events", async () => {
+    const invalid = {
+      content: "这次匹配已经结束。",
+      optionPreviews: [{ optionNumber: 1, text: "不应出现的候选" }]
+    };
+    stubChatResponses(invalid, invalid);
+
+    await expect(hostedWithSearch().composeProductMessage(agentContext(), {
+      kind: "match_expired",
+      facts: { reason: "selection_timeout", canRematch: true, rematchRequiresExplicitUserRequest: true }
+    })).rejects.toThrow("非候选事件不能返回 optionPreviews");
+  });
+
+  it("requires invitation and confirmation cards to omit the right border", async () => {
+    const invalidRightFrame = [
+      "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓",
+      "┃ TOMEET 组局邀请            ┃",
+      "┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫",
+      "┃ 1｜故事交换桌              ┃",
+      "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+    ].join("\n");
+    stubChatResponses(
+      { content: invalidRightFrame, optionPreviews: [{ optionNumber: 1, text: "故事交换桌" }] },
+      { content: invalidRightFrame, optionPreviews: [{ optionNumber: 1, text: "故事交换桌" }] }
+    );
+
+    await expect(hostedWithSearch().composeProductMessage(agentContext(), {
+      kind: "match_options",
+      facts: {
+        options: [{
+          optionNumber: 1,
+          activityName: "故事交换桌",
+          activityDescription: "围绕现场故事自然交流",
+          confirmedFacts: [],
+          possibleFacts: []
+        }]
+      }
+    })).rejects.toThrow("必须使用无右边框的左框字符卡片");
+  });
+
+  it("accepts a left-frame-only formed-room confirmation", async () => {
+    const content = leftFrame("TOMEET 成局确认函", [
+      "活动  故事交换桌",
+      "人数  4 人",
+      "集合  TOMEET 集合点"
+    ]);
+    stubChatResponses(
+      { content, optionPreviews: [] },
+      { content, optionPreviews: [] }
+    );
+
+    const result = await hostedWithSearch().composeProductMessage(agentContext(), {
+      kind: "room_intro",
+      facts: {
+        activity: { name: "故事交换桌" },
+        playerCount: 4,
+        meetingPoint: "TOMEET 集合点",
+        confirmedFacts: []
+      }
+    });
+
+    expect(result.content).toContain("┃ TOMEET 成局确认函");
+    expect(result.content.split("\n").every((line) => !/[┃│┫┤┓┐┛┘]\s*$/u.test(line))).toBe(true);
+  });
+
+  it("allows at most two restrained emoji in invitation and confirmation cards", async () => {
+    const content = leftFrame("TOMEET 成局确认函", [
+      "👥 人数  4 人",
+      "📍 集合  TOMEET 集合点"
+    ]);
+    stubChatResponses(
+      { content, optionPreviews: [] },
+      { content, optionPreviews: [] }
+    );
+
+    const result = await hostedWithSearch().composeProductMessage(agentContext(), {
+      kind: "room_intro",
+      facts: {
+        activity: { name: "故事交换桌" },
+        playerCount: 4,
+        meetingPoint: "TOMEET 集合点",
+        confirmedFacts: []
+      }
+    });
+    expect(result.content).toContain("👥");
+    expect(result.content).toContain("📍");
+
+    const crowded = leftFrame("TOMEET 成局确认函", ["👥 4 人", "📍 集合点", "✨ 已成局"]);
+    stubChatResponses(
+      { content: crowded, optionPreviews: [] },
+      { content: crowded, optionPreviews: [] }
+    );
+    await expect(hostedWithSearch().composeProductMessage(agentContext(), {
+      kind: "room_intro",
+      facts: {
+        activity: { name: "故事交换桌" },
+        playerCount: 4,
+        meetingPoint: "集合点",
+        confirmedFacts: []
+      }
+    })).rejects.toThrow("必须使用无右边框的左框字符卡片");
+  });
+
+  it("keeps unavailable messaging grounded in pool cause and consent state", async () => {
+    const requestBodies = stubChatResponses(
+      {
+        content: "目前可用的人还比较少。如果你愿意，有合适的人或局出现时我可以主动告诉你。",
+        optionPreviews: []
+      },
+      {
+        content: "目前可用的人还比较少。如果你愿意，有合适的人或局出现时我可以主动告诉你。",
+        optionPreviews: []
+      }
+    );
+    const result = await hostedWithSearch().composeProductMessage(agentContext(), {
+      kind: "match_unavailable",
+      facts: {
+        cause: "insufficient_pool",
+        availablePeopleCount: 1,
+        canEnableProactivePush: true,
+        proactivePushAlreadyEnabled: false
+      }
+    });
+
+    expect(result.optionPreviews).toEqual([]);
+    expect(result.content).toContain("主动告诉你");
+    expect(requestBodies[0]).toContain("insufficient_pool");
+    expect(requestBodies[1]).toContain("candidateMessage");
+  });
+
+  it("keeps incomplete confirmation neutral and never frames it as a personal rejection", async () => {
+    const requestBodies = stubChatResponses(
+      {
+        content: "你的选择已经收到，不过这次安排没有完成成局确认。之后有合适的安排时，要我主动告诉你吗？",
+        optionPreviews: []
+      },
+      {
+        content: "你的选择已经收到，不过这次安排没有完成成局确认。之后有合适的安排时，要我主动告诉你吗？",
+        optionPreviews: []
+      }
+    );
+    const result = await hostedWithSearch().composeProductMessage(agentContext(), {
+      kind: "match_confirmation_incomplete",
+      facts: {
+        cause: "candidate_not_formed",
+        selectionRecorded: true,
+        currentAttemptEnded: true,
+        doNotIdentifyOtherUsers: true,
+        canEnableProactivePush: true,
+        proactivePushAlreadyEnabled: false,
+        currentInterestState: "push_consent",
+        followUpPriority: "confirmation_follow_up"
+      }
+    });
+
+    expect(result.content).toContain("选择已经收到");
+    expect(result.content).not.toContain("拒绝");
+    expect(requestBodies[0]).toContain("不得说或暗示某个具体用户拒绝了他");
+    expect(requestBodies[0]).toContain("confirmation_follow_up");
+  });
+
+  it("propagates model failure instead of publishing a canned fallback", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("upstream failed", { status: 500 })));
+
+    await expect(hostedWithSearch().composeProductMessage(agentContext(), {
+      kind: "match_expired",
+      facts: { reason: "selection_timeout", canRematch: true, rematchRequiresExplicitUserRequest: true }
+    })).rejects.toThrow("LLM 请求失败");
+  });
+});
+
 describe("hosted vibe matchmaking", () => {
+  it("sends a group of images to one vision request and asks one combined question", async () => {
+    const requestBodies = stubChatResponses({
+      observableDetails: ["两张图里都出现了夜间城市光线"],
+      uncertainty: ["无法确定拍摄地点"],
+      suggestedQuestion: "这组夜景里你最想保留的是哪种感觉？",
+      reply: "这几张图放在一起有一种连续的夜间漫游感\n\n你最想保留的是哪种感觉？"
+    });
+
+    const result = await hostedWithSearch().understandMultimodal({
+      kind: "image",
+      storagePaths: ["https://storage.example/one.jpg", "https://storage.example/two.jpg"],
+      mimeTypes: ["image/jpeg", "image/jpeg"],
+      preferredLanguage: "zh"
+    });
+
+    expect(result.reply).toContain("哪种感觉");
+    const payload = JSON.parse(requestBodies[0]!) as {
+      messages: Array<{ content: string | Array<{ type: string; image_url?: { url: string } }> }>;
+    };
+    const content = payload.messages[1]!.content;
+    expect(Array.isArray(content)).toBe(true);
+    expect((content as Array<{ type: string }>).filter((item) => item.type === "image_url"))
+      .toHaveLength(2);
+    expect(requestBodies[0]).toContain("作为一个整体理解");
+  });
+
   it("sends continuous multimodal vibe context without any matching tags", async () => {
     let requestBody = "";
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -414,6 +856,7 @@ describe("hosted vibe matchmaking", () => {
             preferredInterests: ["不应发送"]
           },
           status: "matching" as const,
+          proactivePushEnabled: false,
           roomId: null,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()

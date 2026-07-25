@@ -46,7 +46,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
     env:
       SOURCE_BRANCH: main
       TARGET_BRANCH: feat/wechat-channel
@@ -87,6 +86,20 @@ jobs:
           else
             exit "$result"
           fi
+      - name: Validate synchronization PR credential
+        if: steps.drift.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_SYNC_PR_TOKEN }}
+        shell: bash
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Missing repository secret AGENT_SYNC_PR_TOKEN. Configure a fine-grained token with Pull requests: Read and write before rerunning Agent Layer Sync."
+            exit 1
+          fi
+          if ! gh auth status; then
+            echo "::error::AGENT_SYNC_PR_TOKEN is invalid or expired."
+            exit 1
+          fi
       - name: Prepare deterministic sync branch
         if: steps.drift.outputs.needed == 'true'
         run: |
@@ -120,7 +133,7 @@ jobs:
       - name: Create or update synchronization PR
         if: steps.drift.outputs.needed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.AGENT_SYNC_PR_TOKEN }}
           SOURCE_SHA: ${{ steps.push.outputs.source_sha }}
         shell: bash
         run: |

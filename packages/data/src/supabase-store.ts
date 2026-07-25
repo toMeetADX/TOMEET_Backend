@@ -1,23 +1,42 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import {
+  adventurexOnboardingStateSchema,
+  adventurexTestPoolStatusSchema,
   channelIdentitySchema,
   llmJobSchema,
+  matchChoiceSchema,
+  matchDraftSchema,
+  matchOptionContextSchema,
+  matchOptionOfferSchema,
   matchRequestSchema,
+  matchRoundSchema,
   matchRoomSchema,
   messageSchema,
   offlineGameSchema,
+  socialHookSchema,
   userMemoryProfileSchema,
   userMemorySchema,
   userModelSchema,
+  type AdventurexLanguage,
   type LlmJob,
+  type AdventurexOnboardingState,
+  type AdventurexTestPoolStatus,
   type ChannelIdentity,
   type ChannelProvider,
+  type FinalRoomDecision,
+  type MatchChoice,
   type MatchDecision,
+  type MatchOptionContext,
+  type MatchOptionOffer,
   type MatchRequest,
+  type MatchRound,
   type MatchRoom,
   type Message,
   type OfflineGame,
   type PostEventFeedback,
+  type SaveMatchChoicesInput,
+  type SocialHook,
+  type SocialHookDraft,
   type UserMemory,
   type UserMemoryProfile,
   type UserModel
@@ -28,9 +47,13 @@ import type {
   ApplyMemoryChangesResult,
   ConversationState,
   DataStore,
+  DraftChangeNotification,
   EnqueueJobInput,
   LinkChannelIdentityInput,
-  MultimodalRecordInput
+  MultimodalRecordInput,
+  RoomChangeNotification,
+  RoundSettlementState,
+  SaveRoundPlanInput
 } from "./store.js";
 import { StoreConflictError, StoreNotFoundError } from "./store.js";
 
@@ -53,6 +76,8 @@ function mapMessage(row: JsonRow): Message {
     userId: row.user_id ?? row.userId,
     role: row.role,
     content: row.content,
+    sourceChannel: row.source_channel ?? row.sourceChannel ?? "legacy",
+    replyToMessageId: row.reply_to_message_id ?? row.replyToMessageId ?? null,
     createdAt: normalizeDateTime(row.created_at ?? row.createdAt)
   });
 }
@@ -76,8 +101,10 @@ function mapUserModel(row: JsonRow): UserModel {
     socialHistory: row.social_history ?? row.socialHistory ?? [],
     feedbackMemory: row.feedback_memory ?? row.feedbackMemory ?? [],
     multimodalUnderstanding: row.multimodal_understanding ?? row.multimodalUnderstanding ?? {},
-    version: row.version ?? 0,
-    updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
+    version: row.user_model_version ?? row.version ?? 0,
+    updatedAt: normalizeDateTime(
+      row.user_model_updated_at ?? row.updated_at ?? row.updatedAt
+    )
   });
 }
 
@@ -87,6 +114,10 @@ function mapMatchRequest(row: JsonRow): MatchRequest {
     userId: row.user_id ?? row.userId,
     intentSnapshot: row.intent_snapshot ?? row.intentSnapshot ?? {},
     status: row.status,
+    phase: row.phase ?? "waiting",
+    proactivePushEnabled: row.proactive_push_enabled ?? row.proactivePushEnabled ?? false,
+    activeRoundId: row.active_round_id ?? row.activeRoundId ?? null,
+    optionsExpiresAt: normalizeDateTime(row.options_expires_at ?? row.optionsExpiresAt ?? null),
     roomId: row.room_id ?? row.roomId ?? null,
     createdAt: normalizeDateTime(row.created_at ?? row.createdAt),
     updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
@@ -118,8 +149,102 @@ function mapJob(row: JsonRow): LlmJob {
     attempts: row.attempts ?? 0,
     maxAttempts: row.max_attempts ?? row.maxAttempts ?? 3,
     partitionKey: row.partition_key ?? row.partitionKey ?? null,
+    runAt: normalizeDateTime(row.run_at ?? row.runAt ?? row.created_at ?? row.createdAt),
     createdAt: normalizeDateTime(row.created_at ?? row.createdAt),
     updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
+  });
+}
+
+function mapOnboardingState(row: JsonRow): AdventurexOnboardingState {
+  return adventurexOnboardingStateSchema.parse({
+    userId: row.user_id ?? row.userId ?? row.id,
+    stage: row.adventurex_stage ?? row.stage,
+    imageDeclined: row.adventurex_image_declined ?? row.image_declined ?? row.imageDeclined ?? false,
+    preferredLanguage: row.adventurex_preferred_language ?? row.preferred_language ?? row.preferredLanguage ?? "zh",
+    boundaryPromptedAt: normalizeDateTime(
+      row.adventurex_boundary_prompted_at ?? row.boundary_prompted_at ?? row.boundaryPromptedAt ?? null
+    ),
+    welcomeSentAt: normalizeDateTime(
+      row.adventurex_welcome_sent_at ?? row.welcome_sent_at ?? row.welcomeSentAt ?? null
+    ),
+    createdAt: normalizeDateTime(
+      row.adventurex_state_created_at ?? row.created_at ?? row.createdAt
+    ),
+    updatedAt: normalizeDateTime(
+      row.adventurex_state_updated_at ?? row.updated_at ?? row.updatedAt
+    )
+  });
+}
+
+function mapSocialHook(row: JsonRow): SocialHook {
+  return socialHookSchema.parse({
+    id: row.id,
+    userId: row.user_id ?? row.userId,
+    hookText: row.hook_text ?? row.hookText,
+    sourceMessageIds: row.source_message_ids ?? row.sourceMessageIds ?? [],
+    status: row.status,
+    createdAt: normalizeDateTime(row.created_at ?? row.createdAt),
+    updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
+  });
+}
+
+function mapRound(row: JsonRow): MatchRound {
+  return matchRoundSchema.parse({
+    roundId: row.id ?? row.round_id ?? row.roundId,
+    bucketKey: row.bucket_key ?? row.bucketKey,
+    status: row.status,
+    offerExpiresAt: normalizeDateTime(row.offer_expires_at ?? row.offerExpiresAt ?? null),
+    createdAt: normalizeDateTime(row.created_at ?? row.createdAt),
+    updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
+  });
+}
+
+function mapDraft(row: JsonRow) {
+  return matchDraftSchema.parse({
+    draftId: row.id ?? row.draft_id ?? row.draftId,
+    roundId: row.round_id ?? row.roundId,
+    offlineGameId: row.offline_game_id ?? row.offlineGameId,
+    status: row.status,
+    version: row.version ?? 0,
+    targetPlayers: row.target_players ?? row.targetPlayers,
+    candidateRequestIds: row.candidate_request_ids ?? row.candidateRequestIds ?? [],
+    rationale: row.rationale ?? "现场互动候选局",
+    createdAt: normalizeDateTime(row.created_at ?? row.createdAt),
+    expiresAt: normalizeDateTime(row.expires_at ?? row.expiresAt)
+  });
+}
+
+function mapOffer(row: JsonRow): MatchOptionOffer {
+  return matchOptionOfferSchema.parse({
+    offerId: row.id ?? row.offer_id ?? row.offerId,
+    requestId: row.request_id ?? row.requestId,
+    roundId: row.round_id ?? row.roundId,
+    sourceType: row.source_type ?? row.sourceType,
+    draftId: row.draft_id ?? row.draftId ?? null,
+    roomId: row.room_id ?? row.roomId ?? null,
+    sourceVersion: row.source_version ?? row.sourceVersion ?? 0,
+    optionNumber: row.option_number ?? row.optionNumber,
+    offlineGameId: row.offline_game_id ?? row.offlineGameId,
+    previewText: row.preview_text ?? row.previewText,
+    hooks: row.hooks ?? [],
+    status: row.status,
+    createdAt: normalizeDateTime(row.created_at ?? row.createdAt),
+    respondedAt: normalizeDateTime(row.responded_at ?? row.respondedAt ?? null)
+  });
+}
+
+function mapChoice(row: JsonRow): MatchChoice {
+  return matchChoiceSchema.parse({
+    choiceId: row.id ?? row.choice_id ?? row.choiceId,
+    requestId: row.request_id ?? row.requestId,
+    roundId: row.round_id ?? row.roundId,
+    sourceType: row.source_type ?? row.sourceType,
+    draftId: row.draft_id ?? row.draftId ?? null,
+    roomId: row.room_id ?? row.roomId ?? null,
+    preferenceRank: row.preference_rank ?? row.preferenceRank,
+    requiredHookIds: row.required_hook_ids ?? row.requiredHookIds ?? [],
+    rawUserText: row.raw_user_text ?? row.rawUserText,
+    createdAt: normalizeDateTime(row.created_at ?? row.createdAt)
   });
 }
 
@@ -184,6 +309,51 @@ export class SupabaseStore implements DataStore {
     if (error) this.throwError("创建用户", error);
   }
 
+  async ensureAdventurexOnboardingState(userId: string): Promise<AdventurexOnboardingState> {
+    await this.ensureUser(userId);
+    const { data, error } = await this.client
+      .from("users")
+      .select("*")
+      .eq("id", userId)
+      .single();
+    if (error) this.throwError("读取 AdventureX 引导状态", error);
+    return mapOnboardingState(data);
+  }
+
+  async startAdventurexOnboarding(
+    userId: string,
+    language: AdventurexLanguage = "zh"
+  ): Promise<Message | null> {
+    const { data, error } = await this.client.rpc("start_adventurex_onboarding", {
+      p_user_id: userId,
+      p_language: language
+    });
+    if (error) this.throwError("开始 AdventureX 引导", error);
+    const result = unwrapRpcData(data) as { message?: JsonRow | null } | JsonRow;
+    const message = ("message" in result ? result.message : result) as JsonRow | null | undefined;
+    return message ? mapMessage(message) : null;
+  }
+
+  async updateAdventurexOnboardingState(
+    userId: string,
+    patch: {
+      stage?: AdventurexOnboardingState["stage"];
+      imageDeclined?: boolean;
+      preferredLanguage?: AdventurexLanguage;
+      boundaryPrompted?: boolean;
+    }
+  ): Promise<AdventurexOnboardingState> {
+    const { data, error } = await this.client.rpc("update_adventurex_onboarding_state", {
+      p_user_id: userId,
+      p_stage: patch.stage ?? null,
+      p_image_declined: patch.imageDeclined ?? null,
+      p_preferred_language: patch.preferredLanguage ?? null,
+      p_boundary_prompted: patch.boundaryPrompted ?? false
+    });
+    if (error) this.throwError("更新 AdventureX 引导状态", error);
+    return mapOnboardingState(unwrapRpcData(data) as JsonRow);
+  }
+
   async resolveChannelIdentity(
     provider: ChannelProvider,
     externalUserId: string
@@ -220,21 +390,73 @@ export class SupabaseStore implements DataStore {
     role: "user" | "assistant";
     content: string;
     idempotencyKey?: string;
+    sourceChannel?: Message["sourceChannel"];
+    replyToMessageId?: string | null;
   }): Promise<Message> {
     const { data, error } = await this.client.rpc("append_agent_message", {
       p_user_id: input.userId,
       p_role: input.role,
       p_content: input.content,
-      p_idempotency_key: input.idempotencyKey ?? null
+      p_idempotency_key: input.idempotencyKey ?? null,
+      p_source_channel: input.sourceChannel ?? "legacy",
+      p_reply_to_message_id: input.replyToMessageId ?? null
     });
     if (error) this.throwError("写入消息", error);
     return mapMessage(unwrapRpcData(data) as JsonRow);
   }
 
+  async setWechatResponseGeneration(connectionId: string, generationToken: string): Promise<void> {
+    const { error } = await this.client.rpc("set_wechat_response_generation", {
+      p_connection_id: connectionId,
+      p_generation_token: generationToken
+    });
+    if (error) this.throwError("更新微信回复代次", error);
+  }
+
+  async isWechatResponseGenerationCurrent(
+    connectionId: string,
+    generationToken: string
+  ): Promise<boolean> {
+    const { data, error } = await this.client.rpc("is_wechat_response_generation_current", {
+      p_connection_id: connectionId,
+      p_generation_token: generationToken
+    });
+    if (error) this.throwError("检查微信回复代次", error);
+    return data === true;
+  }
+
+  async appendMessageIfWechatGenerationCurrent(input: {
+    connectionId: string;
+    generationToken: string;
+    userId: string;
+    role: "user" | "assistant";
+    content: string;
+    idempotencyKey?: string;
+    sourceChannel?: Message["sourceChannel"];
+    replyToMessageId?: string | null;
+  }): Promise<Message | null> {
+    const { data, error } = await this.client.rpc(
+      "append_agent_message_if_wechat_generation_current",
+      {
+        p_connection_id: input.connectionId,
+        p_generation_token: input.generationToken,
+        p_user_id: input.userId,
+        p_role: input.role,
+        p_content: input.content,
+        p_idempotency_key: input.idempotencyKey ?? null,
+        p_source_channel: input.sourceChannel ?? "wechat",
+        p_reply_to_message_id: input.replyToMessageId ?? null
+      }
+    );
+    if (error) this.throwError("按微信回复代次写入消息", error);
+    const result = unwrapRpcData(data);
+    return result ? mapMessage(result as JsonRow) : null;
+  }
+
   async listRecentMessages(userId: string, limit = 50): Promise<Message[]> {
     const { data, error } = await this.client
       .from("messages")
-      .select("id,user_id,role,content,created_at")
+      .select("id,user_id,role,content,source_channel,reply_to_message_id,created_at")
       .eq("user_id", userId)
       .order("created_at", { ascending: false })
       .limit(Math.min(limit, 100));
@@ -247,7 +469,7 @@ export class SupabaseStore implements DataStore {
     const safeLimit = Math.min(Math.max(limit, 1), 500);
     const { data, error } = await this.client
       .from("messages")
-      .select("id,user_id,role,content,created_at")
+      .select("id,user_id,role,content,source_channel,reply_to_message_id,created_at")
       .eq("user_id", userId)
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
@@ -302,14 +524,14 @@ export class SupabaseStore implements DataStore {
 
   async getUserModel(userId: string): Promise<UserModel> {
     await this.ensureUser(userId);
-    const { data, error } = await this.client.from("user_models").select("*").eq("user_id", userId).single();
+    const { data, error } = await this.client.from("users").select("*").eq("id", userId).single();
     if (error) this.throwError("读取用户模型", error);
     return mapUserModel(data);
   }
 
   async saveUserModel(model: UserModel, expectedVersion: number): Promise<UserModel> {
     const { data, error } = await this.client
-      .from("user_models")
+      .from("users")
       .update({
         vibe_narrative: model.vibeNarrative,
         long_term_profile: model.longTermProfile,
@@ -317,11 +539,11 @@ export class SupabaseStore implements DataStore {
         social_history: model.socialHistory,
         feedback_memory: model.feedbackMemory,
         multimodal_understanding: model.multimodalUnderstanding,
-        version: model.version,
-        updated_at: model.updatedAt
+        user_model_version: model.version,
+        user_model_updated_at: model.updatedAt
       })
-      .eq("user_id", model.userId)
-      .eq("version", expectedVersion)
+      .eq("id", model.userId)
+      .eq("user_model_version", expectedVersion)
       .select("*")
       .maybeSingle();
     if (error) this.throwError("更新用户模型", error);
@@ -470,6 +692,33 @@ export class SupabaseStore implements DataStore {
     if (error) this.throwError("更新多模态理解", error);
   }
 
+  async listActiveSocialHooks(userId: string, limit = 32): Promise<SocialHook[]> {
+    const { data, error } = await this.client.rpc("list_active_social_hooks", {
+      p_user_id: userId,
+      p_limit: Math.min(Math.max(limit, 1), 128)
+    });
+    if (error) this.throwError("读取社交钩子", error);
+    return ((data ?? []) as JsonRow[]).map((row) => mapSocialHook(row));
+  }
+
+  async saveSocialHooks(userId: string, hooks: SocialHookDraft[]): Promise<SocialHook[]> {
+    if (hooks.length === 0) return [];
+    const { data, error } = await this.client.rpc("save_social_hooks", {
+      p_user_id: userId,
+      p_hooks: hooks
+    });
+    if (error) this.throwError("保存社交钩子", error);
+    return ((data ?? []) as JsonRow[]).map((row) => mapSocialHook(row));
+  }
+
+  async forgetSocialHook(userId: string, hookId: string): Promise<void> {
+    const { error } = await this.client.rpc("forget_social_hook", {
+      p_user_id: userId,
+      p_hook_id: hookId
+    });
+    if (error) this.throwError("忘记社交钩子", error);
+  }
+
   async createMatchRequest(userId: string, intentSnapshot: Record<string, unknown>): Promise<MatchRequest> {
     const { data, error } = await this.client.rpc("create_match_request", {
       p_user_id: userId,
@@ -503,6 +752,192 @@ export class SupabaseStore implements DataStore {
     return mapMatchRequest(unwrapRpcData(data) as JsonRow);
   }
 
+  async restartMatch(endedRequestId: string): Promise<MatchRequest> {
+    const { data, error } = await this.client.rpc("restart_match_request", {
+      p_cancelled_request_id: endedRequestId
+    });
+    if (error) this.throwError("重新匹配", error);
+    return mapMatchRequest(unwrapRpcData(data) as JsonRow);
+  }
+
+  async setMatchRequestInterest(
+    requestId: string,
+    input: {
+      phase: "waiting" | "push_consent" | "watching";
+      proactivePushEnabled: boolean;
+      clearRound?: boolean;
+    }
+  ): Promise<MatchRequest> {
+    const { data, error } = await this.client.rpc("set_match_request_interest", {
+      p_request_id: requestId,
+      p_phase: input.phase,
+      p_proactive_push_enabled: input.proactivePushEnabled,
+      p_clear_round: input.clearRound ?? false
+    });
+    if (error) this.throwError("更新匹配意愿", error);
+    return mapMatchRequest(unwrapRpcData(data) as JsonRow);
+  }
+
+  async getAdventurexTestPoolStatus(ownerUserId: string): Promise<AdventurexTestPoolStatus> {
+    const { data, error } = await this.client.rpc("get_adventurex_test_pool_status", {
+      p_owner_user_id: ownerUserId
+    });
+    if (error) this.throwError("读取虚拟测试用户池", error);
+    return adventurexTestPoolStatusSchema.parse(unwrapRpcData(data));
+  }
+
+  async configureAdventurexTestPool(
+    ownerUserId: string,
+    input: { enabled: boolean; desiredUserCount: number }
+  ): Promise<AdventurexTestPoolStatus> {
+    const { data, error } = await this.client.rpc("configure_adventurex_test_pool", {
+      p_owner_user_id: ownerUserId,
+      p_enabled: input.enabled,
+      p_desired_user_count: input.desiredUserCount
+    });
+    if (error) this.throwError("配置虚拟测试用户池", error);
+    return adventurexTestPoolStatusSchema.parse(unwrapRpcData(data));
+  }
+
+  async prepareAdventurexTestPool(ownerUserId: string): Promise<MatchRequest[]> {
+    const { data, error } = await this.client.rpc("prepare_adventurex_test_pool", {
+      p_owner_user_id: ownerUserId
+    });
+    if (error) this.throwError("准备虚拟测试用户池", error);
+    return ((data ?? []) as JsonRow[]).map((row) => mapMatchRequest(row));
+  }
+
+  async createOrGetMatchRound(bucketKey: string, scheduledAt: string): Promise<MatchRound> {
+    const { data, error } = await this.client.rpc("create_or_get_match_round", {
+      p_bucket_key: bucketKey,
+      p_scheduled_at: scheduledAt
+    });
+    if (error) this.throwError("创建匹配轮次", error);
+    return mapRound(unwrapRpcData(data) as JsonRow);
+  }
+
+  async addRequestToRound(roundId: string, requestId: string): Promise<void> {
+    const { error } = await this.client.rpc("add_request_to_match_round", {
+      p_round_id: roundId,
+      p_request_id: requestId
+    });
+    if (error) this.throwError("加入匹配轮次", error);
+  }
+
+  async listRoundCandidates(roundId: string): Promise<MatchCandidate[]> {
+    const { data, error } = await this.client.rpc("list_match_round_candidates", { p_round_id: roundId });
+    if (error) this.throwError("读取轮次候选", error);
+    return ((data ?? []) as Array<{
+      request: JsonRow;
+      user_model: JsonRow;
+      matching_narrative?: unknown;
+      social_hooks?: JsonRow[];
+      matching_priority?: unknown;
+    }>).map((row) => ({
+      request: mapMatchRequest(row.request),
+      userModel: mapUserModel(row.user_model),
+      matchingNarrative: typeof row.matching_narrative === "string" ? row.matching_narrative : undefined,
+      socialHooks: (row.social_hooks ?? []).map((hook) => mapSocialHook(hook)),
+      matchingPriority: row.matching_priority === "active_waiting"
+        || row.matching_priority === "confirmation_follow_up"
+        || row.matching_priority === "watching"
+        ? row.matching_priority
+        : undefined
+    }));
+  }
+
+  async saveRoundProposals(input: SaveRoundPlanInput): Promise<MatchOptionOffer[]> {
+    const { data, error } = await this.client.rpc("save_match_round_proposals", {
+      p_round_id: input.roundId,
+      p_proposal: input.proposal,
+      p_offers: input.offers,
+      p_offer_expires_at: input.offerExpiresAt
+    });
+    if (error) this.throwError("保存轮次候选", error);
+    return ((data ?? []) as JsonRow[]).map((row) => mapOffer(row));
+  }
+
+  async listCurrentMatchOptions(userId: string): Promise<MatchOptionContext | null> {
+    const { data, error } = await this.client.rpc("list_current_match_options", { p_user_id: userId });
+    if (error) this.throwError("读取当前候选", error);
+    const raw = unwrapRpcData(data) as (JsonRow & { options?: JsonRow[] }) | null;
+    if (!raw) return null;
+    return matchOptionContextSchema.parse({
+      requestId: raw.request_id ?? raw.requestId,
+      roundId: raw.round_id ?? raw.roundId,
+      expiresAt: normalizeDateTime(raw.expires_at ?? raw.expiresAt),
+      options: (raw.options ?? []).map((row) => ({
+        ...mapOffer(row),
+        activityName: row.activity_name ?? row.activityName,
+        activityDescription: row.activity_description ?? row.activityDescription
+      }))
+    });
+  }
+
+  async saveMatchChoices(requestId: string, input: SaveMatchChoicesInput): Promise<MatchChoice[]> {
+    const { data, error } = await this.client.rpc("save_match_choices", {
+      p_request_id: requestId,
+      p_preferred_option_number: input.preferredOptionNumber,
+      p_accepted_option_numbers: input.acceptedOptionNumbers,
+      p_required_hook_ids: input.requiredHookIds,
+      p_raw_user_text: input.rawText
+    });
+    if (error) this.throwError("保存候选选择", error);
+    return ((data ?? []) as JsonRow[]).map((row) => mapChoice(row));
+  }
+
+  async expireMatchOptions(requestId: string): Promise<void> {
+    const { error } = await this.client.rpc("expire_match_options", { p_request_id: requestId });
+    if (error) this.throwError("刷新候选", error);
+  }
+
+  async getRoundSettlementState(roundId: string): Promise<RoundSettlementState> {
+    const { data, error } = await this.client.rpc("get_match_round_settlement_state", { p_round_id: roundId });
+    if (error) this.throwError("读取轮次结算状态", error);
+    const raw = unwrapRpcData(data) as JsonRow & {
+      drafts?: JsonRow[];
+      choices?: JsonRow[];
+      requests?: JsonRow[];
+      hooks?: JsonRow[];
+      round?: JsonRow;
+    };
+    return {
+      round: mapRound(raw.round ?? raw),
+      drafts: (raw.drafts ?? []).map((row) => mapDraft(row)),
+      choices: (raw.choices ?? []).map((row) => mapChoice(row)),
+      requests: (raw.requests ?? []).map((row) => mapMatchRequest(row)),
+      hooks: (raw.hooks ?? []).map((row) => mapSocialHook(row))
+    };
+  }
+
+  async settleMatchRound(roundId: string, decisions: FinalRoomDecision[]): Promise<string[]> {
+    const { data, error } = await this.client.rpc("settle_match_round", {
+      p_round_id: roundId,
+      p_decisions: decisions
+    });
+    if (error) this.throwError("结算匹配轮次", error);
+    return (data ?? []).map(String);
+  }
+
+  async listSuitableOpenRooms(userId: string, limit = 3): Promise<MatchRoom[]> {
+    const { data, error } = await this.client.rpc("list_suitable_open_rooms", {
+      p_user_id: userId,
+      p_limit: Math.min(Math.max(limit, 1), 10)
+    });
+    if (error) this.throwError("读取开放局", error);
+    return ((data ?? []) as unknown[]).map((row) => matchRoomSchema.parse(row));
+  }
+
+  async joinOpenRoom(requestId: string, offerId: string, sourceVersion: number): Promise<MatchRoom> {
+    const { data, error } = await this.client.rpc("join_open_match_room", {
+      p_request_id: requestId,
+      p_offer_id: offerId,
+      p_source_version: sourceVersion
+    });
+    if (error) this.throwError("加入开放局", error);
+    return matchRoomSchema.parse(data);
+  }
+
   async listMatchCandidates(limit = 50): Promise<MatchCandidate[]> {
     const { data, error } = await this.client.rpc("list_match_candidates", { p_limit: Math.min(limit, 100) });
     if (error) this.throwError("读取匹配候选人", error);
@@ -510,12 +945,14 @@ export class SupabaseStore implements DataStore {
       request: JsonRow;
       user_model: JsonRow;
       matching_narrative?: unknown;
+      social_hooks?: JsonRow[];
     }>).map((row) => ({
       request: mapMatchRequest(row.request),
       userModel: mapUserModel(row.user_model),
       matchingNarrative: typeof row.matching_narrative === "string"
         ? row.matching_narrative
-        : undefined
+        : undefined,
+      socialHooks: (row.social_hooks ?? []).map((hook) => mapSocialHook(hook))
     }));
   }
 
@@ -546,6 +983,7 @@ export class SupabaseStore implements DataStore {
       .from("room_members")
       .select("room_id,created_at")
       .eq("user_id", userId)
+      .neq("participation_status", "withdrawn")
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -562,6 +1000,83 @@ export class SupabaseStore implements DataStore {
     return matchRoomSchema.parse(data);
   }
 
+  async leaveRoom(roomId: string, userId: string, reason?: string): Promise<MatchRoom> {
+    const { data, error } = await this.client.rpc("withdraw_room_member_with_reason", {
+      p_room_id: roomId,
+      p_user_id: userId,
+      p_reason: reason ?? null
+    });
+    if (error) this.throwError("退出房间", error);
+    return matchRoomSchema.parse(data);
+  }
+
+  async getRoomIntro(roomId: string, userId: string): Promise<string | null> {
+    const { data, error } = await this.client
+      .from("room_member_intros")
+      .select("intro_text")
+      .eq("room_id", roomId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error) this.throwError("读取房间介绍", error);
+    return data ? String(data.intro_text) : null;
+  }
+
+  async saveRoomIntro(roomId: string, userId: string, introText: string, hookIds: string[]): Promise<void> {
+    const { error } = await this.client.rpc("save_room_member_intro", {
+      p_room_id: roomId,
+      p_user_id: userId,
+      p_intro_text: introText,
+      p_hook_ids: hookIds
+    });
+    if (error) this.throwError("保存房间成员介绍", error);
+  }
+
+  async listPendingRoomChangeNotifications(limit = 100): Promise<RoomChangeNotification[]> {
+    const { data, error } = await this.client.rpc("list_pending_room_change_notifications", {
+      p_limit: Math.min(Math.max(limit, 1), 500)
+    });
+    if (error) this.throwError("读取房间变化通知", error);
+    return ((data ?? []) as JsonRow[]).map((row) => ({
+      eventId: String(row.event_id ?? row.eventId),
+      roomId: String(row.room_id ?? row.roomId),
+      userId: String(row.user_id ?? row.userId),
+      changeType: String(row.change_type ?? row.changeType),
+      payload: (row.payload ?? {}) as Record<string, unknown>,
+      idempotencyKey: String(row.idempotency_key ?? row.idempotencyKey)
+    }));
+  }
+
+  async markRoomChangeNotificationDelivered(eventId: string, userId: string): Promise<void> {
+    const { error } = await this.client.rpc("mark_room_change_notification_delivered", {
+      p_event_id: eventId,
+      p_user_id: userId
+    });
+    if (error) this.throwError("标记房间变化通知", error);
+  }
+
+  async listPendingDraftChangeNotifications(limit = 100): Promise<DraftChangeNotification[]> {
+    const { data, error } = await this.client.rpc("list_pending_draft_change_notifications", {
+      p_limit: Math.min(Math.max(limit, 1), 500)
+    });
+    if (error) this.throwError("读取候选局变化通知", error);
+    return ((data ?? []) as JsonRow[]).map((row) => ({
+      eventId: String(row.event_id ?? row.eventId),
+      draftId: String(row.draft_id ?? row.draftId),
+      userId: String(row.user_id ?? row.userId),
+      changeType: String(row.change_type ?? row.changeType),
+      payload: (row.payload ?? {}) as Record<string, unknown>,
+      idempotencyKey: String(row.idempotency_key ?? row.idempotencyKey)
+    }));
+  }
+
+  async markDraftChangeNotificationDelivered(eventId: string, userId: string): Promise<void> {
+    const { error } = await this.client.rpc("mark_draft_change_notification_delivered", {
+      p_event_id: eventId,
+      p_user_id: userId
+    });
+    if (error) this.throwError("标记候选局变化通知", error);
+  }
+
   async completeRoom(roomId: string): Promise<MatchRoom> {
     const { data, error } = await this.client.rpc("complete_match_room", { p_room_id: roomId });
     if (error) this.throwError("完成活动", error);
@@ -576,13 +1091,23 @@ export class SupabaseStore implements DataStore {
     return String(data);
   }
 
+  async enqueueWechatOutboundMessage(message: Message): Promise<void> {
+    const { error } = await this.client.rpc("enqueue_wechat_outbound_message", {
+      p_user_id: message.userId,
+      p_message_id: message.id,
+      p_content: message.content
+    });
+    if (error) this.throwError("创建微信主动消息", error);
+  }
+
   async enqueueJob(input: EnqueueJobInput): Promise<LlmJob> {
     const { data, error } = await this.client.rpc("enqueue_llm_job", {
       p_job_type: input.type,
       p_payload: input.payload,
       p_idempotency_key: input.idempotencyKey,
       p_max_attempts: input.maxAttempts ?? 3,
-      p_partition_key: input.partitionKey ?? null
+      p_partition_key: input.partitionKey ?? null,
+      p_run_at: input.runAt ?? null
     });
     if (error) this.throwError("创建智能任务", error);
     return mapJob(unwrapRpcData(data) as JsonRow);

@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { adventurexWelcomeContent } from "@tomeet/contracts";
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -62,6 +63,122 @@ describe("Supabase migration", () => {
     `);
     expect(memoryTables.rows).toHaveLength(2);
   });
+
+  it("consolidates duplicate operational records while preserving compatibility views", async () => {
+    const relations = await db.query<{ relname: string; relkind: string }>(`
+      select relname, relkind
+      from pg_class
+      where oid in (
+        'public.users'::regclass,
+        'public.user_models'::regclass,
+        'public.adventurex_onboarding_states'::regclass,
+        'public.channel_message_deliveries'::regclass,
+        'public.wechat_message_receipts'::regclass,
+        'public.wechat_outbound_messages'::regclass
+      )
+      order by relname
+    `);
+    expect(Object.fromEntries(relations.rows.map((row) => [row.relname, row.relkind])))
+      .toEqual({
+        adventurex_onboarding_states: "v",
+        channel_message_deliveries: "r",
+        user_models: "v",
+        users: "r",
+        wechat_message_receipts: "v",
+        wechat_outbound_messages: "v"
+      });
+
+    const columns = await db.query<{ table_name: string; column_name: string }>(`
+      select table_name, column_name
+      from information_schema.columns
+      where table_schema = 'public'
+        and (
+          (table_name = 'users' and column_name in (
+            'vibe_narrative',
+            'user_model_version',
+            'adventurex_stage',
+            'adventurex_welcome_sent_at'
+          ))
+          or (table_name = 'messages' and column_name in (
+            'source_channel',
+            'reply_to_message_id'
+          ))
+        )
+    `);
+    expect(new Set(columns.rows.map((row) => `${row.table_name}.${row.column_name}`)))
+      .toEqual(new Set([
+        "users.vibe_narrative",
+        "users.user_model_version",
+        "users.adventurex_stage",
+        "users.adventurex_welcome_sent_at",
+        "messages.source_channel",
+        "messages.reply_to_message_id"
+      ]));
+  });
+
+  it("backfills existing iLink connections into the shared channel identity map", async () => {
+    const legacyDb = new PGlite();
+    try {
+      await legacyDb.exec(`
+        create role anon;
+        create role authenticated;
+        create role service_role bypassrls;
+        create schema auth;
+        create table auth.users (
+          id uuid primary key,
+          email text,
+          raw_user_meta_data jsonb
+        );
+        create schema storage;
+        create table storage.buckets (
+          id text primary key,
+          name text not null,
+          public boolean not null,
+          file_size_limit bigint,
+          allowed_mime_types text[]
+        );
+      `);
+      const migrationsDirectory = resolve(process.cwd(), "../../supabase/migrations");
+      const migrationFiles = (await readdir(migrationsDirectory))
+        .filter((fileName) => fileName.endsWith(".sql"))
+        .sort();
+      const consolidationMigration = "20260725220000_shared_channel_data_model.sql";
+      for (const fileName of migrationFiles.filter((name) => name < consolidationMigration)) {
+        const migration = (await readFile(resolve(migrationsDirectory, fileName), "utf8"))
+          .replace("create extension if not exists pgcrypto;", "");
+        await legacyDb.exec(migration);
+      }
+
+      const userId = "26000000-0000-4000-8000-000000000001";
+      await legacyDb.query("select ensure_tomeet_user($1::uuid, 'Existing iLink User')", [userId]);
+      await legacyDb.query(`
+        insert into wechat_ilink_connections (
+          user_id, ilink_bot_id, owner_ilink_user_id, bot_token_ciphertext, base_url
+        ) values (
+          $1::uuid, 'existing-ilink-bot', 'existing-ilink-owner', repeat('z',32),
+          'https://ilink.example.com'
+        )
+      `, [userId]);
+
+      const migration = (await readFile(
+        resolve(migrationsDirectory, consolidationMigration),
+        "utf8"
+      )).replace("create extension if not exists pgcrypto;", "");
+      await legacyDb.exec(migration);
+      const identity = await legacyDb.query<{ provider: string; external_user_id: string; user_id: string }>(`
+        select provider, external_user_id, user_id
+        from channel_identities
+        where provider = 'wechat' and external_user_id = 'existing-ilink-owner'
+      `);
+      expect(identity.rows).toEqual([{
+        provider: "wechat",
+        external_user_id: "existing-ilink-owner",
+        user_id: userId
+      }]);
+    } finally {
+      await legacyDb.close();
+    }
+  }, 30_000);
 
   it("keeps WeChat identities server-managed and one-to-one", async () => {
     const table = await db.query<{ relrowsecurity: boolean }>(`
@@ -126,7 +243,7 @@ describe("Supabase migration", () => {
       where oid in (
         'public.wechat_connection_sessions'::regclass,
         'public.wechat_ilink_connections'::regclass,
-        'public.wechat_message_receipts'::regclass
+        'public.channel_message_deliveries'::regclass
       )
       order by relname
     `);
@@ -148,7 +265,7 @@ describe("Supabase migration", () => {
         and table_name in (
           'wechat_connection_sessions',
           'wechat_ilink_connections',
-          'wechat_message_receipts'
+          'channel_message_deliveries'
         )
         and grantee in ('PUBLIC', 'anon', 'authenticated')
     `);
@@ -507,6 +624,483 @@ describe("Supabase migration", () => {
       "select claim_llm_job('fifo-worker-3')"
     );
     expect(third.rows[0]?.claim_llm_job.partition_key).toBe("user:a");
+  });
+
+  it("supports the AdventureX welcome, sourced hooks, choices, and atomic settlement", async () => {
+    const userIds = [
+      "71000000-0000-4000-8000-000000000001",
+      "71000000-0000-4000-8000-000000000002",
+      "71000000-0000-4000-8000-000000000003"
+    ];
+    for (const [index, userId] of userIds.entries()) {
+      await db.query("select ensure_tomeet_user($1::uuid, $2)", [userId, `AdventureX用户${index + 1}`]);
+    }
+    await db.query("select start_adventurex_onboarding($1::uuid)", [userIds[0]]);
+    await db.query("select start_adventurex_onboarding($1::uuid)", [userIds[0]]);
+    const welcome = await db.query<{ count: number; content: string }>(`
+      select count(*)::integer as count, min(content) as content from messages
+      where user_id = $1::uuid and idempotency_key = 'adventurex-welcome:zh:' || $1::text
+    `, [userIds[0]]);
+    expect(welcome.rows[0]?.count).toBe(1);
+    expect(welcome.rows[0]?.content).toBe(adventurexWelcomeContent("zh"));
+    const updatedOnboarding = await db.query<{
+      preferred_language: string;
+      boundary_prompted_at: string | null;
+    }>(`
+      select preferred_language, boundary_prompted_at
+      from jsonb_populate_record(
+        null::adventurex_onboarding_states,
+        update_adventurex_onboarding_state($1::uuid,null,null,'en',true)
+      )
+    `, [userIds[0]]);
+    expect(updatedOnboarding.rows[0]?.preferred_language).toBe("en");
+    expect(updatedOnboarding.rows[0]?.boundary_prompted_at).not.toBeNull();
+
+    const englishUserId = "71000000-0000-4000-8000-000000000004";
+    await db.query("select ensure_tomeet_user($1::uuid, 'English User')", [englishUserId]);
+    await db.query("select start_adventurex_onboarding($1::uuid,'en')", [englishUserId]);
+    await db.query("select start_adventurex_onboarding($1::uuid,'en')", [englishUserId]);
+    const englishWelcome = await db.query<{ count: number; content: string; preferred_language: string }>(`
+      select count(m.*)::integer as count, min(m.content) as content, min(s.preferred_language) as preferred_language
+      from adventurex_onboarding_states s
+      left join messages m on m.user_id = s.user_id
+        and m.idempotency_key = 'adventurex-welcome:en:' || s.user_id::text
+      where s.user_id = $1::uuid
+    `, [englishUserId]);
+    expect(englishWelcome.rows[0]).toEqual({
+      count: 1,
+      content: adventurexWelcomeContent("en"),
+      preferred_language: "en"
+    });
+
+    const existingConversationUserId = "71000000-0000-4000-8000-000000000005";
+    await db.query("select ensure_tomeet_user($1::uuid, 'Existing Conversation')", [existingConversationUserId]);
+    await db.query("select append_agent_message($1::uuid,'user','已经聊过','existing-conversation')", [existingConversationUserId]);
+    const existingStart = await db.query<{ start_adventurex_onboarding: { message: unknown } }>(
+      "select start_adventurex_onboarding($1::uuid,'zh')",
+      [existingConversationUserId]
+    );
+    expect(existingStart.rows[0]?.start_adventurex_onboarding.message).toBeNull();
+
+    const requestIds: string[] = [];
+    for (const [index, userId] of userIds.entries()) {
+      const message = await db.query<{ append_agent_message: { id: string } }>(
+        "select append_agent_message($1::uuid,'user',$2,$3)",
+        [userId, `我明确完成过第${index + 1}个项目`, `hook-source-${index}`]
+      );
+      await db.query("select * from save_social_hooks($1::uuid,$2::jsonb)", [
+        userId,
+        JSON.stringify([{
+          hookText: `明确完成过第${index + 1}个项目`,
+          evidenceMessageIds: [message.rows[0]!.append_agent_message.id]
+        }])
+      ]);
+      const request = await db.query<{ create_match_request: { id: string } }>(
+        "select create_match_request($1::uuid,$2::jsonb)",
+        [userId, JSON.stringify({ rawText: "想参加现场活动" })]
+      );
+      requestIds.push(request.rows[0]!.create_match_request.id);
+    }
+    await db.query("select set_match_request_interest($1::uuid,'waiting',true,false)", [requestIds[0]]);
+    const round = await db.query<{ create_or_get_match_round: { id: string } }>(
+      "select create_or_get_match_round('adventurex-migration-round',now())"
+    );
+    const roundId = round.rows[0]!.create_or_get_match_round.id;
+    for (const requestId of requestIds) {
+      await db.query("select add_request_to_match_round($1::uuid,$2::uuid)", [roundId, requestId]);
+    }
+    const proposal = {
+      drafts: [{
+        tempDraftId: "draft-a",
+        offlineGameId: "game-story-table",
+        targetPlayers: 3,
+        candidateRequestIds: requestIds,
+        rationale: "每个人都能轮流进入故事交换"
+      }],
+      userOptions: requestIds.map((requestId) => ({ requestId, tempDraftIds: ["draft-a"] }))
+    };
+    const offers = requestIds.map((requestId) => ({
+      requestId,
+      sourceType: "draft",
+      tempDraftId: "draft-a",
+      sourceVersion: 0,
+      optionNumber: 1,
+      offlineGameId: "game-story-table",
+      previewText: "**1｜故事交换桌**\n你可能遇见做过现场项目的人。",
+      hooks: []
+    }));
+    await db.query("select * from save_match_round_proposals($1::uuid,$2::jsonb,$3::jsonb,now()+interval '90 seconds')", [
+      roundId,
+      JSON.stringify(proposal),
+      JSON.stringify(offers)
+    ]);
+    for (const requestId of requestIds) {
+      await db.query("select * from save_match_choices($1::uuid,1::smallint,array[1]::smallint[],'{}'::uuid[],'1'::text)", [requestId]);
+    }
+    const state = await db.query<{ get_match_round_settlement_state: { drafts: Array<{ id: string }> } }>(
+      "select get_match_round_settlement_state($1::uuid)",
+      [roundId]
+    );
+    const draftId = state.rows[0]!.get_match_round_settlement_state.drafts[0]!.id;
+    const settled = await db.query<{ settle_match_round: string }>(
+      "select * from settle_match_round($1::uuid,$2::jsonb)",
+      [roundId, JSON.stringify([{
+        draftId,
+        offlineGameId: "game-story-table",
+        requestIds,
+        memberIds: userIds,
+        targetPlayers: 3,
+        summary: "AdventureX migration settle"
+      }])]
+    );
+    expect(settled.rows).toHaveLength(1);
+    const room = await db.query<{ get_match_room: { recruitmentStatus: string; members: unknown[] } }>(
+      "select get_match_room($1::uuid)",
+      [settled.rows[0]!.settle_match_round]
+    );
+    expect(room.rows[0]?.get_match_room.recruitmentStatus).toBe("full");
+    expect(room.rows[0]?.get_match_room.members).toHaveLength(3);
+
+    const roomId = settled.rows[0]!.settle_match_round;
+    await expect(db.query(
+      "select withdraw_room_member_with_reason($1::uuid,$2::uuid,null)",
+      [roomId, userIds[0]]
+    )).rejects.toThrow("理由");
+    await db.query(
+      "select withdraw_room_member_with_reason($1::uuid,$2::uuid,$3)",
+      [roomId, userIds[0], "临时有事"]
+    );
+    const authorizedExit = await db.query<{
+      withdrawal_reason: string;
+      status: string;
+      phase: string;
+      proactive_push_enabled: boolean;
+      room_id: string | null;
+      active_round_id: string | null;
+      options_expires_at: string | null;
+    }>(`
+      select rm.withdrawal_reason, mr.status, mr.phase, mr.proactive_push_enabled,
+        mr.room_id, mr.active_round_id, mr.options_expires_at
+      from room_members rm
+      join match_requests mr on mr.user_id = rm.user_id
+      where rm.room_id = $1::uuid and rm.user_id = $2::uuid
+      order by mr.created_at desc
+      limit 1
+    `, [roomId, userIds[0]]);
+    expect(authorizedExit.rows[0]).toEqual({
+      withdrawal_reason: "临时有事",
+      status: "matching",
+      phase: "watching",
+      proactive_push_enabled: true,
+      room_id: null,
+      active_round_id: null,
+      options_expires_at: null
+    });
+    const repeatedRoom = await db.query<{ count: number }>(`
+      select count(*)::integer as count
+      from list_suitable_open_rooms($1::uuid,10) room
+      where room->>'roomId' = $2
+    `, [userIds[0], roomId]);
+    expect(repeatedRoom.rows[0]?.count).toBe(0);
+
+    await db.query(
+      "select withdraw_room_member_with_reason($1::uuid,$2::uuid,$3)",
+      [roomId, userIds[1], "想先休息一下"]
+    );
+    const ordinaryExit = await db.query<{ status: string; phase: string }>(
+      "select status,phase from match_requests where id=$1::uuid",
+      [requestIds[1]]
+    );
+    expect(ordinaryExit.rows[0]).toEqual({ status: "cancelled", phase: "waiting" });
+    const eventPayloads = await db.query<{ payload: Record<string, unknown> }>(
+      "select payload from room_change_events where room_id=$1::uuid and change_type='member_withdrawn'",
+      [roomId]
+    );
+    expect(JSON.stringify(eventPayloads.rows)).not.toContain("临时有事");
+
+    const functionGrants = await db.query<{ old_execute: boolean; new_execute: boolean }>(`
+      select
+        has_function_privilege('service_role','public.withdraw_room_member(uuid,uuid)','execute') as old_execute,
+        has_function_privilege('service_role','public.withdraw_room_member_with_reason(uuid,uuid,text)','execute') as new_execute
+    `);
+    expect(functionGrants.rows[0]).toEqual({ old_execute: false, new_execute: true });
+  });
+
+  it("expires unmatched AdventureX requests and rematches only after explicit user action", async () => {
+    const userId = "72000000-0000-4000-8000-000000000001";
+    await db.query("select ensure_tomeet_user($1::uuid, '超时用户')", [userId]);
+    const request = await db.query<{ create_match_request: { id: string } }>(
+      "select create_match_request($1::uuid,$2::jsonb)",
+      [userId, JSON.stringify({ rawText: "想认识人" })]
+    );
+    const requestId = request.rows[0]!.create_match_request.id;
+    const round = await db.query<{ create_or_get_match_round: { id: string } }>(
+      "select create_or_get_match_round('adventurex-expired-round',now())"
+    );
+    const roundId = round.rows[0]!.create_or_get_match_round.id;
+    await db.query("select add_request_to_match_round($1::uuid,$2::uuid)", [roundId, requestId]);
+    await db.query("select * from settle_match_round($1::uuid,'[]'::jsonb)", [roundId]);
+    const expired = await db.query<{ status: string; active_round_id: string | null }>(
+      "select status,active_round_id from match_requests where id=$1::uuid",
+      [requestId]
+    );
+    expect(expired.rows[0]).toEqual({ status: "expired", active_round_id: null });
+    const rematched = await db.query<{ restart_match_request: { id: string; status: string } }>(
+      "select restart_match_request($1::uuid)",
+      [requestId]
+    );
+    expect(rematched.rows[0]!.restart_match_request).toMatchObject({ status: "matching" });
+    expect(rematched.rows[0]!.restart_match_request.id).not.toBe(requestId);
+  });
+
+  it("prioritizes active waiters, recalls watchers, and keeps proactive interest after an unmatched round", async () => {
+    const waitingUserId = "73000000-0000-4000-8000-000000000001";
+    const watchingUserId = "73000000-0000-4000-8000-000000000002";
+    await db.query("select ensure_tomeet_user($1::uuid, '当前等待用户')", [waitingUserId]);
+    await db.query("select ensure_tomeet_user($1::uuid, '主动推送用户')", [watchingUserId]);
+    const waiting = await db.query<{ create_match_request: { id: string } }>(
+      "select create_match_request($1::uuid,$2::jsonb)",
+      [waitingUserId, JSON.stringify({ rawText: "现在想匹配" })]
+    );
+    const watching = await db.query<{ create_match_request: { id: string } }>(
+      "select create_match_request($1::uuid,$2::jsonb)",
+      [watchingUserId, JSON.stringify({ rawText: "有合适的再告诉我" })]
+    );
+    const waitingRequestId = waiting.rows[0]!.create_match_request.id;
+    const watchingRequestId = watching.rows[0]!.create_match_request.id;
+    await db.query(
+      "select set_match_request_interest($1::uuid,'watching',true,true)",
+      [watchingRequestId]
+    );
+    const round = await db.query<{ create_or_get_match_round: { id: string } }>(
+      "select create_or_get_match_round('adventurex-watching-recall',now())"
+    );
+    const roundId = round.rows[0]!.create_or_get_match_round.id;
+    await db.query("select add_request_to_match_round($1::uuid,$2::uuid)", [roundId, waitingRequestId]);
+    const candidates = await db.query<{ list_match_round_candidates: { request: { id: string } } }>(
+      "select * from list_match_round_candidates($1::uuid)",
+      [roundId]
+    );
+    const relevantCandidateIds = new Set([waitingRequestId, watchingRequestId]);
+    expect(candidates.rows
+      .map((row) => row.list_match_round_candidates.request.id)
+      .filter((requestId) => relevantCandidateIds.has(requestId))).toEqual([
+      waitingRequestId,
+      watchingRequestId
+    ]);
+
+    await db.query("select add_request_to_match_round($1::uuid,$2::uuid)", [roundId, watchingRequestId]);
+    await db.query("select * from settle_match_round($1::uuid,'[]'::jsonb)", [roundId]);
+    const settled = await db.query<{
+      id: string;
+      status: string;
+      phase: string;
+      proactive_push_enabled: boolean;
+    }>(`
+      select id,status,phase,proactive_push_enabled
+      from match_requests where id in ($1::uuid,$2::uuid) order by id
+    `, [waitingRequestId, watchingRequestId]);
+    expect(settled.rows.find((row) => row.id === waitingRequestId)).toMatchObject({
+      status: "expired",
+      phase: "waiting",
+      proactive_push_enabled: false
+    });
+    expect(settled.rows.find((row) => row.id === watchingRequestId)).toMatchObject({
+      status: "matching",
+      phase: "watching",
+      proactive_push_enabled: true
+    });
+  });
+
+  it("keeps an accepting unmatched user eligible for consent and prioritizes them among watchers", async () => {
+    const participantUserIds = [
+      "75000000-0000-4000-8000-000000000001",
+      "75000000-0000-4000-8000-000000000002",
+      "75000000-0000-4000-8000-000000000003"
+    ];
+    const requestIds: string[] = [];
+    for (const [index, userId] of participantUserIds.entries()) {
+      await db.query("select ensure_tomeet_user($1::uuid,$2)", [userId, `确认候选${index + 1}`]);
+      const request = await db.query<{ create_match_request: { id: string } }>(
+        "select create_match_request($1::uuid,$2::jsonb)",
+        [userId, JSON.stringify({ rawText: "愿意参加候选局" })]
+      );
+      requestIds.push(request.rows[0]!.create_match_request.id);
+    }
+    const round = await db.query<{ create_or_get_match_round: { id: string } }>(
+      "select create_or_get_match_round('adventurex-confirmation-incomplete',now())"
+    );
+    const roundId = round.rows[0]!.create_or_get_match_round.id;
+    for (const requestId of requestIds) {
+      await db.query("select add_request_to_match_round($1::uuid,$2::uuid)", [roundId, requestId]);
+    }
+    const proposal = {
+      drafts: [{
+        tempDraftId: "confirmation-incomplete-draft",
+        offlineGameId: "game-story-table",
+        targetPlayers: 3,
+        candidateRequestIds: requestIds,
+        rationale: "等待多人确认"
+      }],
+      userOptions: requestIds.map((requestId) => ({ requestId, tempDraftIds: ["confirmation-incomplete-draft"] }))
+    };
+    const offers = requestIds.map((requestId) => ({
+      requestId,
+      sourceType: "draft",
+      tempDraftId: "confirmation-incomplete-draft",
+      sourceVersion: 0,
+      optionNumber: 1,
+      offlineGameId: "game-story-table",
+      previewText: "等待候选确认",
+      hooks: []
+    }));
+    await db.query(
+      "select * from save_match_round_proposals($1::uuid,$2::jsonb,$3::jsonb,now()+interval '90 seconds')",
+      [roundId, JSON.stringify(proposal), JSON.stringify(offers)]
+    );
+    await db.query(
+      "select * from save_match_choices($1::uuid,1::smallint,array[1]::smallint[],'{}'::uuid[],'愿意参加'::text)",
+      [requestIds[0]]
+    );
+    await db.query("select * from settle_match_round($1::uuid,'[]'::jsonb)", [roundId]);
+
+    const accepting = await db.query<{ status: string; phase: string; proactive_push_enabled: boolean }>(
+      "select status,phase,proactive_push_enabled from match_requests where id=$1::uuid",
+      [requestIds[0]]
+    );
+    expect(accepting.rows[0]).toEqual({
+      status: "matching",
+      phase: "push_consent",
+      proactive_push_enabled: false
+    });
+    await db.query("select set_match_request_interest($1::uuid,'watching',true,true)", [requestIds[0]]);
+
+    const normalWatcherUserId = "75000000-0000-4000-8000-000000000004";
+    const activeUserId = "75000000-0000-4000-8000-000000000005";
+    await db.query("select ensure_tomeet_user($1::uuid,'普通留意用户')", [normalWatcherUserId]);
+    await db.query("select ensure_tomeet_user($1::uuid,'当前等待用户')", [activeUserId]);
+    const normalWatcher = await db.query<{ create_match_request: { id: string } }>(
+      "select create_match_request($1::uuid,$2::jsonb)",
+      [normalWatcherUserId, JSON.stringify({ rawText: "有合适的再告诉我" })]
+    );
+    const active = await db.query<{ create_match_request: { id: string } }>(
+      "select create_match_request($1::uuid,$2::jsonb)",
+      [activeUserId, JSON.stringify({ rawText: "现在想匹配" })]
+    );
+    await db.query(
+      "select set_match_request_interest($1::uuid,'watching',true,true)",
+      [normalWatcher.rows[0]!.create_match_request.id]
+    );
+    const nextRound = await db.query<{ create_or_get_match_round: { id: string } }>(
+      "select create_or_get_match_round('adventurex-confirmation-priority',now())"
+    );
+    const nextRoundId = nextRound.rows[0]!.create_or_get_match_round.id;
+    await db.query("select add_request_to_match_round($1::uuid,$2::uuid)", [
+      nextRoundId,
+      active.rows[0]!.create_match_request.id
+    ]);
+    const candidates = await db.query<{
+      list_match_round_candidates: { request: { id: string }; matching_priority: string };
+    }>("select * from list_match_round_candidates($1::uuid)", [nextRoundId]);
+
+    const relevantRequestIds = new Set([
+      active.rows[0]!.create_match_request.id,
+      requestIds[0]!,
+      normalWatcher.rows[0]!.create_match_request.id
+    ]);
+    expect(candidates.rows.map((row) => ({
+      requestId: row.list_match_round_candidates.request.id,
+      priority: row.list_match_round_candidates.matching_priority
+    })).filter((candidate) => relevantRequestIds.has(candidate.requestId))).toEqual([
+      { requestId: active.rows[0]!.create_match_request.id, priority: "active_waiting" },
+      { requestId: requestIds[0], priority: "confirmation_follow_up" },
+      { requestId: normalWatcher.rows[0]!.create_match_request.id, priority: "watching" }
+    ]);
+  });
+
+  it("isolates owner virtual users and supports retryable WeChat proactive delivery", async () => {
+    const ownerUserId = "74000000-0000-4000-8000-000000000001";
+    const realUserId = "74000000-0000-4000-8000-000000000002";
+    await db.query("select ensure_tomeet_user($1::uuid, '测试池所有者')", [ownerUserId]);
+    await db.query("select ensure_tomeet_user($1::uuid, '真实用户')", [realUserId]);
+    const configured = await db.query<{
+      configure_adventurex_test_pool: { enabled: boolean; provisionedUserCount: number };
+    }>("select configure_adventurex_test_pool($1::uuid,true,5)", [ownerUserId]);
+    expect(configured.rows[0]?.configure_adventurex_test_pool).toMatchObject({
+      enabled: true,
+      provisionedUserCount: 5
+    });
+    const virtualRequests = await db.query<{ prepare_adventurex_test_pool: { id: string } }>(
+      "select * from prepare_adventurex_test_pool($1::uuid)",
+      [ownerUserId]
+    );
+    expect(virtualRequests.rows).toHaveLength(5);
+    const ownerRequest = await db.query<{ create_match_request: { id: string } }>(
+      "select create_match_request($1::uuid,$2::jsonb)",
+      [ownerUserId, JSON.stringify({ rawText: "测试匹配" })]
+    );
+    const testRound = await db.query<{ create_or_get_match_round: { id: string } }>(
+      "select create_or_get_match_round($1,now())",
+      [`adventurex-test:${ownerUserId}:migration`]
+    );
+    const testRoundId = testRound.rows[0]!.create_or_get_match_round.id;
+    await db.query("select add_request_to_match_round($1::uuid,$2::uuid)", [
+      testRoundId,
+      ownerRequest.rows[0]!.create_match_request.id
+    ]);
+    for (const row of virtualRequests.rows) {
+      await db.query("select add_request_to_match_round($1::uuid,$2::uuid)", [
+        testRoundId,
+        row.prepare_adventurex_test_pool.id
+      ]);
+    }
+    const testCandidates = await db.query<{ count: number }>(
+      "select count(*)::integer as count from list_match_round_candidates($1::uuid)",
+      [testRoundId]
+    );
+    expect(testCandidates.rows[0]?.count).toBe(6);
+
+    await db.query(`
+      insert into wechat_ilink_connections (
+        user_id,ilink_bot_id,owner_ilink_user_id,bot_token_ciphertext,base_url
+      ) values ($1::uuid,'bot-outbound-migration','owner-outbound-migration',repeat('x',32),'https://ilink.example.com')
+    `, [realUserId]);
+    const message = await db.query<{ append_agent_message: { id: string } }>(
+      "select append_agent_message($1::uuid,'assistant','主动候选提醒','outbound-migration-message','system',null::uuid)",
+      [realUserId]
+    );
+    await db.query("select enqueue_wechat_outbound_message($1::uuid,$2::uuid,'主动候选提醒')", [
+      realUserId,
+      message.rows[0]!.append_agent_message.id
+    ]);
+    const claimed = await db.query<{
+      claim_wechat_outbound_messages: { id: string; content: string; attempts: number };
+    }>("select * from claim_wechat_outbound_messages('migration-worker',20)");
+    expect(claimed.rows).toHaveLength(1);
+    expect(claimed.rows[0]?.claim_wechat_outbound_messages).toMatchObject({
+      content: "主动候选提醒",
+      attempts: 1
+    });
+    const outboundId = claimed.rows[0]!.claim_wechat_outbound_messages.id;
+    await db.query("select complete_wechat_outbound_message($1::uuid,'migration-worker','temporary failure')", [outboundId]);
+    const retry = await db.query<{ status: string; attempts: number; last_error: string }>(
+      "select status,attempts,last_error from wechat_outbound_messages where id=$1::uuid",
+      [outboundId]
+    );
+    expect(retry.rows[0]).toMatchObject({
+      status: "retry",
+      attempts: 1,
+      last_error: "temporary failure"
+    });
+
+    const webMessage = await db.query<{ append_agent_message: { id: string } }>(
+      "select append_agent_message($1::uuid,'assistant','只在网页显示','web-only-message','web',null::uuid)",
+      [realUserId]
+    );
+    await expect(db.query(
+      "select enqueue_wechat_outbound_message($1::uuid,$2::uuid,'只在网页显示')",
+      [realUserId, webMessage.rows[0]!.append_agent_message.id]
+    )).rejects.toThrow("Web 对话消息不能投递到微信");
   });
 
   it("keeps memory tables and mutation RPCs unavailable to public roles", async () => {

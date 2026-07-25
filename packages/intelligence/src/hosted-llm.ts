@@ -6,13 +6,24 @@ import type {
   MemoryExtractionInput,
   MemoryLookup
 } from "@tomeet/agent-core";
+import { extractRoomExitReason } from "@tomeet/agent-core";
 import {
+  agentProductMessageSchema,
+  adventurexImageUnderstandingSchema,
+  groupActivityJudgementSchema,
   memoryExtractionResultSchema,
   memoryProfileDraftSchema,
   matchDecisionSchema,
+  matchRoundProposalSchema,
+  socialHookDraftSchema,
   type MemoryExtractionResult,
+  type AdventurexLanguage,
+  type AgentProductEvent,
+  type AgentProductMessage,
   type MemoryProfileDraft,
   type MatchDecision,
+  type GroupActivityJudgement,
+  type MatchRoundProposal,
   type Message,
   type OfflineGame,
   type PostEventFeedback,
@@ -39,6 +50,23 @@ const conversationPlanSchema = z.object({
   currentIntent: z.record(z.unknown()).optional(),
   actions: z.array(z.discriminatedUnion("type", [
     z.object({ type: z.literal("start_match"), intent: z.record(z.unknown()) }),
+    z.object({
+      type: z.literal("select_match_options"),
+      preferredOptionNumber: z.union([z.literal(1), z.literal(2), z.literal(3)]).nullable(),
+      acceptedOptionNumbers: z.array(z.union([z.literal(1), z.literal(2), z.literal(3)])).min(1).max(3),
+      requiredHookIds: z.array(z.string()).max(3),
+      rawText: z.string().min(1).max(2_000)
+    }),
+    z.object({ type: z.literal("refresh_match_options") }),
+    z.object({ type: z.literal("cancel_match") }),
+    z.object({ type: z.literal("restart_match"), intent: z.record(z.unknown()) }),
+    z.object({ type: z.literal("enable_match_push") }),
+    z.object({ type: z.literal("disable_match_push") }),
+    z.object({ type: z.literal("activate_match") }),
+    z.object({
+      type: z.literal("leave_room"),
+      reason: z.string().trim().min(1).max(500).optional()
+    }),
     z.object({ type: z.literal("confirm_room") }),
     z.object({ type: z.literal("complete_room") }),
     z.object({
@@ -52,7 +80,16 @@ const conversationPlanSchema = z.object({
   memoryPlan: z.object({
     queries: z.array(z.string().trim().min(1).max(200)).max(2),
     reviewSuggested: z.boolean()
-  })
+  }),
+  socialHooks: z.array(socialHookDraftSchema).max(4),
+  onboardingTransition: z.enum([
+    "none",
+    "image_declined",
+    "engaged",
+    "boundary_prompted",
+    "language_zh",
+    "language_en"
+  ])
 });
 
 const searchPlanSchema = z.discriminatedUnion("required", [
@@ -93,6 +130,27 @@ const multimodalInsightSchema = z.object({
   summary: z.string().min(1).max(4_000),
   recentImpression: z.string().min(1).max(4_000)
 }).passthrough();
+
+const leftFrameTitles = {
+  match_options: "TOMEET 组局邀请",
+  room_intro: "TOMEET 成局确认函"
+} as const;
+
+function assertLeftFrameContent(event: AgentProductEvent, content: string): void {
+  if (event.kind !== "match_options" && event.kind !== "room_intro") return;
+  const title = leftFrameTitles[event.kind];
+  const lines = content.split("\n");
+  const hasExpectedStructure = /^┏━{6,}$/u.test(lines[0] ?? "")
+    && lines[1]?.trim() === `┃ ${title}`
+    && /^┣━{6,}$/u.test(lines[2] ?? "")
+    && /^┗━{6,}$/u.test(lines.at(-1) ?? "")
+    && lines.slice(3, -1).every((line) => /^┃ .+/u.test(line) || /^┣━{6,}$/u.test(line));
+  const hasRightBorder = lines.some((line) => /[┃│┫┤┓┐┛┘]\s*$/u.test(line));
+  const emojiCount = content.match(/\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*/gu)?.length ?? 0;
+  if (!hasExpectedStructure || hasRightBorder || emojiCount > 2 || content.includes("```")) {
+    throw new Error(`${title} 必须使用无右边框的左框字符卡片`);
+  }
+}
 
 export interface HostedLlmOptions {
   apiKey: string;
@@ -228,9 +286,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
     const needsFinalizer = memories.length > 0
       || plan.memoryPlan.queries.length > 0
       || search.results.length > 0;
-    const baseReply = plan.searchPlan.required && search.results.length === 0
-      ? unavailableSearchReply(plan.actions)
-      : plan.replyDraft;
+    const baseReply = plan.replyDraft;
     let candidateReply = baseReply;
     let candidateUsedMemoryIds: string[] = [];
     let candidateUsedSourceIndexes: number[] = [];
@@ -299,6 +355,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
             "回复正文不要展示来源、引用、证据编号或参考资料列表；这些信息由系统结构化元数据保存。",
             "如果用户明确要求具体店铺或场地，可保留候选回复中的 Markdown 链接 [店铺名](https://...)，但店铺名和完整 URL 必须由同一条 webEvidence 明确支持。店名或 URL 任一无法核实时，改成不带链接的文本并说明尚不能确认。",
             "即使 candidateReply 看起来正确，也要根据证据重写或确认。reply 必须是可以直接发布的最终文本。",
+            "保留候选回复的一句话一气泡分段和用户当前语言。除字符卡片外，不得把多个短段重新合并成长段，每段结尾不要补中文句号或英文句点。",
             "status=verified 表示无需事实纠正；status=corrected 表示已纠错；证据不足时 status=insufficient_evidence 并使用不猜测的安全表述。",
             "usedMemoryIds 和 usedSourceIndexes 只能填写最终 reply 实际依赖的证据 id/index。",
             "只输出 JSON：{\"status\":\"verified|corrected|insufficient_evidence\",\"reply\":\"...\",\"issues\":[],\"usedMemoryIds\":[],\"usedSourceIndexes\":[]}。"
@@ -339,25 +396,15 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
           0
         );
       verified = verifiedReplySchema.parse(verificationResult);
-    } catch {
-      verified = {
-        status: "insufficient_evidence",
-        reply: verificationUnavailableReply(plan.actions),
-        issues: ["发布前事实校验失败，已使用不包含外部事实的安全回复。"],
-        usedMemoryIds: [],
-        usedSourceIndexes: []
-      };
+    } catch (error) {
+      throw new Error("发布前事实校验失败", { cause: error });
     }
     const memoryIds = new Set(memories.map((memory) => memory.id));
     const usedMemoryIds = [...new Set(verified.usedMemoryIds)]
       .filter((memoryId) => memoryIds.has(memoryId));
     const validIndexes = [...new Set(verified.usedSourceIndexes)]
       .filter((index) => index < search.results.length);
-    const candidatePublishedReply = plan.searchPlan.required
-      && search.meta.status === "completed"
-      && validIndexes.length === 0
-      ? verificationUnavailableReply(plan.actions)
-      : verified.reply;
+    const candidatePublishedReply = verified.reply;
     const selectedResults = validIndexes
       .map((index) => search.results[index])
       .filter((result): result is WebSearchResult => Boolean(result));
@@ -369,11 +416,13 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
     };
     return {
       reply,
+      onboardingTransition: plan.onboardingTransition,
       socialIntentDetected: plan.socialIntentDetected,
       currentIntent: plan.currentIntent,
       actions: plan.actions,
       usedMemoryIds,
       memoryReviewSuggested: plan.memoryPlan.reviewSuggested,
+      socialHooks: plan.socialHooks,
       webSearch
     };
   }
@@ -381,13 +430,24 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
   async reply(
     context: AgentContext,
     userContent: string,
-    lookupMemories?: MemoryLookup
+    lookupMemories?: MemoryLookup,
+    userMessageId?: string
   ): Promise<ConversationInsight> {
     const currentTime = (this.options.now?.() ?? new Date()).toISOString();
     const timeZone = this.options.timeZone ?? "Asia/Shanghai";
     const result = await this.chatJson(
       [
         "你是 TOMEET，一个能长期认识用户的社交 Agent。",
+        "当前场景是 AdventureX 活动现场。你天然对用户有好感和好奇，但不讨好；注意用户刚说的具体细节，给出简短真实反应，一次最多问一个容易回答的具体问题。",
+        "默认使用 runtime.onboardingState.preferredLanguage 指定的语言回复，zh 用中文，en 用英文。微信新用户默认是 zh。用户明确要求改用英文时 onboardingTransition=language_en；明确要求切回中文时为 language_zh。切换语言时不要同时输出无关产品 action。",
+        "除候选邀请和确认函字符卡片外，回复要像微信短气泡：一句话一个段落，段与段之间用空行分开，每段结尾不要使用中文句号或英文句点。可以自然使用逗号、问号和感叹号，但不要故意写得支离破碎。内容较多时，先给一个很短的承接，再分成后续短句，让发送端可以逐句呈现。",
+        "禁止抽象采访：不要问‘你是什么样的人/什么性格/喜欢和什么类型的人交朋友/最特别的经历’。不要在没有事实依据时说‘你好特别/有创造力’。",
+        "用户拒绝图片时自然接住，不追问拒绝原因，不再要求图片；结合刚才的具体对话继续问一个容易回答的问题。示例方向：可以从用户最近投入时间的一件事聊起，但不要照抄固定句式。此时 onboardingTransition=image_declined。",
+        "在首次了解阶段持续判断两件事：画像信息是否已经可用于匹配，以及用户是否出现退出了解过程的倾向。不要用固定题数、字段清单、标签数量或回答字数作为门槛。",
+        "画像已经可用，是指 recentMessages、profileSummary 和当前原话中已有足够具体、非敏感、能区分候选人与活动的事实，Agent 能据此形成自然的互动入口；不要求一定已有 socialHook。用户本轮及上下文尚未明确要求匹配、且没有活动中的匹配请求或房间时，直接告诉用户现有信息已经可以进入匹配阶段，并询问是否现在开始；actions=[]、socialIntentDetected=false，不得替用户启动匹配。boundaryPromptedAt=null 时，把雷点入口自然合并进这次确认并设置 onboardingTransition=boundary_prompted，不要再追加一轮采访。",
+        "退出倾向需要结合连续对话判断，例如回答逐渐变短且含糊、连续跳过问题，或明确表示不想继续回答、想先到这里、希望少问一点；单次简短但具体的回答不算退出倾向。信息完整性仍然优先：没有退出倾向且画像尚不够用时，沿着用户已经表现出的兴趣或具体经历，只问一个容易回答但信息量高的问题。用户明确说现在开始、直接匹配时不是待确认分支，按明确社交意图立即输出 start_match。",
+        "画像尚不够完整、但至少已有一条具体非敏感事实可作为最低匹配依据，且用户出现退出倾向时，不要继续采访，直接询问是否愿意用当前信息开始匹配；actions=[]、socialIntentDetected=false，必须等用户明确同意。boundaryPromptedAt=null 时可以把雷点入口合并进同一个确认问题并设置 onboardingTransition=boundary_prompted。",
+        "如果现有内容只有寒暄、拒绝、无法落到用户本人的泛泛表述，完全没有可用于区分候选人与活动的具体非敏感事实，则当前无法匹配；即使用户想结束也不要邀请开始匹配，只补一个最关键、最容易回答的具体问题，优先落在用户已经露出的兴趣点或最近真实在做的事上。",
         "profileSummary 是由独立记忆系统生成的可丢弃摘要，不是绝对真相。只在相关时使用；它与用户当前原话冲突时，以当前原话为准。",
         "本阶段只规划回复和产品动作，绝对不要创建、修改或删除用户记忆，也不要重写 profileSummary。",
         "需要回忆用户过去明确说过的信息时，在 memoryPlan.queries 中给出最多 2 条短查询；不需要时必须为空。",
@@ -397,19 +457,32 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         "用户要求围绕某个活动的地点、日期或日程约酒、组局、找搭子，也属于明确社交意图：同时输出 start_match 和用于核实活动事实的 searchPlan；不得等搜索完成后再决定是否开始匹配。",
         "只有假设、将来可能、泛泛讨论社交，或只是说喜欢某个兴趣而没有想认识人的表达，socialIntentDetected 才为 false。",
         "回复自然、克制，不虚构尚未发生的匹配或状态变化。所有产品操作必须通过 actions 输出，由系统执行。",
-        "可用 action：start_match、confirm_room、complete_room、submit_feedback。没有操作时 actions=[]。",
+        "可用 action：start_match、select_match_options、refresh_match_options、cancel_match、restart_match、enable_match_push、disable_match_push、activate_match、leave_room、confirm_room、complete_room、submit_feedback。没有操作时 actions=[]。",
         "只有用户明确表达现在想社交，且没有等待中的请求或未结束房间时，才输出 start_match，并把本次意图放入 intent。",
+        "runtime.matchOptions 存在时，把数字、中文序号、多选偏好和人物描述映射到稳定 optionNumber。‘3’只接受3；‘3优先，1也行’接受[3,1]；‘都可以’接受所有当前选项。",
+        "用户明确因为某个人物事实选择时，requiredHookIds 只能从所选 option.hooks 中复制对应 hookId；绝不能编造 ID。用户只是追问候选详情时 actions=[]。",
+        "用户要求换一批时输出 refresh_match_options；等待/候选阶段说不去了输出 cancel_match；请求取消或超时后，只有用户明确说重新匹配、再来三个时才输出 restart_match。",
+        "正式成局并发送确认函后，用户退出必须在当前消息中给出一个非空理由；理由可以很简单，不严格判断是否充分或合理。用户只说‘退出’‘不去了’而没有理由时，actions=[]，只自然追问一个简短理由，不得声称已经退出。用户补充理由后输出 leave_room，并把用户当前消息中的原话理由放入 reason；不得从历史、摘要或模型推断中编造理由。",
+        "如果上一轮刚询问退出理由，用户当前只回复一个简单理由，也视为继续完成退出。确认函之前的受邀成员仍可直接退出。",
+        "runtime.matchRequest.phase=push_consent 表示本次具体尝试已经结束，可能是没有足够合适的候选，也可能是用户已经选择但候选最终未成局，当前正在征求未来主动推送授权。用户明确同意以后有合适的主动告诉他时输出 enable_match_push；用户明确要求现在立即重新匹配时输出 activate_match；明确拒绝继续留意时输出 disable_match_push。",
+        "runtime.matchRequest.phase=watching 表示用户已经授权未来主动推送，但当前没有占用实时匹配优先级。用户明确说现在就想再匹配时输出 activate_match；用户要求停止留意或停止推送时输出 disable_match_push。不要把普通寒暄误判为重新激活。",
+        "cancel_match 的回复可以结合上下文询问用户是否希望重新匹配，但不要未经同意直接重启。leave_room 的回复绝不能询问或暗示重新匹配：proactivePushEnabled=true 时说明退出后回到被动留意状态，有真正合适的安排再主动通知；否则说明本次组局到此结束。",
         "只有用户明确接受当前 confirming 房间时才输出 confirm_room。",
         "只有用户明确表示线下活动已经结束，且当前房间 confirmed 时才输出 complete_room。",
         "只有当前房间 completed 且用户表达了活动感受时才输出 submit_feedback，分别整理 peopleFeedback、gameFeedback 和 nextIntent。",
         "不要猜测 connectionUserIds；只有用户明确指向房间成员且能够确定 ID 时才填写，否则用空数组。",
+        "每次输出 socialHooks 数组。只能提取用户自己在文字中明确做过的具体事情，hookText 写成适合接在‘有人……’之后的第三人称事实短语；evidenceMessageIds 只能引用输入提供的用户消息 ID。",
+        "‘我的朋友/团队里有人’不能归属于用户；图片观察、兴趣偏好、抽象人格、感情/健康/财务/家庭/政治/宗教等敏感内容都不能成为 socialHooks。",
+        "有具体歧义时 socialHooks=[]，在 replyDraft 里顺势问一个具体确认问题。例如‘我们组过乐队’应问用户本人是不是成员、负责什么。",
+        "runtime.onboardingState.stage=exploring 且 boundaryPromptedAt=null 时，在已经了解用户若干具体事实、准备结束初步了解或进入匹配前，自然提供一次雷点、明确边界或不想遇到的情况的入口，并设置 onboardingTransition=boundary_prompted。按上面的画像可用性规则，能与开始匹配的确认合并时就合并，不额外增加一轮采访；仍需继续了解时才单独宽松询问。不要要求用户列清单，也不要重复追问。用户明确要求立即匹配时不得阻塞 start_match，可以在确认开始匹配后的最后一个短气泡顺带问。",
         "每次都要输出 searchPlan。用户明确要求搜索/联网/来源，询问当前或最新的新闻、人物职位、价格、规则、日程、活动日期、具体店铺/场地、营业状态或可点击店铺地址，或出现无法从上下文可靠识别的陌生/歧义专名时，searchPlan.required=true，并生成 1–2 条简短搜索查询。",
         "普通陪伴聊天、用户自己的经历、稳定技术常识，以及只表达个人社交意图的消息不需要联网，使用 searchPlan={\"required\":false,\"queries\":[]}。",
         "搜索查询可以使用 currentTime 和 timeZone 解析‘今年’‘今天’等相对时间，但不得包含密钥、联系方式、精确住址或与公开检索无关的个人信息。topic 只能是 general 或 news；只有明确需要近期新闻时使用 news 和 timeRange。",
         "searchPlan.required=true 时，首轮 reply 不得根据模型记忆回答外部事实，只能安全地说明需要核实，同时照常识别并输出有证据的站内 actions。",
         "currentIntent 必须是 JSON 对象，actions 必须是 JSON 对象数组，绝不能把它们写成字符串。",
-        "start_match 的严格格式示例：{\"replyDraft\":\"好，我开始感受谁和你会自然同频。\",\"socialIntentDetected\":true,\"currentIntent\":{\"rawText\":\"用户原话\"},\"actions\":[{\"type\":\"start_match\",\"intent\":{\"rawText\":\"用户原话\"}}],\"memoryPlan\":{\"queries\":[],\"reviewSuggested\":false},\"searchPlan\":{\"required\":false,\"queries\":[]}}。",
-        "没有动作时严格使用 actions:[]。每次都必须输出 memoryPlan 和 searchPlan。只输出 JSON，不要输出解释。"
+        "start_match 的严格格式示例：{\"replyDraft\":\"好，我开始给你找现场候选。\",\"socialIntentDetected\":true,\"currentIntent\":{\"rawText\":\"用户原话\"},\"actions\":[{\"type\":\"start_match\",\"intent\":{\"rawText\":\"用户原话\"}}],\"memoryPlan\":{\"queries\":[],\"reviewSuggested\":false},\"socialHooks\":[],\"searchPlan\":{\"required\":false,\"queries\":[]},\"onboardingTransition\":\"none\"}。",
+        "首次引导阶段用户已经发来任意图片或文字且没有拒绝图片时，onboardingTransition=engaged；明确拒绝图片时为 image_declined；询问雷点时为 boundary_prompted；明确切换语言时为 language_zh 或 language_en；其他情况为 none。",
+        "没有动作时严格使用 actions:[]。每次都必须输出 memoryPlan、socialHooks、searchPlan 和 onboardingTransition。只输出 JSON，不要输出解释。"
       ].join("\n"),
       JSON.stringify({
         recentMessages: context.recentMessages,
@@ -419,41 +492,60 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         contextBudget: context.budget,
         currentTime,
         timeZone,
+        currentUserMessageId: userMessageId,
         newMessage: userContent
       })
     );
+    const exitRequiresReason = roomExitRequiresReason(context);
+    const roomExitPolicy = exitRequiresReason
+      ? "leave_room 仅在用户当前消息提供非空退出理由时允许；只说退出或不去了时必须 actions=[] 并追问一个简单理由。reason 必须来自当前消息，不得编造。退出后不得询问重新匹配。"
+      : "leave_room 只在用户明确要退出当前房间时允许；退出后不得询问重新匹配。";
     const actionPolicy = context.room?.status === "confirming"
-      ? "当前只允许 actions=[] 或 confirm_room；禁止 complete_room 和 submit_feedback。"
+      ? `当前只允许 actions=[]、leave_room 或 confirm_room。${roomExitPolicy}`
       : context.room?.status === "confirmed"
-        ? "当前只允许 actions=[] 或 complete_room；禁止 confirm_room 和 submit_feedback。"
-        : context.room?.status === "completed"
+        ? `当前只允许 actions=[]、leave_room 或 complete_room。${roomExitPolicy}`
+      : context.room?.status === "completed"
           ? "当前只允许 actions=[] 或 submit_feedback；禁止 confirm_room 和 complete_room。"
+          : context.matchRequest?.status === "cancelled" || context.matchRequest?.status === "expired"
+            ? "当前只允许 actions=[] 或 restart_match。"
+            : context.matchOptions
+              ? "当前只允许 actions=[]、select_match_options、refresh_match_options 或 cancel_match。"
+          : context.matchRequest?.status === "matching" && context.matchRequest.phase === "push_consent"
+            ? "当前只允许 actions=[]、enable_match_push、disable_match_push、activate_match 或 cancel_match。"
+          : context.matchRequest?.status === "matching" && context.matchRequest.phase === "watching"
+            ? "当前只允许 actions=[]、activate_match、disable_match_push 或 cancel_match。"
           : context.matchRequest?.status === "matching"
-            ? "已有等待中的匹配请求，actions 必须为空。"
+            ? "当前只允许 actions=[] 或 cancel_match。"
             : "没有活动房间时，只允许 actions=[] 或 start_match。";
     let insight = await this.parseOrRepair(
       plannedConversationInsightSchema,
       result,
       [
-        "输出字段：replyDraft, socialIntentDetected, currentIntent, actions, memoryPlan, searchPlan。",
-        "actions 只能是 start_match(intent)、confirm_room、complete_room、submit_feedback(peopleFeedback, gameFeedback, connectionUserIds, nextIntent)。",
+        "输出字段：replyDraft, socialIntentDetected, currentIntent, actions, memoryPlan, socialHooks, searchPlan, onboardingTransition。",
+        "actions 必须符合给定状态；requiredHookIds 只能来自 runtime.matchOptions。",
         "memoryPlan 必须包含 queries:string[] 和 reviewSuggested:boolean；queries 最多 2 条。",
+        "socialHooks 最多 4 条，每条包含 hookText 和 evidenceMessageIds；证据 ID 只能来自输入。",
         "searchPlan.required=false 时 queries 必须为空；required=true 时 queries 必须有 1–2 个 {query, topic, timeRange?}。",
         "如果 type=submit_feedback，peopleFeedback、gameFeedback、connectionUserIds、nextIntent 必须与 action 同级。",
         actionPolicy
       ].join("\n"),
-      { newMessage: userContent, roomStatus: context.room?.status ?? null }
+        { newMessage: userContent, userMessageId, runtime: context.promptRuntime, roomStatus: context.room?.status ?? null }
     );
-    if (insight.actions.some((action) => !isActionAllowed(action.type, context))) {
+    insight = normalizeRoomExitReason(insight, userContent);
+    if (insight.actions.some((action) => !isActionAllowed(action, context, userContent))) {
       const corrected = await this.chatJson(
         [
-          "修正 TOMEET 的 actions，其他字段（包括 searchPlan）保持原意。",
+          "修正 TOMEET 的 actions，其他字段（包括 socialHooks 和 searchPlan）保持原意。",
           actionPolicy,
+          "正式成局后的退出理由只能来自用户当前消息。没有理由时不要执行退出，replyDraft 只询问一个简短理由；不要询问是否重新匹配。",
           "用户没有明确触发允许的动作时使用 actions=[]。只输出完整 JSON。"
         ].join("\n"),
         JSON.stringify({ output: insight, newMessage: userContent })
       );
-      insight = plannedConversationInsightSchema.parse(corrected);
+      insight = normalizeRoomExitReason(plannedConversationInsightSchema.parse(corrected), userContent);
+    }
+    if (insight.actions.some((action) => !isActionAllowed(action, context, userContent))) {
+      throw new Error("模型返回了当前状态不允许的产品动作");
     }
     const [memories, search] = await Promise.all([
       insight.memoryPlan.queries.length > 0 && lookupMemories
@@ -461,7 +553,94 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         : Promise.resolve([]),
       this.resolveWebSearch(insight.searchPlan)
     ]);
-    return this.finalizeReply(insight, context, userContent, memories, search, currentTime, timeZone);
+    return this.finalizeReply(
+      { ...insight, socialHooks: insight.socialHooks ?? [] },
+      context,
+      userContent,
+      memories,
+      search,
+      currentTime,
+      timeZone
+    );
+  }
+
+  async composeProductMessage(context: AgentContext, event: AgentProductEvent): Promise<AgentProductMessage> {
+    const expectedOptionNumbers = event.kind === "match_options" && Array.isArray(event.facts.options)
+      ? (event.facts.options as Array<Record<string, unknown>>)
+          .map((option) => Number(option.optionNumber))
+          .filter((number) => Number.isInteger(number) && number >= 1 && number <= 3)
+      : [];
+    const draft = await this.parseOrRepair(
+      agentProductMessageSchema,
+      await this.chatJson(
+        [
+          "你负责把 TOMEET 已经提交成功的结构化产品事件写成用户可直接收到的 Agent 消息。",
+          "根据 recentMessages、profileSummary 和当前上下文调整语气、详略和承接方式；不要使用固定模板，不要机械重复同一句话。",
+          "使用 runtime.onboardingState.preferredLanguage 指定的语言。除字符卡片外，正文按微信短气泡写作：一句话一个段落，用空行分隔，每段结尾不用中文句号或英文句点；内容较多时先短承接，再逐句展开。",
+          "event.facts 是唯一可陈述的产品事实。不得添加人物经历、关系、身份、性格、兴趣标签、人口属性、地点、时间、人数或承诺。",
+          "不得暴露内部 ID、hook、draft、offer、version、phase、status、RPC、Job 等工程字段。",
+          "人物事实只能逐字或保守转述 facts 中提供的 hookText，不得升级、概括成性格标签或推测。",
+          "match_options 必须为每个 optionNumber 返回一条 optionPreviews，编号集合必须与输入完全一致；confirmedFacts 是已确认成员，possibleFacts 只是可能参与者，语气必须明确区分。content 是把这些候选自然组织后的完整消息，可以增加与用户上下文相关但不新增事实的承接和选择提示。",
+          "match_options 的 content 必须是无右边框字符卡片：第一行是至少 6 个横线的 ┏━━━━，第二行只能是‘┃ TOMEET 组局邀请’，第三行是 ┣━━━━；正文每行以‘┃ ’开头，分隔线以‘┣’开头，末行以‘┗’加横线结束。任何一行都不得以 ┃、│、┫、┤、┓、┐、┛、┘ 结尾，不加 Markdown 代码围栏。整张卡片最多使用 2 个克制、功能性的 emoji，例如人数或集合信息提示，不要装饰每一行。optionPreviews.text 只保存对应选项的自然文字，不重复外框。",
+          "match_unavailable 要如实说明本次暂时没有足够合适的人或局。cause=insufficient_pool 时可以说当前可用人较少；cause=low_fit 时可以说当前候选的整体契合度还不够；cause=no_activity 时说明暂时没有合适活动；cause=attempt_not_formed 时说明这一次具体候选没有成局。只能在 canEnableProactivePush=true 时询问是否授权未来主动推送；proactivePushAlreadyEnabled=true 时说明会继续留意，不要再次索要授权。",
+          "match_confirmation_incomplete 表示用户已经做出选择，但这次候选最终没有成局。先确认用户的选择已收到，再中性说明本次安排没有完成成局确认；不得说或暗示某个具体用户拒绝了他，不得归因于用户不够合适，也不得虚构拒绝原因。currentAttemptEnded=true 时要明确这次具体尝试已经结束。canEnableProactivePush=true 时可以询问是否授权未来主动推送；proactivePushAlreadyEnabled=true 时说明会继续留意。followUpPriority=confirmation_follow_up 表示之后再次出现合格机会时，该用户在 watching 用户中优先，但仍不得承诺一定或立即成局。",
+          "room_intro 只能描述最终已确认成员和当前房间事实，不能使用查看者自己的人物事实。room_intro 的 content 使用与 match_options 相同的无右边框字符卡片，但第二行只能是‘┃ TOMEET 成局确认函’；正文以结构化事实自然组织，不得为了排版补充不存在的信息。",
+          "match_expired 用于候选窗口内没有完成选择等真正超时情形；不得把用户已经选择但未成局描述成用户超时，也不得声称系统会自动重新匹配。",
+          "room_change 和 draft_change 只说明输入中真实发生的变化，并自然给出可用的下一步，不替用户做决定。room_change 中 currentlyFormed=false 时必须明确当前人数暂未达到活动最低人数，不能继续说已经成局；可以说明系统正在留意合适补位。",
+          "legacy_match_ready 只使用当前房间、活动和成员事实。unsupported_channel_message 只说明能力边界并邀请用户换一种可处理的表达。",
+          "只输出 JSON：{\"content\":\"...\",\"optionPreviews\":[{\"optionNumber\":1,\"text\":\"...\"}]}。非 match_options 时 optionPreviews=[]。"
+        ].join("\n"),
+        JSON.stringify({
+          recentMessages: context.recentMessages,
+          checkpoint: context.checkpoint,
+          profileSummary: context.profileNarrative,
+          currentIntent: context.currentIntent,
+          runtime: context.promptRuntime,
+          event
+        })
+      ),
+      "只使用输入事实，返回可直接发送的个性化 content；match_options 的 optionPreviews 编号必须与输入完全一致。",
+      { eventKind: event.kind, expectedOptionNumbers }
+    );
+    const result = await this.parseOrRepair(
+      agentProductMessageSchema,
+      await this.chatJson(
+        [
+          "你是 TOMEET 产品事件消息的发布前校验器。candidateMessage 尚未发布，可能包含虚构、标签化、过度概括或候选状态混淆，不能直接信任。",
+          "只允许保留 event.facts 明确支持的产品事实；删除或改写任何新增的人物经历、关系、身份、性格、兴趣标签、人口属性、地点、时间、人数、承诺和因果。",
+          "人物事实只能逐字或保守转述 hookText。不得从人物事实推断人格、能力、偏好、职业、关系或相似性。",
+          "confirmedFacts 是已确认成员，possibleFacts 只是可能参与者，两者不得互换或写成相同确定程度。",
+          "保持 recentMessages 和 profileSummary 所支持的个性化语气与自然承接，但它们不能成为新增产品事实的来源。",
+          "不得暴露内部 ID 或工程字段。不得输出来源、校验过程或解释。",
+          "match_options 的 optionPreviews 编号集合必须与 expectedOptionNumbers 完全一致，每个编号恰好一条；其他事件必须返回空数组。",
+          "event.kind=match_options 或 room_intro 时，必须保留无右边框左框卡片：只允许左侧 ┃，不得补回任何右边框；标题分别为‘TOMEET 组局邀请’和‘TOMEET 成局确认函’，不使用 Markdown 代码围栏。整张卡片最多保留 2 个克制、功能性的 emoji，不得增加密集装饰。",
+          "保留 candidateMessage 中一句话一气泡的空行和当前语言，不要把多段合并成长段，每个普通段落结尾不要增加中文句号或英文句点。",
+          "只输出 JSON：{\"content\":\"...\",\"optionPreviews\":[{\"optionNumber\":1,\"text\":\"...\"}]}。"
+        ].join("\n"),
+        JSON.stringify({
+          recentMessages: context.recentMessages,
+          profileSummary: context.profileNarrative,
+          event,
+          expectedOptionNumbers,
+          candidateMessage: draft
+        }),
+        this.options.textModel,
+        0
+      ),
+      "发布前移除无事实依据的内容；候选编号必须完整且唯一，非候选事件 optionPreviews=[]。",
+      { eventKind: event.kind, expectedOptionNumbers }
+    );
+    if (event.kind === "match_options") {
+      const actual = result.optionPreviews.map((option) => option.optionNumber).sort();
+      const expected = [...expectedOptionNumbers].sort();
+      if (actual.length !== expected.length || actual.some((number, index) => number !== expected[index])) {
+        throw new Error("候选文案没有覆盖全部选项");
+      }
+    } else if (result.optionPreviews.length > 0) {
+      throw new Error("非候选事件不能返回 optionPreviews");
+    }
+    assertLeftFrameContent(event, result.content);
+    return result;
   }
 
   async summarizeConversation(previousSummary: string, messages: Message[]): Promise<string> {
@@ -485,37 +664,53 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
 
   async understandMultimodal(input: {
     kind: "image" | "audio";
-    storagePath: string;
-    mimeType: string;
+    storagePaths: string[];
+    mimeTypes: string[];
     hint?: string;
+    preferredLanguage?: AdventurexLanguage;
   }): Promise<Record<string, unknown>> {
     if (input.kind === "image") {
+      if (input.storagePaths.length === 0) throw new Error("图片理解缺少输入");
       const result = await this.chatJson(
         [
-          "理解用户主动提供的图片，感受画面选择、氛围、关系距离、生活痕迹和表达方式。避免敏感属性推断。",
-          "不要输出标签、关键词列表、性格分类或分数。多模态内容只能形成有期限的近期印象，不能自动成为稳定个人事实。",
-          "输出 JSON，必须包含 reply、summary、recentImpression。"
+          `把用户这次主动提供的 ${input.storagePaths.length} 张图片作为一个整体理解，结合图片之间的共同点、差异或连续关系，只记录可以直接观察的低风险细节。`,
+          `回复使用${input.preferredLanguage === "en" ? "英文" : "中文"}，写成简短自然的微信气泡，一句话一个段落并用空行分隔，每个普通段落结尾不要使用中文句号或英文句点。`,
+          "严格区分 observableDetails、uncertainty、suggestedQuestion 和最终 reply。reply 应先给出对整组图片的简短真实反应，然后只问一个综合问题；不得逐张图片分别回复或连续提出多个问题。",
+          "禁止推断用户性格、职业、关系、健康、民族、政治、宗教、性取向等属性；禁止把图片内容说成用户的稳定事实或社交钩子。",
+          "只输出 JSON：observableDetails, uncertainty, suggestedQuestion, reply。"
         ].join("\n"),
         [
-          { type: "text", text: input.hint || "请理解这张图片与用户偏好的关系" },
-          { type: "image_url", image_url: { url: input.storagePath } }
+          {
+            type: "text",
+            text: input.hint
+              ? `用户为这组图片补充了：${input.hint}`
+              : "请把这组图片放在一起理解，并找出最自然的一个追问方向"
+          },
+          ...input.storagePaths.map((url) => ({ type: "image_url", image_url: { url } }))
         ],
         this.options.visionModel ?? this.options.textModel
       );
-      return this.parseOrRepair(
-        multimodalInsightSchema,
+      const parsed = await this.parseOrRepair(
+        adventurexImageUnderstandingSchema,
         result,
-        "只输出 reply, summary, recentImpression。",
+        "只输出 observableDetails、uncertainty、suggestedQuestion、reply。",
         { kind: input.kind, hint: input.hint },
         this.options.visionModel ?? this.options.textModel
       );
+      return {
+        ...parsed,
+        summary: parsed.observableDetails.join("；"),
+        recentImpression: "图片只用于本轮追问，不作为稳定个人事实。"
+      };
     }
 
-    const audioResponse = await fetch(input.storagePath, { signal: AbortSignal.timeout(30_000) });
+    const audioPath = input.storagePaths[0];
+    if (!audioPath) throw new Error("录音理解缺少输入");
+    const audioResponse = await fetch(audioPath, { signal: AbortSignal.timeout(30_000) });
     if (!audioResponse.ok) throw new Error("无法读取短录音");
     const form = new FormData();
     form.set("model", this.options.audioModel);
-    form.set("file", new File([await audioResponse.blob()], "voice.webm", { type: input.mimeType }));
+    form.set("file", new File([await audioResponse.blob()], "voice.webm", { type: input.mimeTypes[0] }));
     const transcriptResponse = await fetch(`${this.options.baseUrl.replace(/\/$/, "")}/audio/transcriptions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.options.apiKey}` },
@@ -527,6 +722,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
     const result = await this.chatJson(
       [
         "理解用户短录音的内容、语气、停顿、表达节奏与当下能量。不要推断敏感属性。",
+        `回复使用${input.preferredLanguage === "en" ? "英文" : "中文"}，写成简短自然的微信气泡，一句话一个段落并用空行分隔，每个普通段落结尾不要使用中文句号或英文句点。`,
         "不要输出标签、关键词列表、性格分类或分数。多模态内容只能形成有期限的近期印象，不能自动成为稳定个人事实。",
         "输出 JSON，必须包含 reply、summary、recentImpression。"
       ].join("\n"),
@@ -677,16 +873,153 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       matchingInput
     );
   }
+
+  async proposeMatchRound(candidates: MatchCandidate[], games: OfflineGame[]): Promise<MatchRoundProposal | null> {
+    if (candidates.length < Math.min(...games.map((game) => game.minPlayers))) return null;
+    const input = {
+      candidates: candidates.slice(0, 24).map(({ request, userModel, matchingNarrative, socialHooks, matchingPriority }) => ({
+        requestId: request.requestId,
+        userId: request.userId,
+        currentVibe: typeof request.intentSnapshot.rawText === "string" ? request.intentSnapshot.rawText : "",
+        matchingNarrative: matchingNarrative || userModel.vibeNarrative,
+        socialHooks: (socialHooks ?? []).map((hook) => ({ hookId: hook.id, hookText: hook.hookText })),
+        interestState: request.phase === "watching" ? "watching" : "waiting",
+        matchingPriority: matchingPriority ?? (request.phase === "watching" ? "watching" : "active_waiting"),
+        waitingSince: request.createdAt
+      })),
+      games: games.map((game) => ({
+        id: game.id,
+        name: game.name,
+        description: game.description,
+        minPlayers: game.minPlayers,
+        maxPlayers: game.maxPlayers,
+        instructions: game.instructions
+      }))
+    };
+    const result = await this.chatJson(
+      [
+        "你负责 AdventureX 活动现场的在线贪心竞价式多人候选局提案。当前所有用户都在现场，不考虑时间、地点、距离、年龄、性别或其他人口属性硬约束。",
+        "waiting 是现在正在匹配的高意愿用户，watching 是已授权未来主动推送的次优先用户。matchingPriority=confirmation_follow_up 表示该用户上次已经选择但候选未成局，应在其他 watching 用户之前补位，但仍低于 active_waiting。先让 active_waiting 用户获得当前最合适的组合，再按上述顺序用 watching 用户补足或形成明显更好的局；不要为了凑人数牺牲整体自然度。",
+        "一个候选局必须同时考虑人与人、人与活动、整组人与活动；活动是让互动发生的媒介，不是组人后的装饰。",
+        "只使用 currentVibe、matchingNarrative 和明确 socialHooks。禁止按兴趣名词重合组人，禁止输出人格类型或永久分数。",
+        "每个用户最多三个真实候选，只有一个真实好候选时就只给一个；绝不能为了凑满三个而编造或降低质量。没有固定用户池人数门槛，唯一硬门槛是活动最少人数以及真实可行性。",
+        "每个 draft 的 candidateRequestIds 只能引用输入请求，targetPlayers 必须符合活动人数，rationale 必须说明这组人与该活动共同如何产生互动。",
+        "userOptions 中的请求必须属于对应 draft。只输出 drafts 和 userOptions 的 JSON。"
+      ].join("\n"),
+      JSON.stringify(input),
+      this.options.textModel,
+      0.2
+    );
+    return this.parseOrRepair(
+      matchRoundProposalSchema,
+      result,
+      "只输出 drafts 和 userOptions；所有 ID 必须来自输入。",
+      input,
+      this.options.textModel,
+      0.1
+    );
+  }
+
+  async judgeGroup(candidates: MatchCandidate[], game: OfflineGame): Promise<GroupActivityJudgement> {
+    const input = {
+      candidates: candidates.map(({ request, userModel, matchingNarrative, socialHooks }) => ({
+        requestId: request.requestId,
+        userId: request.userId,
+        currentVibe: typeof request.intentSnapshot.rawText === "string" ? request.intentSnapshot.rawText : "",
+        matchingNarrative: matchingNarrative || userModel.vibeNarrative,
+        socialHooks: (socialHooks ?? []).map((hook) => ({ hookId: hook.id, hookText: hook.hookText }))
+      })),
+      activity: {
+        id: game.id,
+        name: game.name,
+        description: game.description,
+        minPlayers: game.minPlayers,
+        maxPlayers: game.maxPlayers,
+        instructions: game.instructions
+      }
+    };
+    const result = await this.chatJson(
+      [
+        "判断这组现场参与者在这个具体活动中是否都可能自然进入互动。",
+        "关注活动能否促使成员彼此互动、是否有人明显缺少进入方式、是否有单一成员完全主导的风险。",
+        "不要分析人口属性、人格类型或永久兼容分数。isolationRiskUserIds 只能引用输入 userId。",
+        "verdict 只能是 bad、acceptable、good、excellent。只输出 verdict、isolationRiskUserIds、reasoning。"
+      ].join("\n"),
+      JSON.stringify(input),
+      this.options.textModel,
+      0.1
+    );
+    return this.parseOrRepair(
+      groupActivityJudgementSchema,
+      result,
+      "只输出 verdict、isolationRiskUserIds、reasoning；ID 必须来自输入。",
+      input,
+      this.options.textModel,
+      0
+    );
+  }
+}
+
+function normalizeRoomExitReason(
+  insight: z.infer<typeof plannedConversationInsightSchema>,
+  userContent: string
+): z.infer<typeof plannedConversationInsightSchema> {
+  const reason = extractRoomExitReason(userContent);
+  return {
+    ...insight,
+    actions: insight.actions.map((action) => action.type === "leave_room"
+      ? { type: "leave_room" as const, ...(reason ? { reason } : {}) }
+      : action)
+  };
+}
+
+function roomExitRequiresReason(context: AgentContext): boolean {
+  if (!context.room || context.room.status === "completed") return false;
+  if (context.room.status === "confirmed") return true;
+  const currentUserId = context.matchRequest?.userId;
+  return Boolean(currentUserId && context.room.members.some(
+    (member) => member.userId === currentUserId && member.confirmed
+  ));
+}
+
+function hasRoomExitIntent(context: AgentContext, userContent: string): boolean {
+  if (/(?:退出(?:这个局|组局|房间)?|离开(?:这个局|房间)?|不参加了|不去了|去不了了|没法参加了|取消参加)/u.test(userContent)) {
+    return true;
+  }
+  const previousAssistantMessage = [...context.recentMessages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+  return Boolean(
+    extractRoomExitReason(userContent)
+    && previousAssistantMessage
+    && /退出/u.test(previousAssistantMessage.content)
+    && /(原因|理由)/u.test(previousAssistantMessage.content)
+  );
 }
 
 function isActionAllowed(
-  type: "start_match" | "confirm_room" | "complete_room" | "submit_feedback",
-  context: AgentContext
+  action: ConversationInsight["actions"][number],
+  context: AgentContext,
+  userContent: string
 ): boolean {
-  if (context.room?.status === "confirming") return type === "confirm_room";
-  if (context.room?.status === "confirmed") return type === "complete_room";
+  const type = action.type;
+  const roomExitAllowed = type === "leave_room"
+    && hasRoomExitIntent(context, userContent)
+    && (!roomExitRequiresReason(context) || Boolean(action.reason?.trim()));
+  if (context.room?.status === "confirming") return type === "confirm_room" || roomExitAllowed;
+  if (context.room?.status === "confirmed") return type === "complete_room" || roomExitAllowed;
   if (context.room?.status === "completed") return type === "submit_feedback";
-  if (context.matchRequest?.status === "matching") return false;
+  if (context.matchRequest?.status === "cancelled" || context.matchRequest?.status === "expired") {
+    return type === "restart_match";
+  }
+  if (context.matchOptions) return ["select_match_options", "refresh_match_options", "cancel_match"].includes(type);
+  if (context.matchRequest?.status === "matching" && context.matchRequest.phase === "push_consent") {
+    return ["enable_match_push", "disable_match_push", "activate_match", "cancel_match"].includes(type);
+  }
+  if (context.matchRequest?.status === "matching" && context.matchRequest.phase === "watching") {
+    return ["activate_match", "disable_match_push", "cancel_match"].includes(type);
+  }
+  if (context.matchRequest?.status === "matching") return type === "cancel_match";
   return type === "start_match";
 }
 
@@ -699,27 +1032,6 @@ function sanitizeSearchQuery(input: WebSearchQuery): WebSearchQuery | null {
     .trim();
   const parsed = webSearchQuerySchema.safeParse({ ...input, query });
   return parsed.success ? parsed.data : null;
-}
-
-function unavailableSearchReply(actions: ConversationInsight["actions"]): string {
-  const lines = ["我暂时无法联网核实这条信息，因此不想凭记忆猜。请稍后再试。"];
-  const actionTypes = new Set(actions.map((action) => action.type));
-  if (actionTypes.has("start_match")) lines.push("你同时表达的找人意图我已经收到，站内匹配会按原流程处理。");
-  if (actionTypes.has("confirm_room")) lines.push("你对当前房间的确认也会按站内流程处理。");
-  if (actionTypes.has("complete_room")) lines.push("你对活动状态的更新也会按站内流程处理。");
-  if (actionTypes.has("submit_feedback")) lines.push("你提交的活动感受也会按站内流程处理。");
-  return lines.join("\n");
-}
-
-function verificationUnavailableReply(actions: ConversationInsight["actions"]): string {
-  const actionTypes = new Set(actions.map((action) => action.type));
-  if (actionTypes.has("start_match")) {
-    return "我已经收到你这次约活动或找人的意图，会按已确认的信息开始处理；活动的具体地点和时间尚未通过发布前校验，所以我先不猜。";
-  }
-  if (actionTypes.has("confirm_room")) return "我已经收到你的确认意图，会按当前房间状态处理。";
-  if (actionTypes.has("complete_room")) return "我已经收到你的活动状态更新，会按当前房间状态处理。";
-  if (actionTypes.has("submit_feedback")) return "我已经收到你这次的活动感受，会按当前活动状态处理。";
-  return "为了避免给你不准确的信息，这次回复没有通过发布前事实校验。请再试一次。";
 }
 
 function retainVerifiedVenueLinks(reply: string, evidence: WebSearchResult[]): string {

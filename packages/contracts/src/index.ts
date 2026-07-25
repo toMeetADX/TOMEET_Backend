@@ -16,14 +16,115 @@ export const userModelSchema = z.object({
 });
 export type UserModel = z.infer<typeof userModelSchema>;
 
+export const messageSourceChannelSchema = z.enum(["web", "wechat", "system", "legacy"]);
+export type MessageSourceChannel = z.infer<typeof messageSourceChannelSchema>;
+
 export const messageSchema = z.object({
   id: idSchema,
   userId: idSchema,
   role: z.enum(["user", "assistant"]),
   content: z.string().min(1).max(20_000),
+  sourceChannel: messageSourceChannelSchema.optional(),
+  replyToMessageId: idSchema.nullable().optional(),
   createdAt: z.string().datetime()
 });
 export type Message = z.infer<typeof messageSchema>;
+
+export const agentProductEventKindSchema = z.enum([
+  "legacy_match_ready",
+  "match_options",
+  "match_unavailable",
+  "match_confirmation_incomplete",
+  "room_intro",
+  "match_expired",
+  "room_change",
+  "draft_change",
+  "unsupported_channel_message"
+]);
+export type AgentProductEventKind = z.infer<typeof agentProductEventKindSchema>;
+
+export const agentProductEventSchema = z.object({
+  kind: agentProductEventKindSchema,
+  facts: z.record(z.unknown())
+});
+export type AgentProductEvent = z.infer<typeof agentProductEventSchema>;
+
+export const agentProductMessageSchema = z.object({
+  content: z.string().min(1).max(12_000),
+  optionPreviews: z.array(z.object({
+    optionNumber: z.number().int().min(1).max(3),
+    text: z.string().min(1).max(3_000)
+  })).max(3)
+});
+export type AgentProductMessage = z.infer<typeof agentProductMessageSchema>;
+
+export const adventurexOnboardingStageSchema = z.enum([
+  "new",
+  "awaiting_image_or_text",
+  "exploring",
+  "ready",
+  "matching"
+]);
+export type AdventurexOnboardingStage = z.infer<typeof adventurexOnboardingStageSchema>;
+
+export const adventurexLanguageSchema = z.enum(["zh", "en"]);
+export type AdventurexLanguage = z.infer<typeof adventurexLanguageSchema>;
+
+export const adventurexWelcomeBubbles: Record<AdventurexLanguage, readonly string[]> = {
+  zh: [
+    "你好呀👋",
+    "很高兴认识你",
+    "你可以告诉我任何你觉得可以代表你或与你有关的东西，例如朋友圈，小红书等社交媒体帖子的截图，或者最近一段时间记录的有趣的照片",
+    "这样我可以在了解你后帮助你连接AdventureX现场有趣的人和活动"
+  ],
+  en: [
+    "Hi there 👋",
+    "Nice to meet you",
+    "You can share anything that feels representative of you or connected to you, such as screenshots of posts from WeChat Moments, Xiaohongshu, or other social media, or interesting photos you've taken recently",
+    "Once I get to know you, I can help connect you with interesting people and activities at AdventureX"
+  ]
+};
+
+export function adventurexWelcomeContent(language: AdventurexLanguage): string {
+  return adventurexWelcomeBubbles[language].join("\n\n");
+}
+
+export const adventurexOnboardingStateSchema = z.object({
+  userId: idSchema,
+  stage: adventurexOnboardingStageSchema,
+  imageDeclined: z.boolean(),
+  preferredLanguage: adventurexLanguageSchema.default("zh"),
+  boundaryPromptedAt: z.string().datetime().nullable().default(null),
+  welcomeSentAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime().optional(),
+  updatedAt: z.string().datetime()
+});
+export type AdventurexOnboardingState = z.infer<typeof adventurexOnboardingStateSchema>;
+
+export const socialHookDraftSchema = z.object({
+  hookText: z.string().trim().min(1).max(240),
+  evidenceMessageIds: z.array(idSchema).min(1).max(8)
+});
+export type SocialHookDraft = z.infer<typeof socialHookDraftSchema>;
+
+export const socialHookSchema = z.object({
+  id: idSchema,
+  userId: idSchema,
+  hookText: z.string().min(1).max(240),
+  sourceMessageIds: z.array(idSchema).min(1).max(8),
+  status: z.enum(["active", "forgotten"]),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+});
+export type SocialHook = z.infer<typeof socialHookSchema>;
+
+export const adventurexImageUnderstandingSchema = z.object({
+  observableDetails: z.array(z.string().min(1).max(240)).max(5),
+  uncertainty: z.array(z.string().min(1).max(240)).max(3),
+  suggestedQuestion: z.string().min(1).max(500),
+  reply: z.string().min(1).max(2_000)
+});
+export type AdventurexImageUnderstanding = z.infer<typeof adventurexImageUnderstandingSchema>;
 
 export const webSearchSourceSchema = z.object({
   title: z.string().min(1).max(500),
@@ -38,16 +139,159 @@ export const webSearchMetaSchema = z.object({
 });
 export type WebSearchMeta = z.infer<typeof webSearchMetaSchema>;
 
+export const matchRequestPhaseSchema = z.enum([
+  "waiting",
+  "offered",
+  "selected",
+  "settling",
+  "push_consent",
+  "watching"
+]);
+export type MatchRequestPhase = z.infer<typeof matchRequestPhaseSchema>;
+
 export const matchRequestSchema = z.object({
   requestId: idSchema,
   userId: idSchema,
   intentSnapshot: z.record(z.unknown()),
-  status: z.enum(["matching", "matched", "cancelled"]),
+  status: z.enum(["matching", "matched", "cancelled", "expired"]),
+  phase: matchRequestPhaseSchema.default("waiting"),
+  proactivePushEnabled: z.boolean().default(false),
+  activeRoundId: idSchema.nullable().default(null),
+  optionsExpiresAt: z.string().datetime().nullable().default(null),
   roomId: idSchema.nullable(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime()
 });
 export type MatchRequest = z.infer<typeof matchRequestSchema>;
+
+export const adventurexTestPoolStatusSchema = z.object({
+  ownerUserId: idSchema,
+  enabled: z.boolean(),
+  desiredUserCount: z.number().int().min(3).max(12),
+  provisionedUserCount: z.number().int().nonnegative(),
+  availableRequestCount: z.number().int().nonnegative(),
+  updatedAt: z.string().datetime()
+});
+export type AdventurexTestPoolStatus = z.infer<typeof adventurexTestPoolStatusSchema>;
+
+export const matchRoundSchema = z.object({
+  roundId: idSchema,
+  bucketKey: z.string().min(1).max(200),
+  status: z.enum(["scheduled", "generating", "collecting", "settling", "completed", "expired"]),
+  offerExpiresAt: z.string().datetime().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime()
+});
+export type MatchRound = z.infer<typeof matchRoundSchema>;
+
+export const matchDraftSchema = z.object({
+  draftId: idSchema,
+  roundId: idSchema,
+  offlineGameId: idSchema,
+  status: z.enum(["collecting", "formed", "expired"]),
+  version: z.number().int().nonnegative(),
+  targetPlayers: z.number().int().min(3).max(10),
+  candidateRequestIds: z.array(idSchema).min(3).max(12),
+  rationale: z.string().min(1).max(1_000).default("现场互动候选局"),
+  createdAt: z.string().datetime(),
+  expiresAt: z.string().datetime()
+});
+export type MatchDraft = z.infer<typeof matchDraftSchema>;
+
+export const matchOptionHookSchema = z.object({
+  hookId: idSchema,
+  hookText: z.string().min(1).max(240),
+  sourceUserId: idSchema,
+  certainty: z.enum(["confirmed", "possible"])
+});
+export type MatchOptionHook = z.infer<typeof matchOptionHookSchema>;
+
+export const matchOptionOfferSchema = z.object({
+  offerId: idSchema,
+  requestId: idSchema,
+  roundId: idSchema,
+  sourceType: z.enum(["draft", "open_room"]),
+  draftId: idSchema.nullable(),
+  roomId: idSchema.nullable(),
+  sourceVersion: z.number().int().nonnegative(),
+  optionNumber: z.number().int().min(1).max(3),
+  offlineGameId: idSchema,
+  previewText: z.string().min(1).max(2_000),
+  hooks: z.array(matchOptionHookSchema).max(6).default([]),
+  status: z.enum(["offered", "accepted", "rejected", "expired"]),
+  createdAt: z.string().datetime(),
+  respondedAt: z.string().datetime().nullable()
+}).superRefine((value, context) => {
+  const validDraft = value.sourceType === "draft" && value.draftId && !value.roomId;
+  const validRoom = value.sourceType === "open_room" && value.roomId && !value.draftId;
+  if (!validDraft && !validRoom) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "候选来源必须且只能是 draft 或 open_room" });
+  }
+});
+export type MatchOptionOffer = z.infer<typeof matchOptionOfferSchema>;
+
+export const matchChoiceSchema = z.object({
+  choiceId: idSchema,
+  requestId: idSchema,
+  roundId: idSchema,
+  sourceType: z.enum(["draft", "open_room"]),
+  draftId: idSchema.nullable(),
+  roomId: idSchema.nullable(),
+  preferenceRank: z.number().int().min(1).max(3),
+  requiredHookIds: z.array(idSchema).max(3),
+  rawUserText: z.string().min(1).max(2_000),
+  createdAt: z.string().datetime()
+}).superRefine((value, context) => {
+  const validDraft = value.sourceType === "draft" && value.draftId && !value.roomId;
+  const validRoom = value.sourceType === "open_room" && value.roomId && !value.draftId;
+  if (!validDraft && !validRoom) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "选择来源必须且只能是 draft 或 open_room" });
+  }
+});
+export type MatchChoice = z.infer<typeof matchChoiceSchema>;
+
+export const matchOptionContextSchema = z.object({
+  requestId: idSchema,
+  roundId: idSchema,
+  expiresAt: z.string().datetime(),
+  options: z.array(matchOptionOfferSchema.and(z.object({
+    activityName: z.string().min(1),
+    activityDescription: z.string().min(1)
+  }))).min(1).max(3)
+});
+export type MatchOptionContext = z.infer<typeof matchOptionContextSchema>;
+
+export const matchRoundProposalSchema = z.object({
+  drafts: z.array(z.object({
+    tempDraftId: z.string().min(1).max(64),
+    offlineGameId: idSchema,
+    targetPlayers: z.number().int().min(3).max(10),
+    candidateRequestIds: z.array(idSchema).min(3).max(12),
+    rationale: z.string().min(1).max(1_000)
+  })).min(1).max(30),
+  userOptions: z.array(z.object({
+    requestId: idSchema,
+    tempDraftIds: z.array(z.string().min(1).max(64)).min(1).max(3)
+  }))
+});
+export type MatchRoundProposal = z.infer<typeof matchRoundProposalSchema>;
+
+export const groupActivityJudgementSchema = z.object({
+  verdict: z.enum(["bad", "acceptable", "good", "excellent"]),
+  isolationRiskUserIds: z.array(idSchema).max(10),
+  reasoning: z.string().min(1).max(1_000)
+});
+export type GroupActivityJudgement = z.infer<typeof groupActivityJudgementSchema>;
+
+export const finalRoomDecisionSchema = z.object({
+  draftId: idSchema,
+  offlineGameId: idSchema,
+  requestIds: z.array(idSchema).min(3).max(10),
+  memberIds: z.array(idSchema).min(3).max(10),
+  targetPlayers: z.number().int().min(3).max(10),
+  summary: z.string().min(1).max(2_000)
+});
+export type FinalRoomDecision = z.infer<typeof finalRoomDecisionSchema>;
 
 export const matchDecisionSchema = z.object({
   memberIds: z.array(idSchema).min(3).max(10),
@@ -73,7 +317,8 @@ export type OfflineGame = z.infer<typeof offlineGameSchema>;
 export const roomMemberSchema = z.object({
   userId: idSchema,
   displayName: z.string(),
-  confirmed: z.boolean()
+  confirmed: z.boolean(),
+  participationStatus: z.enum(["invited", "confirmed", "withdrawn"]).default("confirmed")
 });
 export type RoomMember = z.infer<typeof roomMemberSchema>;
 
@@ -83,6 +328,11 @@ export const matchRoomSchema = z.object({
   offlineGame: offlineGameSchema,
   matchSummary: z.string(),
   status: z.enum(["confirming", "confirmed", "completed"]),
+  sourceDraftId: idSchema.nullable().default(null),
+  targetPlayers: z.number().int().min(3).max(10).nullable().default(null),
+  recruitmentStatus: z.enum(["open", "full", "closed"]).default("closed"),
+  version: z.number().int().nonnegative().default(0),
+  meetingPoint: z.string().max(500).nullable().default(null),
   createdAt: z.string().datetime(),
   completedAt: z.string().datetime().nullable()
 });
@@ -189,8 +439,12 @@ export type MemoryProfileDraft = z.infer<typeof memoryProfileDraftSchema>;
 
 export const llmJobTypeSchema = z.enum([
   "agent_reply",
+  "agent_event_reply",
   "multimodal_understanding",
   "matchmaking",
+  "match_round_generate",
+  "match_round_settle",
+  "room_change_notify",
   "feedback_update",
   "memory_extract",
   "memory_consolidate"
@@ -207,6 +461,7 @@ export const llmJobSchema = z.object({
   attempts: z.number().int().nonnegative(),
   maxAttempts: z.number().int().positive(),
   partitionKey: z.string().max(200).nullable().default(null),
+  runAt: z.string().datetime().default("1970-01-01T00:00:00.000Z"),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime()
 });
@@ -249,6 +504,14 @@ export const createMatchRequestInputSchema = z.object({
   intent: z.record(z.unknown()).optional(),
   idempotencyKey: z.string().min(8).max(128).optional()
 });
+
+export const saveMatchChoicesInputSchema = z.object({
+  preferredOptionNumber: z.union([z.literal(1), z.literal(2), z.literal(3)]).nullable(),
+  acceptedOptionNumbers: z.array(z.union([z.literal(1), z.literal(2), z.literal(3)])).min(1).max(3),
+  requiredHookIds: z.array(idSchema).max(3).default([]),
+  rawText: z.string().min(1).max(2_000).default("结构化选择")
+});
+export type SaveMatchChoicesInput = z.infer<typeof saveMatchChoicesInputSchema>;
 
 export const multimodalMimeTypeSchema = z.enum([
   "image/jpeg",

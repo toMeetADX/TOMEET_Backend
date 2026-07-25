@@ -100,6 +100,7 @@ export class WechatILinkClient {
     qrCode: string;
     baseUrl?: string;
     verifyCode?: string;
+    signal?: AbortSignal;
   }): Promise<WechatQrStatus> {
     const query = new URLSearchParams({ qrcode: input.qrCode });
     if (input.verifyCode) query.set("verify_code", input.verifyCode);
@@ -107,7 +108,7 @@ export class WechatILinkClient {
       const response = await this.request<Record<string, unknown>>(
         normalizeBaseUrl(input.baseUrl ?? this.qrBaseUrl),
         `ilink/bot/get_qrcode_status?${query.toString()}`,
-        { method: "GET" },
+        { method: "GET", signal: input.signal },
         this.longPollTimeoutMs
       );
       const status = response.status;

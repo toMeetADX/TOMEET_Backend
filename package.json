@@ -21,7 +21,8 @@
     "agent:release:verify": "node scripts/agent-layer-sync.mjs verify",
     "agent:migrations:check": "node scripts/migration-safety.mjs check",
     "agent:release:railway": "node scripts/railway-release.mjs",
-    "agent:smoke:cross-channel": "node scripts/cross-channel-smoke.mjs"
+    "agent:smoke:cross-channel": "node scripts/cross-channel-smoke.mjs",
+    "adventurex:reset-chat-data": "node scripts/reset-adventurex-chat-data.mjs"
   },
   "devDependencies": {
     "@eslint/eslintrc": "3.3.6",

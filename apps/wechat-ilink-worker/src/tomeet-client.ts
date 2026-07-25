@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  agentProductEventSchema,
   agentMessageInputSchema,
   llmJobSchema,
   messageSchema,
@@ -17,6 +18,11 @@ interface TomeetClientOptions {
 interface ApiErrorBody {
   error?: string;
   message?: string;
+}
+
+export interface AgentTurnResult {
+  reply: string | null;
+  stale: boolean;
 }
 
 export class TomeetClientError extends Error {
@@ -50,6 +56,26 @@ export class TomeetClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? 180_000;
   }
 
+  async startOnboarding(input: { userId: string }): Promise<string | null> {
+    const response = await this.request<{ message?: unknown | null }>(
+      `/internal/users/${input.userId}/adventurex-onboarding/start`,
+      {
+        method: "POST",
+        body: JSON.stringify({ language: "zh" })
+      }
+    );
+    if (response.message == null) return null;
+    const message = messageSchema.parse(response.message);
+    if (message.role !== "assistant") {
+      throw new TomeetClientError(
+        502,
+        "onboarding_message_invalid",
+        "Onboarding endpoint returned a non-assistant message"
+      );
+    }
+    return message.content;
+  }
+
   async sendText(input: {
     connectionId: string;
     messageId: string;
@@ -81,19 +107,103 @@ export class TomeetClient {
     if (directReply.success && directReply.data.role === "assistant") {
       return directReply.data.content;
     }
-
-    const history = await this.request<{ messages: unknown[] }>(
-      `/internal/agent/messages/${encodeURIComponent(input.userId)}`
-    );
-    for (let index = history.messages.length - 1; index >= 0; index -= 1) {
-      const message = messageSchema.safeParse(history.messages[index]);
-      if (message.success && message.data.role === "assistant") return message.data.content;
-    }
     throw new TomeetClientError(
       502,
       "assistant_reply_missing",
-      "Agent completed without an assistant message"
+      "WeChat-originated Agent job completed without its assistant message"
     );
+  }
+
+  async setResponseGeneration(input: {
+    connectionId: string;
+    generationToken: string;
+  }): Promise<void> {
+    await this.request("/internal/agent/response-generations", {
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  }
+
+  async sendTextBatch(input: {
+    connectionId: string;
+    generationToken: string;
+    messageIds: string[];
+    userId: string;
+    contents: string[];
+  }): Promise<AgentTurnResult> {
+    const content = input.contents.length === 1
+      ? input.contents[0]!
+      : input.contents.map((item, index) => `${index + 1}. ${item}`).join("\n");
+    const payload = agentMessageInputSchema.parse({
+      userId: input.userId,
+      displayName: "微信用户",
+      content,
+      idempotencyKey: idempotencyKey(input.connectionId, `turn:${input.messageIds.join(":")}`)
+    });
+    const response = await this.request<{ job: unknown }>("/internal/agent/messages", {
+      method: "POST",
+      body: JSON.stringify({
+        ...payload,
+        connectionId: input.connectionId,
+        generationToken: input.generationToken
+      })
+    });
+    return this.waitForTurnResult(llmJobSchema.parse(response.job));
+  }
+
+  async sendImages(input: {
+    connectionId: string;
+    generationToken: string;
+    messageIds: string[];
+    userId: string;
+    images: Array<{
+      bytes: Uint8Array;
+      mimeType: "image/jpeg" | "image/png" | "image/webp";
+    }>;
+    hint?: string;
+  }): Promise<AgentTurnResult> {
+    const messageKey = idempotencyKey(input.connectionId, `images:${input.messageIds.join(":")}`);
+    const response = await this.request<{ job: unknown }>("/internal/agent/multimodal-inputs", {
+      method: "POST",
+      body: JSON.stringify({
+        userId: input.userId,
+        images: input.images.map((image) => ({
+          mimeType: image.mimeType,
+          dataBase64: Buffer.from(image.bytes).toString("base64")
+        })),
+        hint: input.hint,
+        idempotencyKey: messageKey,
+        connectionId: input.connectionId,
+        generationToken: input.generationToken
+      })
+    });
+    return this.waitForTurnResult(llmJobSchema.parse(response.job));
+  }
+
+  async sendEvent(input: {
+    connectionId: string;
+    messageId: string;
+    userId: string;
+    event: unknown;
+  }): Promise<string> {
+    const event = agentProductEventSchema.parse(input.event);
+    const messageKey = idempotencyKey(input.connectionId, `event:${input.messageId}`);
+    const response = await this.request<{ job: unknown }>("/internal/agent/events", {
+      method: "POST",
+      body: JSON.stringify({
+        userId: input.userId,
+        event,
+        idempotencyKey: messageKey
+      })
+    });
+    let job = llmJobSchema.parse(response.job);
+    if (job.status !== "completed" && job.status !== "failed") job = await this.waitForJob(job);
+    if (job.status === "failed") {
+      throw new TomeetClientError(502, "agent_event_job_failed", job.error || "Agent event job failed");
+    }
+    const directReply = messageSchema.safeParse(job.result?.message);
+    if (directReply.success && directReply.data.role === "assistant") return directReply.data.content;
+    throw new TomeetClientError(502, "assistant_reply_missing", "Agent event completed without an assistant message");
   }
 
   private async waitForJob(initial: LlmJob): Promise<LlmJob> {
@@ -107,6 +217,21 @@ export class TomeetClient {
       if (current.status === "completed" || current.status === "failed") return current;
     }
     throw new TomeetClientError(504, "agent_job_timeout", "Agent job timed out");
+  }
+
+  private async waitForTurnResult(initial: LlmJob): Promise<AgentTurnResult> {
+    const job = initial.status === "completed" || initial.status === "failed"
+      ? initial
+      : await this.waitForJob(initial);
+    if (job.status === "failed") {
+      throw new TomeetClientError(502, "agent_job_failed", job.error || "Agent job failed");
+    }
+    if (job.result?.stale === true) return { reply: null, stale: true };
+    const directReply = messageSchema.safeParse(job.result?.message);
+    if (directReply.success && directReply.data.role === "assistant") {
+      return { reply: directReply.data.content, stale: false };
+    }
+    throw new TomeetClientError(502, "assistant_reply_missing", "Agent job completed without its assistant message");
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {

@@ -9,3 +9,4 @@ coverage
 .DS_Store
 *.tsbuildinfo
 pnpm-debug.log*
+supabase/.temp/

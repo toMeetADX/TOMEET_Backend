@@ -40,7 +40,25 @@ export interface WechatQrStatus {
 export interface WechatMessageItem {
   type?: number;
   text_item?: { text?: string };
-  voice_item?: { text?: string };
+  image_item?: {
+    media?: WechatCdnMedia;
+    thumb_media?: WechatCdnMedia;
+    aeskey?: string;
+    url?: string;
+    mid_size?: number;
+    thumb_size?: number;
+    thumb_height?: number;
+    thumb_width?: number;
+    hd_size?: number;
+  };
+  voice_item?: { text?: string; media?: WechatCdnMedia };
+}
+
+export interface WechatCdnMedia {
+  encrypt_query_param?: string;
+  aes_key?: string;
+  encrypt_type?: number;
+  full_url?: string;
 }
 
 export interface WechatInboundMessage {
@@ -98,6 +116,15 @@ export interface WechatConnection {
   failureCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface WechatOutboundDelivery {
+  id: string;
+  messageId: string;
+  userId: string;
+  content: string;
+  attempts: number;
+  connection: WechatConnection;
 }
 
 export interface ActivateWechatSessionInput {

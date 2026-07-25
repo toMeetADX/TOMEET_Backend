@@ -6,7 +6,7 @@ Production API base URL:
 https://api.tomeet.chat
 ```
 
-The browser integration uses three public endpoints. The QR payload and session
+The browser integration uses four public endpoints. The QR payload and session
 token must be treated as temporary credentials and must not be stored in
 `localStorage`, analytics events, or application logs.
 
@@ -15,9 +15,17 @@ token must be treated as temporary credentials and must not be stored in
 ```http
 POST /wechat/connect/sessions
 Content-Type: application/json
+Authorization: Bearer {supabaseAccessToken}
 
 {}
 ```
+
+Send the current Supabase access token when the QR is created from a signed-in
+Web session. The activated WeChat identity is then bound to the same
+`users.id`, so both channels share conversation context, state, and memory.
+The endpoint still accepts anonymous creation for compatibility, but that flow
+uses a separate WeChat profile and therefore does not expose the current Web
+history.
 
 Successful response: `201 Created`
 
@@ -41,7 +49,40 @@ The production limit is 30 create requests per 10 minutes per client. On
 `429 Too Many Requests`, wait for the `Retry-After` response header before
 trying again.
 
-## 2. Poll the session
+## 2. Stream session changes with SSE
+
+```http
+GET /wechat/connect/sessions/{sessionId}/events
+Accept: text/event-stream
+X-WeChat-Session-Token: {sessionToken}
+```
+
+The server immediately emits the current state and then pushes every state
+change as a `session` event. It sends heartbeat comments while the upstream
+WeChat long poll is waiting and closes the stream after `active`, `expired`, or
+`failed`.
+
+`scanned` is also the trigger for a kiosk or roadshow page to replace the
+displayed QR immediately. The API keeps the claimed session alive in a
+server-side monitor, so replacing the visible QR or closing its browser stream
+does not stop activation or the new-user welcome. Some iLink deployments return
+the final credentials together with upstream status `scaned`; the API accepts
+that response as activation-ready while still emitting public status `scanned`
+first.
+
+```text
+event: session
+data: {"sessionId":"uuid","status":"scanned",...}
+
+event: done
+data: {"sessionId":"uuid","status":"active",...}
+```
+
+Use `fetch()` plus `ReadableStream` so the session token remains in the request
+header. Do not put the token in the query string to use the native
+`EventSource` constructor.
+
+## 3. Get the current state (fallback)
 
 ```http
 GET /wechat/connect/sessions/{sessionId}
@@ -70,10 +111,10 @@ Possible status values:
 - `expired`: create a new session
 - `failed`: show the error and create a new session when appropriate
 
-Poll every 800–1500 ms while the status is non-terminal. Stop polling after
-`active`, `expired`, or `failed`.
+Use this endpoint as a fallback when the SSE stream cannot be established.
+Retry SSE after a short backoff and stop after `active`, `expired`, or `failed`.
 
-## 3. Submit a WeChat verification code
+## 4. Submit a WeChat verification code
 
 Only call this endpoint after receiving `verification_required`.
 
@@ -93,14 +134,20 @@ response.
 ## Recommended landing-page lifecycle
 
 1. Create a session when the QR module becomes visible.
-2. Render `qrCodeContent` and begin polling.
+2. Render `qrCodeContent` and open the SSE stream.
 3. For an untouched `pending` session, create a replacement 30 seconds before
    `expiresAt`.
-4. Do not replace the QR while the status is `scanned` or
-   `verification_required`.
-5. After `active`, briefly show success and then create a fresh session for the
-   next visitor.
-6. Abort polling and discard the in-memory token when the component unmounts.
+4. When the displayed session becomes `scanned`, immediately mask that QR and
+   create a fresh displayed QR for the next visitor. The backend continues the
+   claimed session independently.
+5. Retain every claimed session token in memory until it becomes `active`,
+   `expired`, or `failed`, so a possible verification step can still target the
+   original session. A claimed session that fails must tell that visitor to scan
+   the fresh QR again.
+6. If a claimed session enters `verification_required`, submit the code against
+   that original session rather than the newly displayed session.
+7. Abort all SSE streams and discard all in-memory tokens when the component
+   unmounts.
 
 The production browser origin currently allowed by CORS is:
 

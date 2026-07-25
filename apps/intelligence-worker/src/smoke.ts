@@ -39,9 +39,9 @@ if (start.actions[0]?.type !== "start_match") throw new Error("真实模型未�
 const room = {
   roomId: "30000000-0000-4000-8000-000000000001",
   members: [
-    { userId: baseModel.userId, displayName: "测试用户", confirmed: false },
-    { userId: "30000000-0000-4000-8000-000000000002", displayName: "林知夏", confirmed: true },
-    { userId: "30000000-0000-4000-8000-000000000003", displayName: "陈屿", confirmed: true }
+    { userId: baseModel.userId, displayName: "测试用户", confirmed: false, participationStatus: "invited" as const },
+    { userId: "30000000-0000-4000-8000-000000000002", displayName: "林知夏", confirmed: true, participationStatus: "confirmed" as const },
+    { userId: "30000000-0000-4000-8000-000000000003", displayName: "陈屿", confirmed: true, participationStatus: "confirmed" as const }
   ],
   offlineGame: {
     id: "game-story-table",
@@ -56,6 +56,11 @@ const room = {
   },
   matchSummary: "共同喜欢摄影，交流氛围轻松",
   status: "confirming" as const,
+  sourceDraftId: null,
+  targetPlayers: 3,
+  recruitmentStatus: "closed" as const,
+  version: 0,
+  meetingPoint: null,
   createdAt: new Date().toISOString(),
   completedAt: null
 };
@@ -97,6 +102,7 @@ const candidates = Array.from({ length: 5 }, (_, index) => {
       userId,
       intentSnapshot: { rawText: index === 4 ? "想认识摄影同好" : "想轻松认识新朋友" },
       status: "matching" as const,
+      proactivePushEnabled: false,
       roomId: null,
       createdAt: now,
       updatedAt: now

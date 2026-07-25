@@ -79,6 +79,26 @@ describe("WechatILinkClient", () => {
       .resolves.toEqual({ status: "wait" });
   });
 
+  it("preserves activation credentials returned with scaned", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      status: "scaned",
+      bot_token: "bot-secret",
+      ilink_bot_id: "bot-1",
+      ilink_user_id: "wechat-owner-1",
+      baseurl: "https://api.example.com"
+    })));
+    const client = new WechatILinkClient({ fetch: fetchMock as typeof fetch });
+
+    await expect(client.pollLoginQr({ qrCode: "qr-1" })).resolves.toEqual({
+      status: "scaned",
+      botToken: "bot-secret",
+      ilinkBotId: "bot-1",
+      ilinkUserId: "wechat-owner-1",
+      baseUrl: "https://api.example.com",
+      redirectHost: undefined
+    });
+  });
+
   it("rejects unsafe base URLs and unknown protocol states", async () => {
     expect(() => new WechatILinkClient({ qrBaseUrl: "http://example.com" }))
       .toThrow("must use HTTPS");

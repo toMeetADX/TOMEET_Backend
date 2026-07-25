@@ -9,7 +9,11 @@ import {
 } from "@tomeet/wechat-ilink";
 import { config as loadDotEnv } from "dotenv";
 import { TomeetClient } from "./tomeet-client.js";
-import { fingerprint, monitorWechatConnection } from "./runtime.js";
+import {
+  deliverWechatOutboundMessage,
+  fingerprint,
+  monitorWechatConnection
+} from "./runtime.js";
 
 loadDotEnv({ path: resolve(process.cwd(), ".env") });
 loadDotEnv({ path: resolve(process.cwd(), "../../.env"), override: false });
@@ -42,6 +46,17 @@ const tomeetApiUrl = requiredEnvironment("TOMEET_API_URL");
 const internalApiToken = requiredEnvironment("TOMEET_INTERNAL_API_TOKEN");
 const workerId = `${process.env.RAILWAY_REPLICA_ID ?? "local"}:${randomUUID().slice(0, 8)}`;
 const concurrency = integerEnvironment("WECHAT_WORKER_CONCURRENCY", 8, 1, 32);
+const outboundConcurrency = integerEnvironment("WECHAT_OUTBOUND_CONCURRENCY", 20, 1, 100);
+const bubbleDelayMs = integerEnvironment("WECHAT_BUBBLE_DELAY_MS", 200, 0, 5_000);
+const legacyImageBatchWindowMs = integerEnvironment(
+  "WECHAT_IMAGE_BATCH_WINDOW_MS", 1200, 100, 10_000
+);
+const turnBatchWindowMs = integerEnvironment(
+  "WECHAT_TURN_BATCH_WINDOW_MS",
+  legacyImageBatchWindowMs,
+  100,
+  10_000
+);
 const claimIntervalMs = integerEnvironment(
   "WECHAT_WORKER_CLAIM_INTERVAL_MS",
   1000,
@@ -60,7 +75,26 @@ const tomeet = new TomeetClient({
   internalApiToken
 });
 const active = new Map<string, Promise<void>>();
+const activeOutbound = new Map<string, Promise<void>>();
 let ready = false;
+
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number
+): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  return Promise.race([
+    operation,
+    new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(
+        () => reject(new Error("readiness dependency timed out")),
+        timeoutMs
+      );
+    })
+  ]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
 
 async function monitorConnection(connection: WechatConnection): Promise<void> {
   await monitorWechatConnection({
@@ -71,24 +105,55 @@ async function monitorConnection(connection: WechatConnection): Promise<void> {
     store,
     cipher,
     ilink,
-    tomeet
+    tomeet,
+    bubbleDelayMs,
+    turnBatchWindowMs,
+    imageCdnBaseUrl: process.env.WECHAT_ILINK_CDN_BASE_URL
   });
 }
 
 const healthServer = createServer((request, response) => {
-  if (request.url === "/health") {
-    response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ status: "ok", service: "wechat-ilink-worker" }));
-    return;
-  }
-  if (request.url === "/ready") {
-    response.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ status: ready ? "ready" : "starting" }));
-    return;
-  }
-  response.writeHead(404).end();
+  void (async () => {
+    const path = request.url?.split("?", 1)[0];
+    response.setHeader("Content-Type", "application/json");
+    response.setHeader("Cache-Control", "no-store");
+    if (path === "/health") {
+      response.writeHead(200);
+      response.end(JSON.stringify({ status: "ok", service: "wechat-ilink-worker" }));
+      return;
+    }
+    if (path === "/ready") {
+      if (!ready) {
+        response.writeHead(503);
+        response.end(JSON.stringify({ status: "not_ready", service: "wechat-ilink-worker" }));
+        return;
+      }
+      try {
+        await withTimeout(coreStore.ping(), 3000);
+        response.writeHead(200);
+        response.end(JSON.stringify({ status: "ready", service: "wechat-ilink-worker" }));
+      } catch {
+        response.writeHead(503);
+        response.end(JSON.stringify({ status: "not_ready", service: "wechat-ilink-worker" }));
+      }
+      return;
+    }
+    response.writeHead(404);
+    response.end(JSON.stringify({ status: "not_found" }));
+  })().catch(() => {
+    if (!response.headersSent) {
+      response.writeHead(500, { "Content-Type": "application/json" });
+    }
+    response.end(JSON.stringify({ status: "error" }));
+  });
 });
-healthServer.listen(healthPort, "0.0.0.0");
+await new Promise<void>((resolveListen, reject) => {
+  healthServer.once("error", reject);
+  healthServer.listen(healthPort, "0.0.0.0", () => {
+    healthServer.off("error", reject);
+    resolveListen();
+  });
+});
 
 async function run(): Promise<void> {
   await coreStore.ping();
@@ -97,7 +162,10 @@ async function run(): Promise<void> {
     level: "info",
     event: "wechat_ilink_worker_started",
     worker: fingerprint(workerId),
-    concurrency
+    concurrency,
+    outboundConcurrency,
+    bubbleDelayMs,
+    turnBatchWindowMs
   }));
   while (!abortController.signal.aborted) {
     const capacity = concurrency - active.size;
@@ -113,18 +181,37 @@ async function run(): Promise<void> {
         active.set(connection.id, task);
       }
     }
+    const outboundCapacity = outboundConcurrency - activeOutbound.size;
+    if (outboundCapacity > 0) {
+      const claimed = await store.claimWechatOutboundMessages({
+        workerId,
+        limit: outboundCapacity
+      });
+      for (const delivery of claimed) {
+        if (activeOutbound.has(delivery.id)) continue;
+        const task = deliverWechatOutboundMessage(
+          { store, cipher, ilink, bubbleDelayMs },
+          delivery,
+          workerId
+        ).finally(() => activeOutbound.delete(delivery.id));
+        activeOutbound.set(delivery.id, task);
+      }
+    }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, claimIntervalMs));
   }
 }
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, () => abortController.abort());
+  process.once(signal, () => {
+    ready = false;
+    abortController.abort();
+  });
 }
 
 try {
   await run();
 } finally {
   ready = false;
-  await Promise.allSettled(active.values());
+  await Promise.allSettled([...active.values(), ...activeOutbound.values()]);
   await new Promise<void>((resolveClose) => healthServer.close(() => resolveClose()));
 }

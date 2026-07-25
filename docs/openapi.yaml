@@ -17,6 +17,7 @@ tags:
   - name: Uploads
   - name: Users
   - name: Matchmaking
+  - name: AdventureX Testing
   - name: Rooms
   - name: Jobs
 paths:
@@ -211,6 +212,47 @@ paths:
           $ref: "#/components/responses/Unauthenticated"
         "403":
           $ref: "#/components/responses/Forbidden"
+  /users/{userId}/adventurex-onboarding/start:
+    post:
+      tags: [Users]
+      summary: 幂等开始 AdventureX 引导
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                language:
+                  type: string
+                  enum: [zh, en]
+                  default: zh
+      responses:
+        "200":
+          description: 当前引导状态和首次开场消息
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state, message, messages]
+                properties:
+                  state:
+                    $ref: "#/components/schemas/AdventurexOnboardingState"
+                  message:
+                    anyOf:
+                      - $ref: "#/components/schemas/Message"
+                      - type: "null"
+                  messages:
+                    type: array
+                    maxItems: 1
+                    items:
+                      $ref: "#/components/schemas/Message"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /offline-games:
     get:
       tags: [Matchmaking]
@@ -230,6 +272,64 @@ paths:
                       $ref: "#/components/schemas/OfflineGame"
         "401":
           $ref: "#/components/responses/Unauthenticated"
+  /adventurex/test-pool:
+    get:
+      tags: [AdventureX Testing]
+      summary: 读取当前白名单账号的虚拟测试池状态
+      responses:
+        "200":
+          description: 测试池状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [testPool]
+                properties:
+                  testPool:
+                    $ref: "#/components/schemas/AdventurexTestPoolStatus"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: 虚拟测试池功能未启用
+    post:
+      tags: [AdventureX Testing]
+      summary: 开关并配置当前白名单账号的隔离虚拟测试池
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled:
+                  type: boolean
+                desiredUserCount:
+                  type: integer
+                  minimum: 3
+                  maximum: 12
+                  default: 5
+      responses:
+        "200":
+          description: 更新后的测试池状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [testPool]
+                properties:
+                  testPool:
+                    $ref: "#/components/schemas/AdventurexTestPoolStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: 虚拟测试池功能未启用
   /match-requests:
     post:
       tags: [Matchmaking]
@@ -299,10 +399,101 @@ paths:
                 properties:
                   matchRequest:
                     $ref: "#/components/schemas/MatchRequest"
+                  canRematch:
+                    type: boolean
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /match-requests/{id}/options:
+    get:
+      tags: [Matchmaking]
+      summary: 获取当前公开候选
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: 不包含 hook ID、候选成员 ID 的 1–3 个候选
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicMatchOptions"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /match-requests/{id}/choices:
+    post:
+      tags: [Matchmaking]
+      summary: 提交结构化候选选择
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MatchChoicesInput"
+      responses:
+        "200":
+          description: 选择已保存，或已加入开放局
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /match-requests/{id}/options/refresh:
+    post:
+      tags: [Matchmaking]
+      summary: 放弃本批候选并进入下一轮
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: 已计划下一轮
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /match-requests/{id}/rematch:
+    post:
+      tags: [Matchmaking]
+      summary: 从已取消或已超时请求创建全新匹配请求
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "200":
+          description: 新请求和计划轮次
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /match-requests/{id}/open-room/{roomId}/join:
+    post:
+      tags: [Matchmaking]
+      summary: 使用 offer 版本原子加入开放局
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+        - name: roomId
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/Uuid"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [offerId, sourceVersion]
+              properties:
+                offerId:
+                  $ref: "#/components/schemas/Uuid"
+                sourceVersion:
+                  type: integer
+                  minimum: 0
+      responses:
+        "200":
+          description: 已加入开放局
         "409":
           $ref: "#/components/responses/Conflict"
   /jobs/{id}:
@@ -397,6 +588,25 @@ paths:
                     $ref: "#/components/schemas/MatchRoom"
         "401":
           $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /rooms/{id}/leave:
+    post:
+      tags: [Rooms]
+      summary: 退出已确认房间
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomLeaveBody"
+      responses:
+        "200":
+          description: 已退出；响应包含 canRematch=false、最新匹配请求与 watching/ended 意愿状态
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -623,6 +833,7 @@ components:
         - attempts
         - maxAttempts
         - partitionKey
+        - runAt
         - createdAt
         - updatedAt
       properties:
@@ -632,8 +843,12 @@ components:
           type: string
           enum:
             - agent_reply
+            - agent_event_reply
             - multimodal_understanding
             - matchmaking
+            - match_round_generate
+            - match_round_settle
+            - room_change_notify
             - feedback_update
             - memory_extract
             - memory_consolidate
@@ -656,6 +871,9 @@ components:
           minimum: 1
         partitionKey:
           type: [string, "null"]
+        runAt:
+          type: string
+          format: date-time
         createdAt:
           type: string
           format: date-time
@@ -703,9 +921,30 @@ components:
           type: array
           items:
             type: string
+    AdventurexTestPoolStatus:
+      type: object
+      required: [ownerUserId, enabled, desiredUserCount, provisionedUserCount, availableRequestCount, updatedAt]
+      properties:
+        ownerUserId:
+          $ref: "#/components/schemas/Uuid"
+        enabled:
+          type: boolean
+        desiredUserCount:
+          type: integer
+          minimum: 3
+          maximum: 12
+        provisionedUserCount:
+          type: integer
+          minimum: 0
+        availableRequestCount:
+          type: integer
+          minimum: 0
+        updatedAt:
+          type: string
+          format: date-time
     MatchRequest:
       type: object
-      required: [requestId, userId, intentSnapshot, status, roomId, createdAt, updatedAt]
+      required: [requestId, userId, intentSnapshot, status, phase, proactivePushEnabled, activeRoundId, optionsExpiresAt, roomId, createdAt, updatedAt]
       properties:
         requestId:
           $ref: "#/components/schemas/Uuid"
@@ -715,7 +954,18 @@ components:
           $ref: "#/components/schemas/JsonObject"
         status:
           type: string
-          enum: [matching, matched, cancelled]
+          enum: [matching, matched, cancelled, expired]
+        phase:
+          type: string
+          enum: [waiting, offered, selected, settling, push_consent, watching]
+        proactivePushEnabled:
+          type: boolean
+        activeRoundId:
+          type: [string, "null"]
+          format: uuid
+        optionsExpiresAt:
+          type: [string, "null"]
+          format: date-time
         roomId:
           type: [string, "null"]
           format: uuid
@@ -727,7 +977,7 @@ components:
           format: date-time
     RoomMember:
       type: object
-      required: [userId, displayName, confirmed]
+      required: [userId, displayName, confirmed, participationStatus]
       properties:
         userId:
           $ref: "#/components/schemas/Uuid"
@@ -735,9 +985,12 @@ components:
           type: string
         confirmed:
           type: boolean
+        participationStatus:
+          type: string
+          enum: [invited, confirmed, withdrawn]
     MatchRoom:
       type: object
-      required: [roomId, members, offlineGame, matchSummary, status, createdAt, completedAt]
+      required: [roomId, members, offlineGame, matchSummary, status, sourceDraftId, targetPlayers, recruitmentStatus, version, meetingPoint, createdAt, completedAt]
       properties:
         roomId:
           $ref: "#/components/schemas/Uuid"
@@ -754,12 +1007,108 @@ components:
         status:
           type: string
           enum: [confirming, confirmed, completed]
+        sourceDraftId:
+          type: [string, "null"]
+          format: uuid
+        targetPlayers:
+          type: [integer, "null"]
+          minimum: 3
+          maximum: 10
+        recruitmentStatus:
+          type: string
+          enum: [open, full, closed]
+        version:
+          type: integer
+          minimum: 0
+        meetingPoint:
+          type: [string, "null"]
         createdAt:
           type: string
           format: date-time
         completedAt:
           type: [string, "null"]
           format: date-time
+    AdventurexOnboardingState:
+      type: object
+      required: [userId, stage, imageDeclined, preferredLanguage, boundaryPromptedAt, welcomeSentAt, updatedAt]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        stage:
+          type: string
+          enum: [new, awaiting_image_or_text, exploring, ready, matching]
+        imageDeclined:
+          type: boolean
+        preferredLanguage:
+          type: string
+          enum: [zh, en]
+        boundaryPromptedAt:
+          type: [string, "null"]
+          format: date-time
+        welcomeSentAt:
+          type: [string, "null"]
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    PublicMatchOptions:
+      type: object
+      required: [requestId, roundId, expiresAt, options]
+      properties:
+        requestId:
+          $ref: "#/components/schemas/Uuid"
+        roundId:
+          $ref: "#/components/schemas/Uuid"
+        expiresAt:
+          type: string
+          format: date-time
+        options:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items:
+            type: object
+            required: [optionNumber, activity, previewText]
+            properties:
+              optionNumber:
+                type: integer
+                minimum: 1
+                maximum: 3
+              activity:
+                type: object
+                required: [id, name]
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+              previewText:
+                type: string
+    MatchChoicesInput:
+      type: object
+      additionalProperties: false
+      required: [preferredOptionNumber, acceptedOptionNumbers]
+      properties:
+        preferredOptionNumber:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 3
+        acceptedOptionNumbers:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items:
+            type: integer
+            minimum: 1
+            maximum: 3
+        requiredHookIds:
+          type: array
+          maxItems: 3
+          items:
+            $ref: "#/components/schemas/Uuid"
+        rawText:
+          type: string
+          maxLength: 2000
     AgentMessageInput:
       type: object
       additionalProperties: false
@@ -910,6 +1259,18 @@ components:
       properties:
         userId:
           $ref: "#/components/schemas/Uuid"
+    RoomLeaveBody:
+      type: object
+      additionalProperties: false
+      required: [userId]
+      properties:
+        userId:
+          $ref: "#/components/schemas/Uuid"
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: 正式成局后必填的简单理由；确认前可省略。仅内部保存，不发送给其他成员
     PostEventFeedbackInput:
       type: object
       additionalProperties: false

@@ -1,4 +1,6 @@
 import type {
+  AdventurexOnboardingState,
+  MatchOptionContext,
   MatchRequest,
   MatchRoom,
   Message,
@@ -25,6 +27,8 @@ export interface AgentContext {
   relevantMemories: UserMemory[];
   currentIntent: Record<string, unknown>;
   matchRequest: MatchRequest | null;
+  matchOptions: MatchOptionContext | null;
+  onboardingState: AdventurexOnboardingState | null;
   room: MatchRoom | null;
   promptRuntime: Record<string, unknown>;
   budget: AgentContextBudget;
@@ -105,6 +109,8 @@ function selectMemories(
 function buildPromptRuntime(
   currentIntent: Record<string, unknown>,
   matchRequest: MatchRequest | null,
+  matchOptions: MatchOptionContext | null,
+  onboardingState: AdventurexOnboardingState | null,
   room: MatchRoom | null,
   maxTokens: number
 ): Record<string, unknown> {
@@ -114,10 +120,32 @@ function buildPromptRuntime(
       ? {
           requestId: matchRequest.requestId,
           status: matchRequest.status,
+          phase: matchRequest.phase,
+          proactivePushEnabled: matchRequest.proactivePushEnabled,
           roomId: matchRequest.roomId,
           intentSnapshot: matchRequest.intentSnapshot
         }
       : null,
+    matchOptions: matchOptions
+      ? {
+          requestId: matchOptions.requestId,
+          roundId: matchOptions.roundId,
+          expiresAt: matchOptions.expiresAt,
+          options: matchOptions.options.map((option) => ({
+            optionNumber: option.optionNumber,
+            offerId: option.offerId,
+            sourceType: option.sourceType,
+            draftId: option.draftId,
+            roomId: option.roomId,
+            sourceVersion: option.sourceVersion,
+            offlineGameId: option.offlineGameId,
+            activityName: option.activityName,
+            previewText: option.previewText,
+            hooks: option.hooks
+          }))
+        }
+      : null,
+    onboardingState,
     room: room
       ? {
           roomId: room.roomId,
@@ -140,8 +168,31 @@ function buildPromptRuntime(
   return {
     currentIntentSummary: truncateToEstimatedTokens(JSON.stringify(currentIntent), Math.floor(maxTokens * 0.55)),
     matchRequest: matchRequest
-      ? { requestId: matchRequest.requestId, status: matchRequest.status, roomId: matchRequest.roomId }
+      ? {
+          requestId: matchRequest.requestId,
+          status: matchRequest.status,
+          phase: matchRequest.phase,
+          proactivePushEnabled: matchRequest.proactivePushEnabled,
+          roomId: matchRequest.roomId
+        }
       : null,
+    matchOptions: matchOptions
+      ? {
+          requestId: matchOptions.requestId,
+          options: matchOptions.options.map((option) => ({
+            optionNumber: option.optionNumber,
+            offerId: option.offerId,
+            sourceType: option.sourceType,
+            hooks: option.hooks.map((hook) => ({
+              hookId: hook.hookId,
+              hookText: hook.hookText,
+              sourceUserId: hook.sourceUserId,
+              certainty: hook.certainty
+            }))
+          }))
+        }
+      : null,
+    onboardingState,
     room: room
       ? {
           roomId: room.roomId,
@@ -166,6 +217,8 @@ export function buildAgentContext(
     checkpoint?: string;
     memoryProfile?: UserMemoryProfile | null;
     relevantMemories?: UserMemory[];
+    matchOptions?: MatchOptionContext | null;
+    onboardingState?: AdventurexOnboardingState | null;
     excludeMessageId?: string;
   } = {},
   options: ContextAssemblerOptions = {}
@@ -199,15 +252,19 @@ export function buildAgentContext(
   if (selectedMemories.truncated) truncatedSections.push("relevantMemories");
 
   const matchRequest = socialState.matchRequest ?? null;
+  const matchOptions = socialState.matchOptions ?? null;
+  const onboardingState = socialState.onboardingState ?? null;
   const room = socialState.room ?? null;
   const promptRuntime = buildPromptRuntime(
     userModel.currentIntent,
     matchRequest,
+    matchOptions,
+    onboardingState,
     room,
     limits.runtimeTokenBudget
   );
   const runtimeTokens = estimateTokens(promptRuntime);
-  if (estimateTokens({ currentIntent: userModel.currentIntent, matchRequest, room }) > runtimeTokens) {
+  if (estimateTokens({ currentIntent: userModel.currentIntent, matchRequest, matchOptions, onboardingState, room }) > runtimeTokens) {
     truncatedSections.push("runtimeState");
   }
 
@@ -225,6 +282,8 @@ export function buildAgentContext(
     relevantMemories: selectedMemories.memories,
     currentIntent: structuredClone(userModel.currentIntent),
     matchRequest,
+    matchOptions,
+    onboardingState,
     room,
     promptRuntime,
     budget: {

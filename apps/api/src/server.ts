@@ -9,7 +9,12 @@ import {
 import { HostedLlmIntelligence, JobProcessor, TavilyWebSearchProvider } from "@tomeet/intelligence";
 import { CredentialCipher, WechatILinkClient } from "@tomeet/wechat-ilink";
 import { buildApp } from "./app.js";
-import { createSupabaseAccessTokenVerifier, type AccessTokenVerifier } from "./auth.js";
+import {
+  createSupabaseAccessTokenVerifier,
+  createSupabaseEmailAccessTokenMatcher,
+  type AccessTokenVerifier,
+  type EmailAccessTokenMatcher
+} from "./auth.js";
 import { config } from "dotenv";
 
 config({ path: resolve(process.cwd(), ".env") });
@@ -35,6 +40,8 @@ for (const rawOrigin of (frontendOrigin ?? "http://localhost:3000").split(",")) 
 
 let store: DataStore;
 let verifyAccessToken: AccessTokenVerifier | undefined;
+let wechatRapidQrAccessTokenMatches: EmailAccessTokenMatcher | undefined;
+let adventurexTestPoolAccessTokenMatches: EmailAccessTokenMatcher | undefined;
 let supabaseStore: SupabaseStore | undefined;
 
 if (demoMode) {
@@ -46,6 +53,20 @@ if (demoMode) {
   supabaseStore = new SupabaseStore(url, key);
   store = supabaseStore;
   verifyAccessToken = createSupabaseAccessTokenVerifier(url, key);
+  wechatRapidQrAccessTokenMatches = createSupabaseEmailAccessTokenMatcher(
+    url,
+    key,
+    process.env.WECHAT_RAPID_QR_EMAIL ?? "andy4fe0119@gmail.com"
+  );
+  if (process.env.ADVENTUREX_TEST_POOL_ENABLED === "true") {
+    adventurexTestPoolAccessTokenMatches = createSupabaseEmailAccessTokenMatcher(
+      url,
+      key,
+      process.env.ADVENTUREX_TEST_POOL_EMAIL
+        ?? process.env.WECHAT_RAPID_QR_EMAIL
+        ?? "andy4fe0119@gmail.com"
+    );
+  }
 }
 
 const wechatEncryptionKey = process.env.WECHAT_CREDENTIAL_ENCRYPTION_KEY;
@@ -57,7 +78,12 @@ const wechat = wechatEncryptionKey
       client: new WechatILinkClient({
         qrBaseUrl: process.env.WECHAT_ILINK_QR_BASE_URL
       }),
-      cipher: new CredentialCipher(wechatEncryptionKey)
+      cipher: new CredentialCipher(wechatEncryptionKey),
+      bubbleDelayMs: parseNonNegativeInteger(
+        process.env.WECHAT_BUBBLE_DELAY_MS,
+        200,
+        "WECHAT_BUBBLE_DELAY_MS"
+      )
     }
   : undefined;
 
@@ -81,7 +107,9 @@ if (demoMode) {
     webSearchProvider,
     onWebSearchEvent: (event) => console.info(JSON.stringify({ level: "info", event: "web_search", ...event }))
   });
-  inlineProcessor = new JobProcessor(store, hosted, hosted);
+  inlineProcessor = new JobProcessor(store, hosted, hosted, {
+    adventurexMatchingV1: process.env.ADVENTUREX_MATCHING_V1 === "true"
+  });
 }
 
 const app = await buildApp({
@@ -98,10 +126,13 @@ const app = await buildApp({
   rateLimitMax: parsePositiveInteger(process.env.RATE_LIMIT_MAX, 120, "RATE_LIMIT_MAX"),
   wechatQrRateLimitMax: parsePositiveInteger(
     process.env.WECHAT_PUBLIC_QR_RATE_LIMIT_MAX,
-    5,
+    30,
     "WECHAT_PUBLIC_QR_RATE_LIMIT_MAX"
   ),
-  exposeInternalErrors: !isProduction
+  wechatRapidQrAccessTokenMatches,
+  adventurexTestPoolAccessTokenMatches,
+  exposeInternalErrors: !isProduction,
+  adventurexMatchingV1: process.env.ADVENTUREX_MATCHING_V1 === "true"
 });
 
 console.info(JSON.stringify({
@@ -114,6 +145,13 @@ function parsePositiveInteger(value: string | undefined, fallback: number, name:
   if (value === undefined || value === "") return fallback;
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} 必须是正整数`);
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} 必须是非负整数`);
   return parsed;
 }
 

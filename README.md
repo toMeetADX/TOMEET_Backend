@@ -90,7 +90,11 @@ LLM 适配器采用 OpenAI 兼容的 Chat Completions HTTP 边界，当前已通
 
 Agent 会先生成受约束的搜索计划。明确要求联网、询问实时信息或出现无法可靠识别的专名时，Worker 使用 Tavily 搜索，再让模型只依据搜索证据生成候选回复，并在发布前独立核验活动名称、地点、日期和日程。来源保留在 `webSearch.sources` 元数据中，不拼接到 Agent 消息正文。普通聊天、稳定常识和单纯的社交意图不会调用搜索。未配置 `TAVILY_API_KEY` 时服务仍可启动，但 Agent 会明确说明无法联网核实，不会根据模型记忆猜测实时事实。
 
-真实模型会输出受约束的结构化动作：`start_match`、`confirm_room`、`complete_room`、`submit_feedback`。Worker 执行动作前仍会通过领域规则和 Supabase RPC 校验，模型不能绕过房间状态或匹配约束。
+真实模型会输出受约束的结构化动作，包括开始/取消/重开匹配、选择/刷新候选、授权或停止主动推送、把 watching 重新激活为实时匹配、退出/确认/完成房间和提交反馈。Worker 执行动作前仍会通过领域规则和 Supabase RPC 校验，模型不能绕过房间状态或匹配约束。
+
+AdventureX 冷启动匹配使用在线贪心竞价：当前 `waiting` 用户优先，已授权主动推送的 `watching` 用户次之；活动最低人数是硬约束，只有 Agent 判定为 `good` 或 `excellent` 的人与活动组合才会发送。30 秒只是后台清算 tick，90 秒只在 1–3 个真实候选实际生成后开始。没有合格候选时系统如实说明池小或契合度不足，并询问是否以后通过微信主动推送。
+
+业务流程产生候选、成局、超时、房间变化或渠道能力边界时，只向 Hosted Agent 提交结构化事实，不在生产代码中拼接固定回复。Agent 先结合用户当前对话和记忆摘要生成措辞，再进行一次基于同一事实载荷的发布前校验；选项编号必须完整覆盖，确认成员与可能成员不能混写，也不能新增人格或兴趣标签。唯一明确保留的硬编码产品话术是首次 AdventureX 欢迎语。
 
 ## Railway 部署
 
@@ -101,7 +105,7 @@ Agent 会先生成受约束的搜索计划。明确要求联网、询问实时�
 ### API Service
 
 - Config file：`/railway.api.toml`
-- 环境变量：`NODE_ENV=production`、`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`FRONTEND_ORIGIN`、`DEMO_MODE=false`
+- 环境变量：`NODE_ENV=production`、`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`FRONTEND_ORIGIN`、`DEMO_MODE=false`、`ADVENTUREX_MATCHING_V1=true`
 - `FRONTEND_ORIGIN` 支持逗号分隔多个来源，例如本地测试台和现有 Vercel 域名。
 - 非健康检查接口要求 `Authorization: Bearer <Supabase access token>`，请求中的 `userId` 必须等于 token 用户。
 - Railway 通过 `/health` 做存活检查，通过 `/ready` 检查 Supabase 连接。
@@ -109,7 +113,7 @@ Agent 会先生成受约束的搜索计划。明确要求联网、询问实时�
 ### Intelligence Worker Service
 
 - Config file：`/railway.worker.toml`
-- 环境变量：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、真实模型配置和用于联网搜索的 `TAVILY_API_KEY`。
+- 环境变量：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、真实模型配置、用于联网搜索的 `TAVILY_API_KEY`，以及与 API 一致的 `ADVENTUREX_MATCHING_V1=true`。
 - `WORKER_CONCURRENCY` 默认 `8`，单实例最大允许 `32`；也可以在 Railway 横向增加副本。
 
 Worker 使用 Supabase PostgreSQL 的 `FOR UPDATE SKIP LOCKED` 领取任务。多槽位和多副本不会重复领取同一任务；`partition_key=user:{userId}` 保证同一用户任务严格顺序执行，不同用户仍可并行。失败任务使用指数退避，进程中断后的锁会自动回收。
@@ -366,7 +370,7 @@ export interface MatchRequest {
   requestId: string;
   userId: string;
   intentSnapshot: Record<string, unknown>;
-  status: "matching" | "matched" | "cancelled";
+  status: "matching" | "matched" | "cancelled" | "expired";
 }
 
 export interface MatchDecision {
@@ -496,6 +500,7 @@ SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 LLM_API_KEY
 FRONTEND_ORIGIN
+ADVENTUREX_MATCHING_V1
 ```
 
 ### Railway Intelligence Worker
@@ -506,14 +511,16 @@ SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 LLM_API_KEY
 TAVILY_API_KEY
+ADVENTUREX_MATCHING_V1
 ```
 
 ## 11. 完成标准
 
 - Agent 能通过长期对话和多模态输入持续认识用户。
 - 用户表达社交意图后，系统能创建匹配请求。
-- LLM 能匹配 3–10 人并选择一款已有线下游戏。
-- 系统能创建房间并完成成员确认。
+- 用户能通过 Agent 收到并自然语言选择 1–3 个现场活动候选。
+- 系统只用明确接受的候选原子创建 3–10 人确认房间，并支持合适的开放局补位。
+- 成员、集合信息和招募状态变化能通过幂等 Agent 消息主动通知。
 - 活动结束后，用户能向 Agent 反馈感受和连接结果。
 - 反馈能更新用户意图，并影响下一次匹配和游戏选择。
 

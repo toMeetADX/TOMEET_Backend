@@ -146,3 +146,46 @@ test("existing migrations cannot be deleted", async () => {
     )
   );
 });
+
+test("an exact documented approval allows an intentional destructive migration", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "migration-safety-approved-"));
+  await mkdir(join(repoRoot, "supabase", "migrations"), { recursive: true });
+  await mkdir(join(repoRoot, "scripts"), { recursive: true });
+  const migrationName = "20260725180000_merge_duplicate_state.sql";
+  const migrationContent = "drop table public.duplicate_state;\n";
+  const { createHash } = await import("node:crypto");
+  const migrationHash = createHash("sha256").update(migrationContent).digest("hex");
+  await writeFile(
+    join(repoRoot, "scripts", "config.json"),
+    JSON.stringify({
+      approvedLegacyMigrations: {},
+      approvedDestructiveMigrations: {
+        [migrationName]: {
+          sha256: migrationHash,
+          reason: "Canonical data is backfilled before replacing the duplicate table with a view."
+        }
+      }
+    })
+  );
+  await writeFile(
+    join(repoRoot, "supabase", "migrations", migrationName),
+    migrationContent
+  );
+  git(repoRoot, "init", "-b", "main");
+  git(repoRoot, "config", "user.name", "Migration Test");
+  git(repoRoot, "config", "user.email", "migration@example.invalid");
+  git(repoRoot, "add", ".");
+  git(repoRoot, "commit", "-m", "base");
+  git(repoRoot, "branch", "base");
+  await writeFile(join(repoRoot, "README.md"), "trigger head commit\n");
+  git(repoRoot, "add", ".");
+  git(repoRoot, "commit", "-m", "head");
+
+  const result = await checkMigrations({
+    repoRoot,
+    options: { all: true },
+    configPath: join(repoRoot, "scripts", "config.json")
+  });
+  assert.equal(result.safe, true);
+  assert.equal(result.inspected[0]?.destructiveApproved, true);
+});

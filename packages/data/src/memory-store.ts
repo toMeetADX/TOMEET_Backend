@@ -1,29 +1,49 @@
 import { randomUUID } from "node:crypto";
 import type {
+  AdventurexLanguage,
+  AdventurexTestPoolStatus,
+  AdventurexOnboardingState,
   ChannelIdentity,
   ChannelProvider,
+  FinalRoomDecision,
   LlmJob,
+  MatchChoice,
   MatchDecision,
+  MatchDraft,
+  MatchOptionContext,
+  MatchOptionOffer,
   MatchRequest,
+  MatchRound,
   MatchRoom,
   Message,
   OfflineGame,
   PostEventFeedback,
+  SaveMatchChoicesInput,
+  SocialHook,
+  SocialHookDraft,
   UserMemory,
   UserMemoryProfile,
   UserModel
 } from "@tomeet/contracts";
+import { adventurexWelcomeContent } from "@tomeet/contracts";
 import { curatedGames } from "@tomeet/game-catalog";
 import type { MatchCandidate } from "@tomeet/matchmaking";
-import { validateMatchDecision } from "@tomeet/matchmaking";
+import {
+  validateFinalRoomDecision,
+  validateMatchDecision
+} from "@tomeet/matchmaking";
 import { createDefaultUserModel } from "@tomeet/user-model";
 import type {
   ApplyMemoryChangesInput,
   ApplyMemoryChangesResult,
   DataStore,
+  DraftChangeNotification,
   EnqueueJobInput,
   LinkChannelIdentityInput,
-  MultimodalRecordInput
+  MultimodalRecordInput,
+  RoomChangeNotification,
+  RoundSettlementState,
+  SaveRoundPlanInput
 } from "./store.js";
 import { StoreConflictError, StoreNotFoundError } from "./store.js";
 
@@ -39,6 +59,7 @@ interface MemoryUser {
 export class MemoryStore implements DataStore {
   private readonly users = new Map<string, MemoryUser>();
   private readonly messages: Message[] = [];
+  private readonly wechatResponseGenerations = new Map<string, string>();
   private readonly matchRequests = new Map<string, MatchRequest>();
   private readonly rooms = new Map<string, MatchRoom>();
   private readonly jobs = new Map<string, LlmJob>();
@@ -50,6 +71,29 @@ export class MemoryStore implements DataStore {
   private readonly userMemories = new Map<string, UserMemory>();
   private readonly memoryProfiles = new Map<string, UserMemoryProfile>();
   private readonly channelIdentities = new Map<string, ChannelIdentity>();
+  private readonly onboardingStates = new Map<string, AdventurexOnboardingState>();
+  private readonly socialHooks = new Map<string, SocialHook>();
+  private readonly rounds = new Map<string, MatchRound>();
+  private readonly roundByBucket = new Map<string, string>();
+  private readonly roundRequests = new Map<string, Set<string>>();
+  private readonly drafts = new Map<string, MatchDraft>();
+  private readonly draftTempKeys = new Map<string, string>();
+  private readonly offers = new Map<string, MatchOptionOffer>();
+  private readonly choices = new Map<string, MatchChoice>();
+  private readonly roomIntros = new Map<string, string>();
+  private readonly roomWithdrawalReasons = new Map<string, string>();
+  private readonly roomNotifications = new Map<string, RoomChangeNotification>();
+  private readonly deliveredRoomNotifications = new Set<string>();
+  private readonly draftNotifications = new Map<string, DraftChangeNotification>();
+  private readonly deliveredDraftNotifications = new Set<string>();
+  private readonly demoUserIds = new Set<string>();
+  private readonly testPools = new Map<string, {
+    enabled: boolean;
+    desiredUserCount: number;
+    userIds: string[];
+    updatedAt: string;
+  }>();
+  private readonly wechatOutboundMessages = new Map<string, Message>();
 
   constructor(options: { seedDemoData?: boolean } = {}) {
     if (options.seedDemoData) this.seedDemoData();
@@ -65,6 +109,20 @@ export class MemoryStore implements DataStore {
       version: 0,
       stale: false,
       updatedAt: new Date().toISOString()
+    };
+  }
+
+  private createOnboardingState(userId: string): AdventurexOnboardingState {
+    const now = new Date().toISOString();
+    return {
+      userId,
+      stage: "new",
+      imageDeclined: false,
+      preferredLanguage: "zh",
+      boundaryPromptedAt: null,
+      welcomeSentAt: null,
+      createdAt: now,
+      updatedAt: now
     };
   }
 
@@ -84,7 +142,9 @@ export class MemoryStore implements DataStore {
         model,
         conversation: { rollingSummary: "", summarizedMessageCount: 0 }
       });
+      this.demoUserIds.add(userId);
       this.memoryProfiles.set(userId, this.createMemoryProfile(userId));
+      this.onboardingStates.set(userId, this.createOnboardingState(userId));
       const now = new Date().toISOString();
       const requestId = randomUUID();
       this.matchRequests.set(requestId, {
@@ -92,6 +152,10 @@ export class MemoryStore implements DataStore {
         userId,
         intentSnapshot: model.currentIntent,
         status: "matching",
+        phase: "waiting",
+        proactivePushEnabled: false,
+        activeRoundId: null,
+        optionsExpiresAt: null,
         roomId: null,
         createdAt: now,
         updatedAt: now
@@ -107,12 +171,78 @@ export class MemoryStore implements DataStore {
         conversation: { rollingSummary: "", summarizedMessageCount: 0 }
       });
       this.memoryProfiles.set(userId, this.createMemoryProfile(userId));
+      this.onboardingStates.set(userId, this.createOnboardingState(userId));
     } else if (displayName !== "新朋友") {
       this.users.get(userId)!.displayName = displayName;
     }
     if (!this.memoryProfiles.has(userId)) {
       this.memoryProfiles.set(userId, this.createMemoryProfile(userId));
     }
+    if (!this.onboardingStates.has(userId)) {
+      this.onboardingStates.set(userId, this.createOnboardingState(userId));
+    }
+  }
+
+  async ensureAdventurexOnboardingState(userId: string): Promise<AdventurexOnboardingState> {
+    await this.ensureUser(userId);
+    return structuredClone(this.onboardingStates.get(userId)!);
+  }
+
+  async startAdventurexOnboarding(
+    userId: string,
+    language: AdventurexLanguage = "zh"
+  ): Promise<Message | null> {
+    await this.ensureUser(userId);
+    const state = this.onboardingStates.get(userId)!;
+    const idempotencyKey = `adventurex-welcome:${language}:${userId}`;
+    const existing = this.messages.find((message) => message.id === idempotencyKey);
+    if (existing) {
+      state.preferredLanguage = language;
+      if (state.stage === "new") state.stage = "awaiting_image_or_text";
+      state.welcomeSentAt ??= existing.createdAt;
+      state.updatedAt = new Date().toISOString();
+      return structuredClone(existing);
+    }
+    const priorConversation = this.messages.filter((message) => message.userId === userId);
+    if (priorConversation.length > 0) {
+      state.preferredLanguage = language;
+      if (state.stage === "new" || state.stage === "awaiting_image_or_text") state.stage = "exploring";
+      state.updatedAt = new Date().toISOString();
+      return null;
+    }
+    const message = await this.appendMessage({
+      userId,
+      role: "assistant",
+      content: adventurexWelcomeContent(language),
+      idempotencyKey
+    });
+    const now = new Date().toISOString();
+    state.stage = "awaiting_image_or_text";
+    state.preferredLanguage = language;
+    state.welcomeSentAt = now;
+    state.updatedAt = now;
+    return message;
+  }
+
+  async updateAdventurexOnboardingState(
+    userId: string,
+    patch: {
+      stage?: AdventurexOnboardingState["stage"];
+      imageDeclined?: boolean;
+      preferredLanguage?: AdventurexLanguage;
+      boundaryPrompted?: boolean;
+    }
+  ): Promise<AdventurexOnboardingState> {
+    await this.ensureUser(userId);
+    const state = this.onboardingStates.get(userId)!;
+    if (patch.stage) state.stage = patch.stage;
+    if (patch.imageDeclined !== undefined) state.imageDeclined = patch.imageDeclined;
+    if (patch.preferredLanguage) state.preferredLanguage = patch.preferredLanguage;
+    if (patch.boundaryPrompted && !state.boundaryPromptedAt) {
+      state.boundaryPromptedAt = new Date().toISOString();
+    }
+    state.updatedAt = new Date().toISOString();
+    return structuredClone(state);
   }
 
   async resolveChannelIdentity(
@@ -152,6 +282,8 @@ export class MemoryStore implements DataStore {
     role: "user" | "assistant";
     content: string;
     idempotencyKey?: string;
+    sourceChannel?: Message["sourceChannel"];
+    replyToMessageId?: string | null;
   }): Promise<Message> {
     await this.ensureUser(input.userId);
     if (input.idempotencyKey) {
@@ -163,10 +295,39 @@ export class MemoryStore implements DataStore {
       userId: input.userId,
       role: input.role,
       content: input.content,
+      sourceChannel: input.sourceChannel ?? "legacy",
+      replyToMessageId: input.replyToMessageId ?? null,
       createdAt: new Date().toISOString()
     };
     this.messages.push(message);
     return message;
+  }
+
+  async setWechatResponseGeneration(connectionId: string, generationToken: string): Promise<void> {
+    this.wechatResponseGenerations.set(connectionId, generationToken);
+  }
+
+  async isWechatResponseGenerationCurrent(
+    connectionId: string,
+    generationToken: string
+  ): Promise<boolean> {
+    return this.wechatResponseGenerations.get(connectionId) === generationToken;
+  }
+
+  async appendMessageIfWechatGenerationCurrent(input: {
+    connectionId: string;
+    generationToken: string;
+    userId: string;
+    role: "user" | "assistant";
+    content: string;
+    idempotencyKey?: string;
+    sourceChannel?: Message["sourceChannel"];
+    replyToMessageId?: string | null;
+  }): Promise<Message | null> {
+    if (!(await this.isWechatResponseGenerationCurrent(input.connectionId, input.generationToken))) {
+      return null;
+    }
+    return this.appendMessage(input);
   }
 
   async listRecentMessages(userId: string, limit = 50): Promise<Message[]> {
@@ -385,10 +546,64 @@ export class MemoryStore implements DataStore {
     input.understanding = structuredClone(understanding);
   }
 
+  async listActiveSocialHooks(userId: string, limit = 32): Promise<SocialHook[]> {
+    await this.ensureUser(userId);
+    return [...this.socialHooks.values()]
+      .filter((hook) => hook.userId === userId && hook.status === "active")
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, Math.min(Math.max(limit, 1), 128))
+      .map((hook) => structuredClone(hook));
+  }
+
+  async saveSocialHooks(userId: string, drafts: SocialHookDraft[]): Promise<SocialHook[]> {
+    await this.ensureUser(userId);
+    const saved: SocialHook[] = [];
+    for (const draft of drafts) {
+      const sourceIds = [...new Set(draft.evidenceMessageIds)];
+      if (sourceIds.length === 0 || sourceIds.some((messageId) => !this.messages.some(
+        (message) => message.id === messageId && message.userId === userId && message.role === "user"
+      ))) {
+        throw new StoreConflictError("社交钩子只能引用当前用户的文字消息");
+      }
+      const existing = [...this.socialHooks.values()].find(
+        (hook) => hook.userId === userId && hook.hookText === draft.hookText
+      );
+      const now = new Date().toISOString();
+      if (existing) {
+        existing.status = "active";
+        existing.sourceMessageIds = [...new Set([...existing.sourceMessageIds, ...sourceIds])].slice(0, 8);
+        existing.updatedAt = now;
+        saved.push(structuredClone(existing));
+        continue;
+      }
+      const hook: SocialHook = {
+        id: randomUUID(),
+        userId,
+        hookText: draft.hookText,
+        sourceMessageIds: sourceIds,
+        status: "active",
+        createdAt: now,
+        updatedAt: now
+      };
+      this.socialHooks.set(hook.id, hook);
+      saved.push(structuredClone(hook));
+    }
+    return saved;
+  }
+
+  async forgetSocialHook(userId: string, hookId: string): Promise<void> {
+    const hook = this.socialHooks.get(hookId);
+    if (!hook || hook.userId !== userId) throw new StoreNotFoundError("社交钩子不存在");
+    hook.status = "forgotten";
+    hook.updatedAt = new Date().toISOString();
+  }
+
   async createMatchRequest(userId: string, intentSnapshot: Record<string, unknown>): Promise<MatchRequest> {
     await this.ensureUser(userId);
     const activeRoom = [...this.rooms.values()].find(
-      (room) => room.status !== "completed" && room.members.some((member) => member.userId === userId)
+      (room) => room.status !== "completed" && room.members.some(
+        (member) => member.userId === userId && member.participationStatus !== "withdrawn"
+      )
     );
     if (activeRoom) throw new StoreConflictError("你还有一个未结束的匹配房间");
     const existing = [...this.matchRequests.values()].find(
@@ -401,6 +616,10 @@ export class MemoryStore implements DataStore {
       userId,
       intentSnapshot: structuredClone(intentSnapshot),
       status: "matching",
+      phase: "waiting",
+      proactivePushEnabled: false,
+      activeRoundId: null,
+      optionsExpiresAt: null,
       roomId: null,
       createdAt: now,
       updatedAt: now
@@ -426,8 +645,543 @@ export class MemoryStore implements DataStore {
     if (!request) throw new StoreNotFoundError("匹配请求不存在");
     if (request.status !== "matching") throw new StoreConflictError("只能取消仍在匹配中的请求");
     request.status = "cancelled";
+    request.phase = "waiting";
+    request.proactivePushEnabled = false;
+    request.activeRoundId = null;
+    request.optionsExpiresAt = null;
+    request.updatedAt = new Date().toISOString();
+    for (const offer of this.offers.values()) {
+      if (offer.requestId === requestId && offer.status === "offered") offer.status = "expired";
+    }
+    return structuredClone(request);
+  }
+
+  async restartMatch(endedRequestId: string): Promise<MatchRequest> {
+    const previous = this.matchRequests.get(endedRequestId);
+    if (!previous) throw new StoreNotFoundError("匹配请求不存在");
+    if (previous.status !== "cancelled" && previous.status !== "expired") {
+      throw new StoreConflictError("只能从已取消或已超时的请求重新匹配");
+    }
+    return this.createMatchRequest(previous.userId, structuredClone(previous.intentSnapshot));
+  }
+
+  async setMatchRequestInterest(
+    requestId: string,
+    input: {
+      phase: "waiting" | "push_consent" | "watching";
+      proactivePushEnabled: boolean;
+      clearRound?: boolean;
+    }
+  ): Promise<MatchRequest> {
+    const request = this.matchRequests.get(requestId);
+    if (!request || request.status !== "matching") throw new StoreNotFoundError("匹配请求不存在或已结束");
+    request.phase = input.phase;
+    request.proactivePushEnabled = input.proactivePushEnabled;
+    if (input.clearRound) {
+      request.activeRoundId = null;
+      request.optionsExpiresAt = null;
+      for (const offer of this.offers.values()) {
+        if (offer.requestId === requestId && offer.status === "offered") offer.status = "expired";
+      }
+    }
     request.updatedAt = new Date().toISOString();
     return structuredClone(request);
+  }
+
+  async getAdventurexTestPoolStatus(ownerUserId: string): Promise<AdventurexTestPoolStatus> {
+    const state = this.testPools.get(ownerUserId) ?? {
+      enabled: false,
+      desiredUserCount: 5,
+      userIds: [],
+      updatedAt: new Date(0).toISOString()
+    };
+    const availableRequestCount = state.userIds.filter((userId) =>
+      [...this.matchRequests.values()].some((request) => request.userId === userId && request.status === "matching")
+    ).length;
+    return {
+      ownerUserId,
+      enabled: state.enabled,
+      desiredUserCount: state.desiredUserCount,
+      provisionedUserCount: state.userIds.length,
+      availableRequestCount,
+      updatedAt: state.updatedAt
+    };
+  }
+
+  async configureAdventurexTestPool(
+    ownerUserId: string,
+    input: { enabled: boolean; desiredUserCount: number }
+  ): Promise<AdventurexTestPoolStatus> {
+    await this.ensureUser(ownerUserId);
+    const existing = this.testPools.get(ownerUserId) ?? {
+      enabled: false,
+      desiredUserCount: input.desiredUserCount,
+      userIds: [],
+      updatedAt: new Date().toISOString()
+    };
+    existing.enabled = input.enabled;
+    existing.desiredUserCount = input.desiredUserCount;
+    existing.updatedAt = new Date().toISOString();
+    const fixtureFacts = [
+      "独立完成过一款小游戏",
+      "组织过一次十人线下活动",
+      "参加过两次现场黑客松",
+      "和朋友做过一场小型展览",
+      "在乐队里负责过贝斯",
+      "连续记录过一百天城市照片",
+      "带队完成过一次户外挑战",
+      "做过一套现场互动卡牌",
+      "主持过多次陌生人圆桌",
+      "和团队共同完成过短片"
+    ];
+    while (existing.userIds.length < input.desiredUserCount) {
+      const index = existing.userIds.length;
+      const userId = randomUUID();
+      await this.ensureUser(userId, `虚拟测试用户${index + 1}`);
+      this.demoUserIds.add(userId);
+      const user = this.users.get(userId)!;
+      user.model.vibeNarrative = `测试人物 ${index + 1}：表达节奏清楚，愿意通过具体活动逐步进入交流。`;
+      user.model.currentIntent = { rawText: "愿意参加现场活动并认识新的人" };
+      const source = await this.appendMessage({
+        userId,
+        role: "user",
+        content: `我${fixtureFacts[index % fixtureFacts.length]}`,
+        idempotencyKey: `test-pool-source:${ownerUserId}:${index}`
+      });
+      await this.saveSocialHooks(userId, [{
+        hookText: fixtureFacts[index % fixtureFacts.length]!,
+        evidenceMessageIds: [source.id]
+      }]);
+      existing.userIds.push(userId);
+    }
+    this.testPools.set(ownerUserId, existing);
+    return this.getAdventurexTestPoolStatus(ownerUserId);
+  }
+
+  async prepareAdventurexTestPool(ownerUserId: string): Promise<MatchRequest[]> {
+    const state = this.testPools.get(ownerUserId);
+    if (!state?.enabled) return [];
+    const requests: MatchRequest[] = [];
+    for (const userId of state.userIds.slice(0, state.desiredUserCount)) {
+      const active = [...this.matchRequests.values()].find(
+        (request) => request.userId === userId && request.status === "matching"
+      );
+      const request = active ?? await this.createMatchRequest(userId, {
+        rawText: "愿意参加现场活动并认识新的人",
+        virtualTestUser: true,
+        testPoolOwnerUserId: ownerUserId
+      });
+      requests.push(request);
+    }
+    return requests;
+  }
+
+  async createOrGetMatchRound(bucketKey: string, _scheduledAt: string): Promise<MatchRound> {
+    const existingId = this.roundByBucket.get(bucketKey);
+    if (existingId) return structuredClone(this.rounds.get(existingId)!);
+    const now = new Date().toISOString();
+    const round: MatchRound = {
+      roundId: randomUUID(),
+      bucketKey,
+      status: "scheduled",
+      offerExpiresAt: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.rounds.set(round.roundId, round);
+    this.roundByBucket.set(bucketKey, round.roundId);
+    this.roundRequests.set(round.roundId, new Set());
+    return structuredClone(round);
+  }
+
+  async addRequestToRound(roundId: string, requestId: string): Promise<void> {
+    const round = this.rounds.get(roundId);
+    const request = this.matchRequests.get(requestId);
+    if (!round) throw new StoreNotFoundError("匹配轮次不存在");
+    if (!request) throw new StoreNotFoundError("匹配请求不存在");
+    if (request.status !== "matching") throw new StoreConflictError("匹配请求已不活跃");
+    this.roundRequests.get(roundId)!.add(requestId);
+    request.activeRoundId = roundId;
+    request.phase = "waiting";
+    request.optionsExpiresAt = null;
+    request.updatedAt = new Date().toISOString();
+  }
+
+  async listRoundCandidates(roundId: string): Promise<MatchCandidate[]> {
+    const requestIds = this.roundRequests.get(roundId);
+    if (!requestIds) throw new StoreNotFoundError("匹配轮次不存在");
+    const round = this.rounds.get(roundId)!;
+    const assigned = [...requestIds]
+      .map((requestId) => this.matchRequests.get(requestId))
+      .filter((request): request is MatchRequest => Boolean(
+        request && request.status === "matching" && request.phase === "waiting" && request.activeRoundId === roundId
+      ));
+    const watching = round.bucketKey.startsWith("adventurex-test:")
+      ? []
+      : [...this.matchRequests.values()].filter((request) =>
+          request.status === "matching"
+          && request.phase === "watching"
+          && request.proactivePushEnabled
+          && request.intentSnapshot.virtualTestUser !== true
+        );
+    const prioritized = [
+      ...assigned.map((request) => ({ request, matchingPriority: "active_waiting" as const })),
+      ...watching.map((request) => ({
+        request,
+        matchingPriority: [...this.choices.values()].some((choice) => choice.requestId === request.requestId)
+          ? "confirmation_follow_up" as const
+          : "watching" as const
+      }))
+    ];
+    const requests = [...new Map(prioritized.map((entry) => [entry.request.requestId, entry])).values()]
+      .sort((left, right) => {
+        const priorityRank = { active_waiting: 0, confirmation_follow_up: 1, watching: 2 } as const;
+        return priorityRank[left.matchingPriority] - priorityRank[right.matchingPriority]
+          || left.request.createdAt.localeCompare(right.request.createdAt);
+      })
+      .slice(0, 24);
+    return Promise.all(requests.map(async ({ request, matchingPriority }) => ({
+      request: structuredClone(request),
+      userModel: structuredClone(this.users.get(request.userId)!.model),
+      matchingNarrative: this.memoryProfiles.get(request.userId)?.matchingNarrative
+        || this.users.get(request.userId)!.model.vibeNarrative,
+      socialHooks: await this.listActiveSocialHooks(request.userId, 12),
+      matchingPriority
+    })));
+  }
+
+  async saveRoundProposals(input: SaveRoundPlanInput): Promise<MatchOptionOffer[]> {
+    const round = this.rounds.get(input.roundId);
+    if (!round) throw new StoreNotFoundError("匹配轮次不存在");
+    if (round.status === "completed" || round.status === "expired") {
+      return [...this.offers.values()].filter((offer) => offer.roundId === input.roundId).map((offer) => structuredClone(offer));
+    }
+    const tempDraftIds = new Map<string, string>();
+    for (const proposal of input.proposal?.drafts ?? []) {
+      const existingId = this.draftTempKeys.get(`${input.roundId}:${proposal.tempDraftId}`);
+      const existing = existingId ? this.drafts.get(existingId) : undefined;
+      const draftId = existing?.draftId ?? randomUUID();
+      tempDraftIds.set(proposal.tempDraftId, draftId);
+      if (!existing) {
+        this.drafts.set(draftId, {
+          draftId,
+          roundId: input.roundId,
+          offlineGameId: proposal.offlineGameId,
+          status: "collecting",
+          version: 0,
+          targetPlayers: proposal.targetPlayers,
+          candidateRequestIds: [...proposal.candidateRequestIds],
+          rationale: proposal.rationale,
+          createdAt: new Date().toISOString(),
+          expiresAt: input.offerExpiresAt
+        });
+        this.draftTempKeys.set(`${input.roundId}:${proposal.tempDraftId}`, draftId);
+      }
+    }
+    const saved: MatchOptionOffer[] = [];
+    for (const prepared of input.offers) {
+      const request = this.matchRequests.get(prepared.requestId);
+      if (!request || request.status !== "matching" || request.activeRoundId !== input.roundId) continue;
+      const existing = [...this.offers.values()].find(
+        (offer) => offer.requestId === prepared.requestId
+          && offer.roundId === input.roundId
+          && offer.optionNumber === prepared.optionNumber
+      );
+      if (existing) {
+        saved.push(structuredClone(existing));
+        continue;
+      }
+      const draftId = prepared.sourceType === "draft"
+        ? tempDraftIds.get(prepared.tempDraftId ?? "") ?? null
+        : null;
+      if (prepared.sourceType === "draft" && !draftId) throw new StoreConflictError("候选局映射不存在");
+      const offer: MatchOptionOffer = {
+        offerId: randomUUID(),
+        requestId: prepared.requestId,
+        roundId: input.roundId,
+        sourceType: prepared.sourceType,
+        draftId,
+        roomId: prepared.sourceType === "open_room" ? prepared.roomId ?? null : null,
+        sourceVersion: prepared.sourceVersion,
+        optionNumber: prepared.optionNumber,
+        offlineGameId: prepared.offlineGameId,
+        previewText: prepared.previewText,
+        hooks: structuredClone(prepared.hooks),
+        status: "offered",
+        createdAt: new Date().toISOString(),
+        respondedAt: null
+      };
+      this.offers.set(offer.offerId, offer);
+      request.phase = "offered";
+      request.optionsExpiresAt = input.offerExpiresAt;
+      request.updatedAt = new Date().toISOString();
+      saved.push(structuredClone(offer));
+    }
+    round.status = "collecting";
+    round.offerExpiresAt = input.offerExpiresAt;
+    round.updatedAt = new Date().toISOString();
+    return saved;
+  }
+
+  async listCurrentMatchOptions(userId: string): Promise<MatchOptionContext | null> {
+    const request = [...this.matchRequests.values()]
+      .filter((item) => item.userId === userId && item.status === "matching" && ["offered", "selected"].includes(item.phase))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    if (!request?.activeRoundId || !request.optionsExpiresAt) return null;
+    const options = [...this.offers.values()]
+      .filter((offer) => offer.requestId === request.requestId && offer.roundId === request.activeRoundId && offer.status !== "expired")
+      .sort((left, right) => left.optionNumber - right.optionNumber)
+      .map((offer) => {
+        const game = curatedGames.find((item) => item.id === offer.offlineGameId);
+        if (!game) throw new StoreNotFoundError("活动不存在");
+        return {
+          ...structuredClone(offer),
+          activityName: game.name,
+          activityDescription: game.description
+        };
+      });
+    return options.length > 0 ? {
+      requestId: request.requestId,
+      roundId: request.activeRoundId,
+      expiresAt: request.optionsExpiresAt,
+      options
+    } : null;
+  }
+
+  async saveMatchChoices(requestId: string, input: SaveMatchChoicesInput): Promise<MatchChoice[]> {
+    const request = this.matchRequests.get(requestId);
+    if (!request || request.status !== "matching" || !request.activeRoundId) throw new StoreConflictError("匹配请求当前不能选择");
+    if (request.optionsExpiresAt && new Date(request.optionsExpiresAt).getTime() <= Date.now()) {
+      throw new StoreConflictError("候选已过期");
+    }
+    const acceptedNumbers = [...new Set(input.acceptedOptionNumbers)];
+    const currentOffers = [...this.offers.values()].filter(
+      (offer) => offer.requestId === requestId && offer.roundId === request.activeRoundId && offer.status !== "expired"
+    );
+    const acceptedOffers = acceptedNumbers.map((number) => currentOffers.find((offer) => offer.optionNumber === number));
+    if (acceptedOffers.some((offer) => !offer)) throw new StoreConflictError("选择包含不存在的候选编号");
+    const allowedRequiredHooks = new Set(acceptedOffers.flatMap((offer) => offer!.hooks.map((hook) => hook.hookId)));
+    if (input.requiredHookIds.some((hookId) => !allowedRequiredHooks.has(hookId))) {
+      throw new StoreConflictError("required hook 必须来自已接受候选");
+    }
+    for (const [choiceId, choice] of this.choices) {
+      if (choice.requestId === requestId && choice.roundId === request.activeRoundId) this.choices.delete(choiceId);
+    }
+    const now = new Date().toISOString();
+    const saved = acceptedOffers.map((offer, index): MatchChoice => {
+      const requiredHookIds = input.requiredHookIds.filter((hookId) => offer!.hooks.some((hook) => hook.hookId === hookId));
+      const choice: MatchChoice = {
+        choiceId: randomUUID(),
+        requestId,
+        roundId: request.activeRoundId!,
+        sourceType: offer!.sourceType,
+        draftId: offer!.draftId,
+        roomId: offer!.roomId,
+        preferenceRank: input.preferredOptionNumber === null
+          ? 1
+          : offer!.optionNumber === input.preferredOptionNumber ? 1 : Math.min(3, index + 2),
+        requiredHookIds,
+        rawUserText: input.rawText,
+        createdAt: now
+      };
+      this.choices.set(choice.choiceId, choice);
+      return structuredClone(choice);
+    });
+    for (const offer of currentOffers) {
+      offer.status = acceptedNumbers.includes(offer.optionNumber as 1 | 2 | 3) ? "accepted" : "rejected";
+      offer.respondedAt = now;
+    }
+    request.phase = "selected";
+    request.updatedAt = now;
+    return saved;
+  }
+
+  async expireMatchOptions(requestId: string): Promise<void> {
+    const request = this.matchRequests.get(requestId);
+    if (!request) throw new StoreNotFoundError("匹配请求不存在");
+    for (const offer of this.offers.values()) {
+      if (offer.requestId === requestId && ["offered", "accepted", "rejected"].includes(offer.status)) offer.status = "expired";
+    }
+    for (const [choiceId, choice] of this.choices) {
+      if (choice.requestId === requestId) this.choices.delete(choiceId);
+    }
+    if (request.status === "matching") {
+      request.phase = "waiting";
+      request.activeRoundId = null;
+      request.optionsExpiresAt = null;
+      request.updatedAt = new Date().toISOString();
+    }
+  }
+
+  async getRoundSettlementState(roundId: string): Promise<RoundSettlementState> {
+    const round = this.rounds.get(roundId);
+    if (!round) throw new StoreNotFoundError("匹配轮次不存在");
+    const requestIds = this.roundRequests.get(roundId) ?? new Set<string>();
+    const requests = [...requestIds].map((requestId) => this.matchRequests.get(requestId)).filter(Boolean) as MatchRequest[];
+    const hooks = requests.flatMap((request) => [...this.socialHooks.values()].filter(
+      (hook) => hook.userId === request.userId && hook.status === "active"
+    ));
+    return {
+      round: structuredClone(round),
+      drafts: [...this.drafts.values()].filter((draft) => draft.roundId === roundId).map((draft) => structuredClone(draft)),
+      choices: [...this.choices.values()].filter((choice) => choice.roundId === roundId).map((choice) => structuredClone(choice)),
+      requests: requests.map((request) => structuredClone(request)),
+      hooks: hooks.map((hook) => structuredClone(hook))
+    };
+  }
+
+  async settleMatchRound(roundId: string, decisions: FinalRoomDecision[]): Promise<string[]> {
+    const round = this.rounds.get(roundId);
+    if (!round) throw new StoreNotFoundError("匹配轮次不存在");
+    if (round.status === "completed") {
+      return [...this.rooms.values()]
+        .filter((room) => room.sourceDraftId && this.drafts.get(room.sourceDraftId)?.roundId === roundId)
+        .map((room) => room.roomId);
+    }
+    round.status = "settling";
+    const state = await this.getRoundSettlementState(roundId);
+    const hookSources = new Map(state.hooks.map((hook) => [hook.id, hook.userId]));
+    const roomIds: string[] = [];
+    const usedUsers = new Set<string>();
+    for (const decision of decisions) {
+      const existing = [...this.rooms.values()].find((room) => room.sourceDraftId === decision.draftId);
+      if (existing) {
+        roomIds.push(existing.roomId);
+        continue;
+      }
+      if (decision.memberIds.some((userId) => usedUsers.has(userId))) throw new StoreConflictError("同一用户不能进入两个最终局");
+      const draft = state.drafts.find((item) => item.draftId === decision.draftId);
+      const game = curatedGames.find((item) => item.id === decision.offlineGameId);
+      validateFinalRoomDecision({
+        decision,
+        draft,
+        choices: state.choices,
+        requests: state.requests,
+        game,
+        hookSourceUserById: hookSources
+      });
+      if (!draft || !game) throw new StoreConflictError("候选局不可结算");
+      const now = new Date().toISOString();
+      const roomId = randomUUID();
+      const room: MatchRoom = {
+        roomId,
+        members: decision.memberIds.map((userId) => ({
+          userId,
+          displayName: this.users.get(userId)?.displayName ?? "成员",
+          confirmed: true,
+          participationStatus: "confirmed"
+        })),
+        offlineGame: structuredClone(game),
+        matchSummary: decision.summary,
+        status: "confirmed",
+        sourceDraftId: decision.draftId,
+        targetPlayers: decision.targetPlayers,
+        recruitmentStatus: decision.memberIds.length < Math.min(decision.targetPlayers, game.maxPlayers) ? "open" : "full",
+        version: 0,
+        meetingPoint: "TOMEET 集合点",
+        createdAt: now,
+        completedAt: null
+      };
+      this.rooms.set(roomId, room);
+      draft.status = "formed";
+      draft.version += 1;
+      for (const [index, requestId] of decision.requestIds.entries()) {
+        const request = this.matchRequests.get(requestId)!;
+        request.status = "matched";
+        request.phase = "settling";
+        request.roomId = roomId;
+        request.updatedAt = now;
+        usedUsers.add(decision.memberIds[index]!);
+      }
+      roomIds.push(roomId);
+    }
+    const requestIds = this.roundRequests.get(roundId) ?? new Set<string>();
+    for (const requestId of requestIds) {
+      const request = this.matchRequests.get(requestId);
+      if (request?.status === "matching" && request.activeRoundId === roundId) {
+        const hadSelection = state.choices.some((choice) => choice.requestId === requestId);
+        request.status = request.proactivePushEnabled || hadSelection ? "matching" : "expired";
+        request.phase = request.proactivePushEnabled
+          ? "watching"
+          : hadSelection ? "push_consent" : "waiting";
+        request.activeRoundId = null;
+        request.optionsExpiresAt = null;
+        request.updatedAt = new Date().toISOString();
+      }
+    }
+    for (const offer of this.offers.values()) {
+      if (offer.roundId === roundId && offer.status !== "accepted") offer.status = "expired";
+    }
+    round.status = "completed";
+    round.updatedAt = new Date().toISOString();
+    return roomIds;
+  }
+
+  async listSuitableOpenRooms(userId: string, limit = 3): Promise<MatchRoom[]> {
+    return [...this.rooms.values()]
+      .filter((room) => {
+        if (room.status === "completed" || room.recruitmentStatus !== "open") return false;
+        if (room.members.some((member) => member.userId === userId)) return false;
+        const confirmed = room.members.filter((member) => member.participationStatus === "confirmed").length;
+        const limitCount = Math.min(room.targetPlayers ?? room.offlineGame.maxPlayers, room.offlineGame.maxPlayers);
+        return confirmed < limitCount;
+      })
+      .slice(0, Math.min(Math.max(limit, 1), 10))
+      .map((room) => structuredClone(room));
+  }
+
+  private recordRoomChange(room: MatchRoom, changeType: string, payload: Record<string, unknown>): void {
+    const eventId = randomUUID();
+    for (const member of room.members.filter((item) => item.participationStatus === "confirmed")) {
+      if (changeType === "member_joined" && payload.joinedUserId === member.userId) continue;
+      const notification: RoomChangeNotification = {
+        eventId,
+        roomId: room.roomId,
+        userId: member.userId,
+        changeType,
+        payload: structuredClone(payload),
+        idempotencyKey: `room-change:${eventId}:${member.userId}`
+      };
+      this.roomNotifications.set(`${eventId}:${member.userId}`, notification);
+    }
+  }
+
+  async joinOpenRoom(requestId: string, offerId: string, sourceVersion: number): Promise<MatchRoom> {
+    const request = this.matchRequests.get(requestId);
+    const offer = this.offers.get(offerId);
+    if (!request || request.status !== "matching") throw new StoreConflictError("匹配请求已失效");
+    if (!offer || offer.requestId !== requestId || offer.sourceType !== "open_room" || offer.status !== "accepted") {
+      throw new StoreConflictError("用户没有接受这个开放局候选");
+    }
+    const room = offer.roomId ? this.rooms.get(offer.roomId) : null;
+    if (!room) throw new StoreNotFoundError("开放局不存在");
+    if (room.version !== sourceVersion || offer.sourceVersion !== sourceVersion) throw new StoreConflictError("开放局已经发生变化，请查看最新候选");
+    if (room.recruitmentStatus !== "open") throw new StoreConflictError("开放局已经满员或关闭");
+    const confirmed = room.members.filter((member) => member.participationStatus === "confirmed");
+    const capacity = Math.min(room.targetPlayers ?? room.offlineGame.maxPlayers, room.offlineGame.maxPlayers);
+    if (confirmed.length >= capacity) throw new StoreConflictError("开放局已经满员");
+    const prior = room.members.find((member) => member.userId === request.userId);
+    if (prior) {
+      prior.confirmed = true;
+      prior.participationStatus = "confirmed";
+    } else {
+      room.members.push({
+        userId: request.userId,
+        displayName: this.users.get(request.userId)?.displayName ?? "成员",
+        confirmed: true,
+        participationStatus: "confirmed"
+      });
+    }
+    request.status = "matched";
+    request.phase = "settling";
+    request.roomId = room.roomId;
+    request.updatedAt = new Date().toISOString();
+    room.version += 1;
+    const nextCount = confirmed.length + 1;
+    room.status = nextCount >= room.offlineGame.minPlayers ? "confirmed" : "confirming";
+    room.recruitmentStatus = nextCount >= capacity ? "full" : "open";
+    this.recordRoomChange(room, "member_joined", { joinedUserId: request.userId, memberCount: nextCount });
+    return structuredClone(room);
   }
 
   async listMatchCandidates(limit = 50): Promise<MatchCandidate[]> {
@@ -445,7 +1199,10 @@ export class MemoryStore implements DataStore {
         : this.memoryProfiles.get(request.userId)?.version === 0
           ? this.memoryProfiles.get(request.userId)?.matchingNarrative
             || this.users.get(request.userId)!.model.vibeNarrative
-          : this.memoryProfiles.get(request.userId)?.matchingNarrative ?? ""
+          : this.memoryProfiles.get(request.userId)?.matchingNarrative ?? "",
+      socialHooks: [...this.socialHooks.values()]
+        .filter((hook) => hook.userId === request.userId && hook.status === "active")
+        .map((hook) => structuredClone(hook))
     }));
   }
 
@@ -465,7 +1222,8 @@ export class MemoryStore implements DataStore {
     const members = decision.memberIds.map((userId) => ({
       userId,
       displayName: this.users.get(userId)?.displayName ?? "成员",
-      confirmed: userId.startsWith("demo-")
+      confirmed: userId.startsWith("demo-"),
+      participationStatus: userId.startsWith("demo-") ? "confirmed" as const : "invited" as const
     }));
     const room: MatchRoom = {
       roomId,
@@ -473,6 +1231,11 @@ export class MemoryStore implements DataStore {
       offlineGame: structuredClone(game),
       matchSummary: decision.summary,
       status: members.every((member) => member.confirmed) ? "confirmed" : "confirming",
+      sourceDraftId: null,
+      targetPlayers: decision.memberIds.length,
+      recruitmentStatus: "closed",
+      version: 0,
+      meetingPoint: null,
       createdAt: now,
       completedAt: null
     };
@@ -498,10 +1261,13 @@ export class MemoryStore implements DataStore {
   }
 
   async getLatestRoomForUser(userId: string): Promise<MatchRoom | null> {
-    const room = [...this.rooms.values()]
+    const rooms = [...this.rooms.values()]
       .filter((item) => item.members.some((member) => member.userId === userId))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-    return room ? structuredClone(room) : null;
+    if (!rooms) return null;
+    const membership = rooms.members.find((member) => member.userId === userId);
+    if (rooms.status !== "completed" && membership?.participationStatus === "withdrawn") return null;
+    return structuredClone(rooms);
   }
 
   async confirmRoom(roomId: string, userId: string): Promise<MatchRoom> {
@@ -511,15 +1277,96 @@ export class MemoryStore implements DataStore {
     const member = room.members.find((item) => item.userId === userId);
     if (!member) throw new StoreConflictError("用户不在房间中");
     member.confirmed = true;
-    if (room.members.every((item) => item.confirmed)) room.status = "confirmed";
+    member.participationStatus = "confirmed";
+    if (room.members.filter((item) => item.participationStatus !== "withdrawn").every((item) => item.confirmed)) room.status = "confirmed";
     return structuredClone(room);
+  }
+
+  async leaveRoom(roomId: string, userId: string, reason?: string): Promise<MatchRoom> {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new StoreNotFoundError("房间不存在");
+    if (room.status === "completed") throw new StoreConflictError("活动已完成");
+    const member = room.members.find((item) => item.userId === userId && item.participationStatus !== "withdrawn");
+    if (!member) throw new StoreConflictError("用户不在当前房间中");
+    const normalizedReason = reason?.trim() ?? "";
+    if ((room.status === "confirmed" || member.confirmed) && normalizedReason.length === 0) {
+      throw new StoreConflictError("正式成局后退出需要说明一个理由");
+    }
+    if (normalizedReason.length > 500) throw new StoreConflictError("退出理由不能超过 500 字");
+    if (normalizedReason) this.roomWithdrawalReasons.set(`${roomId}:${userId}`, normalizedReason);
+    member.confirmed = false;
+    member.participationStatus = "withdrawn";
+    room.version += 1;
+    const remaining = room.members.filter((item) => item.participationStatus === "confirmed").length;
+    room.status = remaining >= room.offlineGame.minPlayers ? "confirmed" : "confirming";
+    if (remaining < (room.targetPlayers ?? room.offlineGame.maxPlayers)) room.recruitmentStatus = "open";
+    const request = [...this.matchRequests.values()].find((item) => item.roomId === roomId && item.userId === userId);
+    if (request) {
+      request.status = request.proactivePushEnabled ? "matching" : "cancelled";
+      request.phase = request.proactivePushEnabled ? "watching" : "waiting";
+      request.roomId = null;
+      request.activeRoundId = null;
+      request.optionsExpiresAt = null;
+      request.updatedAt = new Date().toISOString();
+    }
+    this.recordRoomChange(room, "member_withdrawn", { withdrawnUserId: userId, memberCount: remaining });
+    return structuredClone(room);
+  }
+
+  async getRoomIntro(roomId: string, userId: string): Promise<string | null> {
+    return this.roomIntros.get(`${roomId}:${userId}`) ?? null;
+  }
+
+  async saveRoomIntro(roomId: string, userId: string, introText: string, hookIds: string[]): Promise<void> {
+    const room = this.rooms.get(roomId);
+    if (!room || !room.members.some((member) => member.userId === userId && member.participationStatus === "confirmed")) {
+      throw new StoreNotFoundError("房间成员不存在");
+    }
+    const confirmedUserIds = new Set(room.members
+      .filter((member) => member.participationStatus === "confirmed")
+      .map((member) => member.userId));
+    for (const hookId of hookIds) {
+      const hook = this.socialHooks.get(hookId);
+      if (!hook || hook.status !== "active" || hook.userId === userId || !confirmedUserIds.has(hook.userId)) {
+        throw new StoreConflictError("房间介绍引用了无效人物事实");
+      }
+    }
+    this.roomIntros.set(`${roomId}:${userId}`, introText);
+  }
+
+  async listPendingRoomChangeNotifications(limit = 100): Promise<RoomChangeNotification[]> {
+    return [...this.roomNotifications.entries()]
+      .filter(([key]) => !this.deliveredRoomNotifications.has(key))
+      .slice(0, Math.min(Math.max(limit, 1), 500))
+      .map(([, notification]) => structuredClone(notification));
+  }
+
+  async markRoomChangeNotificationDelivered(eventId: string, userId: string): Promise<void> {
+    const key = `${eventId}:${userId}`;
+    if (!this.roomNotifications.has(key)) throw new StoreNotFoundError("房间变化通知不存在");
+    this.deliveredRoomNotifications.add(key);
+  }
+
+  async listPendingDraftChangeNotifications(limit = 100): Promise<DraftChangeNotification[]> {
+    return [...this.draftNotifications.entries()]
+      .filter(([key]) => !this.deliveredDraftNotifications.has(key))
+      .slice(0, Math.min(Math.max(limit, 1), 500))
+      .map(([, notification]) => structuredClone(notification));
+  }
+
+  async markDraftChangeNotificationDelivered(eventId: string, userId: string): Promise<void> {
+    const key = `${eventId}:${userId}`;
+    if (!this.draftNotifications.has(key)) throw new StoreNotFoundError("候选局变化通知不存在");
+    this.deliveredDraftNotifications.add(key);
   }
 
   async completeRoom(roomId: string): Promise<MatchRoom> {
     const room = this.rooms.get(roomId);
     if (!room) throw new StoreNotFoundError("房间不存在");
     if (room.status === "completed") return structuredClone(room);
-    if (!room.members.every((member) => member.confirmed)) throw new StoreConflictError("所有成员确认后才能完成活动");
+    if (!room.members.filter((member) => member.participationStatus !== "withdrawn").every((member) => member.confirmed)) {
+      throw new StoreConflictError("所有成员确认后才能完成活动");
+    }
     room.status = "completed";
     room.completedAt ??= new Date().toISOString();
     for (const member of room.members) {
@@ -551,6 +1398,13 @@ export class MemoryStore implements DataStore {
     return id;
   }
 
+  async enqueueWechatOutboundMessage(message: Message): Promise<void> {
+    if (message.sourceChannel === "web") {
+      throw new StoreConflictError("Web 对话消息不能投递到微信");
+    }
+    this.wechatOutboundMessages.set(message.id, structuredClone(message));
+  }
+
   async enqueueJob(input: EnqueueJobInput): Promise<LlmJob> {
     const existingId = this.jobKeys.get(input.idempotencyKey);
     if (existingId) return structuredClone(this.jobs.get(existingId)!);
@@ -565,6 +1419,7 @@ export class MemoryStore implements DataStore {
       attempts: 0,
       maxAttempts: input.maxAttempts ?? 3,
       partitionKey: input.partitionKey ?? null,
+      runAt: input.runAt ?? now,
       createdAt: now,
       updatedAt: now
     };
@@ -587,9 +1442,10 @@ export class MemoryStore implements DataStore {
     const job = [...this.jobs.values()]
       .filter((item) =>
         (item.status === "pending" || item.status === "retry")
+        && new Date(item.runAt).getTime() <= Date.now()
         && (!item.partitionKey || !processingPartitions.has(item.partitionKey))
       )
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+      .sort((left, right) => left.runAt.localeCompare(right.runAt) || left.createdAt.localeCompare(right.createdAt))[0];
     if (!job) return null;
     job.status = "processing";
     job.attempts += 1;
