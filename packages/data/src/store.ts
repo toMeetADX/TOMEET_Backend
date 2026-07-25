@@ -278,6 +278,11 @@ export interface DataStore {
   completeRoom(roomId: string): Promise<MatchRoom>;
   saveFeedback(feedback: PostEventFeedback): Promise<string>;
   enqueueWechatOutboundMessage(message: Message): Promise<void>;
+  enqueueWechatOnboardingWelcome(
+    message: Message,
+    payloadCiphertext: string,
+    claimId: string | null
+  ): Promise<void>;
 
   enqueueJob(input: EnqueueJobInput): Promise<LlmJob>;
   getJob(jobId: string): Promise<LlmJob | null>;

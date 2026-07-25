@@ -2048,6 +2048,14 @@ export class MemoryStore implements DataStore {
     }
   }
 
+  async enqueueWechatOnboardingWelcome(
+    message: Message,
+    _payloadCiphertext: string,
+    _claimId: string | null
+  ): Promise<void> {
+    await this.enqueueWechatOutboundMessage(message);
+  }
+
   async enqueueJob(input: EnqueueJobInput): Promise<LlmJob> {
     const existingId = this.jobKeys.get(input.idempotencyKey);
     if (existingId) return structuredClone(this.jobs.get(existingId)!);

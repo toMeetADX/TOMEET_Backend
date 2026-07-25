@@ -51,8 +51,10 @@ ADVENTUREX_TEST_POOL_EMAIL=andy4fe0119@gmail.com
 
 `RATE_LIMIT_MAX` 是每个客户端 IP 每分钟允许的请求数；Railway 代理地址通过 Fastify `trustProxy` 正确还原。
 
-`WECHAT_WEB_REGISTRATION_URL` 是首次微信开场白中的个性化注册链接。API 会先创建
-同一 UUID 的 Supabase 匿名账号，再生成默认 15 分钟有效的一次性 claim。生产 Supabase
+`WECHAT_WEB_REGISTRATION_URL` 是首次微信开场白中的个性化注册链接。只有扫码前
+尚未对应数据库用户的微信身份才会创建欢迎 outbox；API 同时创建同一 UUID 的
+Supabase 匿名账号，并把完整开场白与一次性链接加密写入该任务。首次入站握手只负责
+解锁任务且不进入 Agent，outbox 随后发送完整开场白与链接。生产 Supabase
 必须开启 Anonymous Sign-Ins；前端接入见 [`wechat-web-registration.md`](wechat-web-registration.md)。
 
 预览域名或多个正式域名使用英文逗号分隔：

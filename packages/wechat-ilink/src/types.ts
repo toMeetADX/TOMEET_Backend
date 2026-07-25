@@ -125,6 +125,8 @@ export interface WechatOutboundDelivery {
   messageId: string;
   userId: string;
   content: string;
+  kind: "message" | "onboarding_welcome";
+  claimId: string | null;
   attempts: number;
   connection: WechatConnection;
 }
@@ -133,9 +135,11 @@ export interface WechatWebClaim {
   id: string;
   userId: string;
   tokenHash: string;
+  tokenCiphertext: string | null;
   accessTokenCiphertext: string;
   refreshTokenCiphertext: string;
   expiresAt: string;
+  exposedAt: string | null;
   consumedAt: string | null;
   createdAt: string;
 }
@@ -144,6 +148,7 @@ export interface CreateWechatWebClaimInput {
   id: string;
   userId: string;
   tokenHash: string;
+  tokenCiphertext: string;
   accessTokenCiphertext: string;
   refreshTokenCiphertext: string;
   expiresAt: string;

@@ -1296,6 +1296,20 @@ export class SupabaseStore implements DataStore {
     if (error) this.throwError("创建微信主动消息", error);
   }
 
+  async enqueueWechatOnboardingWelcome(
+    message: Message,
+    payloadCiphertext: string,
+    claimId: string | null
+  ): Promise<void> {
+    const { error } = await this.client.rpc("enqueue_wechat_onboarding_welcome", {
+      p_user_id: message.userId,
+      p_message_id: message.id,
+      p_payload_ciphertext: payloadCiphertext,
+      p_claim_id: claimId
+    });
+    if (error) this.throwError("创建微信开场白投递任务", error);
+  }
+
   async enqueueJob(input: EnqueueJobInput): Promise<LlmJob> {
     const { data, error } = await this.client.rpc("enqueue_llm_job", {
       p_job_type: input.type,

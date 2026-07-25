@@ -57,30 +57,16 @@ export class TomeetClient {
       ?? Math.ceil(this.requestTimeoutMs / this.pollIntervalMs);
   }
 
-  async startOnboarding(input: { userId: string }): Promise<string | null> {
-    const response = await this.request<{ message?: unknown | null }>(
-      `/internal/users/${input.userId}/adventurex-onboarding/start`,
-      {
-        method: "POST",
-        body: JSON.stringify({ language: "zh" })
-      }
-    );
-    if (response.message == null) return null;
-    const message = messageSchema.parse(response.message);
-    if (message.role !== "assistant") {
-      throw new TomeetClientError(
-        502,
-        "onboarding_message_invalid",
-        "Onboarding endpoint returned a non-assistant message"
-      );
-    }
-    return message.content;
-  }
-
-  async markOnboardingWelcomeDelivered(input: { userId: string }): Promise<void> {
+  async completeOnboardingWelcomeDelivery(input: {
+    userId: string;
+    claimId: string | null;
+  }): Promise<void> {
     await this.request(
       `/internal/users/${input.userId}/adventurex-onboarding/welcome-delivered`,
-      { method: "POST" }
+      {
+        method: "POST",
+        body: JSON.stringify({ claimId: input.claimId })
+      }
     );
   }
 

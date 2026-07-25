@@ -35,7 +35,7 @@ export interface WechatApiRuntime {
 export interface WechatActivationContext {
   userId: string;
   webRegistrationUrl?: string;
-  deliverText?: (input: { text: string; runId: string }) => Promise<void>;
+  webRegistrationClaimId?: string;
 }
 
 interface ProvisionedWechatWebAccount {
@@ -131,7 +131,7 @@ function ensureHttpsBaseUrl(value: string): string {
   return parsed.toString().replace(/\/$/, "");
 }
 
-function webRegistrationLink(baseUrl: string, token: string): string {
+export function webRegistrationLink(baseUrl: string, token: string): string {
   const url = new URL(baseUrl);
   if (
     url.protocol !== "https:"
@@ -148,12 +148,9 @@ async function createWebRegistrationClaim(
   runtime: WechatApiRuntime,
   account: ProvisionedWechatWebAccount,
   registration: WechatWebRegistrationRuntime
-): Promise<string> {
+): Promise<{ id: string; url: string }> {
   const sessionExpiresAt = new Date(account.sessionExpiresAt).getTime();
-  const expiresAtMs = Math.min(
-    Date.now() + (registration.claimTtlMs ?? 15 * 60_000),
-    sessionExpiresAt - 5_000
-  );
+  const expiresAtMs = sessionExpiresAt - 5_000;
   if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
     throw new Error("Supabase 匿名会话有效期不足，无法创建注册链接");
   }
@@ -163,6 +160,10 @@ async function createWebRegistrationClaim(
     id,
     userId: account.userId,
     tokenHash: hashSessionToken(token),
+    tokenCiphertext: runtime.cipher.encrypt(
+      token,
+      `wechat-web-claim:${id}:token`
+    ),
     accessTokenCiphertext: runtime.cipher.encrypt(
       account.accessToken,
       `wechat-web-claim:${id}:access`
@@ -173,7 +174,10 @@ async function createWebRegistrationClaim(
     ),
     expiresAt: new Date(expiresAtMs).toISOString()
   });
-  return webRegistrationLink(registration.registrationUrl, token);
+  return {
+    id,
+    url: webRegistrationLink(registration.registrationUrl, token)
+  };
 }
 
 function activationCredentials(
@@ -238,13 +242,22 @@ async function activateSession(
   const isNewIdentity = isNewWechatIdentity
     ? await isNewWechatIdentity(credentials.ilinkUserId)
     : true;
-  const shouldSendActivationWelcome = onActivated ? isNewIdentity : false;
+  const shouldQueueOnboardingWelcome = Boolean(
+    onActivated && isNewIdentity && !session.requestedUserId
+  );
   let provisionedAccount: ProvisionedWechatWebAccount | null = null;
   if (isNewIdentity && !session.requestedUserId && webRegistration) {
     try {
       provisionedAccount = await webRegistration.accountProvisioner.provision();
     } catch (error) {
       reportWebRegistrationError?.(error);
+      return runtime.store.updateWechatSession(session.id, {
+        status: "failed",
+        errorCode: "web_account_provision_failed",
+        errorMessage: "暂时无法创建 TOMEET 账号，请重新生成二维码"
+      }, {
+        ifStatusIn: NON_TERMINAL_SESSION_STATUSES
+      });
     }
   }
   let activation: Awaited<ReturnType<WechatConnectionStore["activateWechatSession"]>>;
@@ -261,6 +274,10 @@ async function activateSession(
       baseUrl
     });
   } catch (error) {
+    if (provisionedAccount && webRegistration) {
+      await webRegistration.accountProvisioner.discard(provisionedAccount.userId)
+        .catch((discardError: unknown) => reportWebRegistrationError?.(discardError));
+    }
     if (error instanceof StoreConflictError) {
       await runtime.store.updateWechatSession(session.id, {
         status: "failed",
@@ -273,14 +290,17 @@ async function activateSession(
     throw error;
   }
   let registrationUrl: string | undefined;
+  let registrationClaimId: string | undefined;
   if (provisionedAccount) {
     if (activation.session.userId === provisionedAccount.userId) {
       try {
-        registrationUrl = await createWebRegistrationClaim(
+        const registration = await createWebRegistrationClaim(
           runtime,
           provisionedAccount,
           webRegistration!
         );
+        registrationUrl = registration.url;
+        registrationClaimId = registration.id;
       } catch (error) {
         reportWebRegistrationError?.(error);
       }
@@ -292,21 +312,14 @@ async function activateSession(
   if (
     activation.session.userId
     && onActivated
-    && shouldSendActivationWelcome
+    && shouldQueueOnboardingWelcome
+    && (!provisionedAccount || activation.session.userId === provisionedAccount.userId)
     && await runtime.store.claimWechatActivationCallback(session.id)
   ) {
     await onActivated({
       userId: activation.session.userId,
       webRegistrationUrl: registrationUrl,
-      deliverText: async ({ text, runId }) => {
-        await runtime.client.sendText({
-          baseUrl,
-          botToken: credentials.botToken,
-          toUserId: credentials.ilinkUserId,
-          text,
-          runId
-        });
-      }
+      webRegistrationClaimId: registrationClaimId
     });
   }
   return activation.session;

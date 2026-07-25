@@ -31,24 +31,15 @@ function completedJob(reply: string) {
 }
 
 describe("TomeetClient", () => {
-  it("claims the persisted onboarding welcome for the first WeChat message", async () => {
-    const now = new Date().toISOString();
+  it("marks the outbox-delivered onboarding welcome and registration claim", async () => {
     let requestedUrl = "";
     let postedBody: Record<string, unknown> | undefined;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       requestedUrl = String(input);
       postedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      return new Response(JSON.stringify({
-        message: {
-          id: "welcome-1",
-          userId: "25000000-0000-4000-8000-000000000001",
-          role: "assistant",
-          content: "你好呀👋",
-          sourceChannel: "system",
-          replyToMessageId: null,
-          createdAt: now
-        }
-      }), { headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ state: {} }), {
+        headers: { "Content-Type": "application/json" }
+      });
     });
     vi.stubGlobal("fetch", fetchMock);
     const client = new TomeetClient({
@@ -56,13 +47,14 @@ describe("TomeetClient", () => {
       internalApiToken: "internal-test-token"
     });
 
-    await expect(client.startOnboarding({
-      userId: "25000000-0000-4000-8000-000000000001"
-    })).resolves.toBe("你好呀👋");
+    await expect(client.completeOnboardingWelcomeDelivery({
+      userId: "25000000-0000-4000-8000-000000000001",
+      claimId: "25000000-0000-4000-8000-000000000002"
+    })).resolves.toBeUndefined();
     expect(requestedUrl).toBe(
-      "https://api.example.com/internal/users/25000000-0000-4000-8000-000000000001/adventurex-onboarding/start"
+      "https://api.example.com/internal/users/25000000-0000-4000-8000-000000000001/adventurex-onboarding/welcome-delivered"
     );
-    expect(postedBody).toEqual({ language: "zh" });
+    expect(postedBody).toEqual({ claimId: "25000000-0000-4000-8000-000000000002" });
   });
 
   it("returns the assistant message directly from a completed job", async () => {

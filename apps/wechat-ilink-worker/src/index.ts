@@ -214,7 +214,7 @@ async function run(): Promise<void> {
       for (const delivery of claimed) {
         if (activeOutbound.has(delivery.id)) continue;
         const task = deliverWechatOutboundMessage(
-          { store, cipher, ilink, bubbleDelayMs },
+          { store, cipher, ilink, tomeet, bubbleDelayMs },
           delivery,
           workerId
         ).finally(() => activeOutbound.delete(delivery.id));

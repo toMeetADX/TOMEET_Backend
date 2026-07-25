@@ -334,6 +334,23 @@ describe("Supabase migration", () => {
     `);
     expect(table.rows[0]?.relrowsecurity).toBe(true);
 
+    const recoveryColumns = await db.query<{
+      column_name: string;
+      data_type: string;
+      is_nullable: string;
+    }>(`
+      select column_name, data_type, is_nullable
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'wechat_web_claims'
+        and column_name in ('token_ciphertext', 'exposed_at')
+      order by column_name
+    `);
+    expect(recoveryColumns.rows).toEqual([
+      { column_name: "exposed_at", data_type: "timestamp with time zone", is_nullable: "YES" },
+      { column_name: "token_ciphertext", data_type: "text", is_nullable: "YES" }
+    ]);
+
     const clientGrants = await db.query<{ grantee: string }>(`
       select grantee
       from information_schema.role_table_grants
@@ -1904,6 +1921,48 @@ describe("Supabase migration", () => {
       attempts: 2,
       completed: true
     });
+  });
+
+  it("releases a new-user welcome outbox only after the first inbound handshake", async () => {
+    const userId = "73000000-0000-4000-8000-000000000001";
+    await db.query("select ensure_tomeet_user($1::uuid, $2)", [userId, "微信新用户"]);
+    await db.query(`
+      insert into wechat_ilink_connections (
+        user_id, ilink_bot_id, owner_ilink_user_id, bot_token_ciphertext, base_url
+      ) values ($1::uuid, 'welcome-bot-1', 'welcome-owner-1', repeat('x', 32), 'https://ilink.example.com')
+    `, [userId]);
+    const welcome = await db.query<{ result: { message: { id: string } } }>(
+      "select start_adventurex_onboarding($1::uuid, 'zh') as result",
+      [userId]
+    );
+    const messageId = welcome.rows[0]!.result.message.id;
+    const encryptedPayload = "encrypted-welcome-payload-" + "x".repeat(64);
+    await db.query(
+      "select enqueue_wechat_onboarding_welcome($1::uuid, $2::uuid, $3, null)",
+      [userId, messageId, encryptedPayload]
+    );
+
+    const beforeHandshake = await db.query(
+      "select claim_wechat_outbound_messages('welcome-worker', 8)"
+    );
+    expect(beforeHandshake.rows).toHaveLength(0);
+
+    await db.query(
+      "update wechat_ilink_connections set last_message_at = now() where user_id = $1::uuid",
+      [userId]
+    );
+    const afterHandshake = await db.query<{
+      delivery: { id: string; kind: string; content: string; claimId: string | null };
+    }>("select claim_wechat_outbound_messages('welcome-worker', 8) as delivery");
+    expect(afterHandshake.rows[0]!.delivery).toMatchObject({
+      kind: "onboarding_welcome",
+      content: encryptedPayload,
+      claimId: null
+    });
+    await db.query(
+      "select complete_wechat_outbound_message($1::uuid, 'welcome-worker', null)",
+      [afterHandshake.rows[0]!.delivery.id]
+    );
   });
 
   it("lets any room member stop matching and requeues a pending invitee", async () => {

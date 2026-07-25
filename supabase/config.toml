@@ -3,7 +3,7 @@ project_id = "tomeet"
 [api]
 enabled = true
 port = 54321
-schemas = ["public", "storage", "graphql_public"]
+schemas = ["public", "graphql_public"]
 extra_search_path = ["public", "extensions"]
 max_rows = 1000
 
@@ -11,6 +11,27 @@ max_rows = 1000
 port = 54322
 major_version = 17
 
+[auth]
+enabled = true
+site_url = "https://www.tomeet.chat"
+additional_redirect_urls = [
+  "https://www.tomeet.chat/api/auth/callback**",
+  "https://tomeet.chat/api/auth/callback**"
+]
+enable_signup = true
+enable_anonymous_sign_ins = true
+
+[auth.email]
+max_frequency = "1m"
+otp_length = 8
+
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
 [storage]
 enabled = true
-file_size_limit = "20MiB"
+file_size_limit = "50MiB"
+
+[storage.vector]
+enabled = false

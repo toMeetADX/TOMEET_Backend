@@ -283,27 +283,6 @@ export async function buildApp(options: BuildAppOptions) {
     return timingSafeEqual(expectedHash, candidateHash);
   }
 
-  app.post(
-    "/internal/users/:userId/adventurex-onboarding/start",
-    { config: { rateLimit: false } },
-    async (request, reply) => {
-      if (!internalTokenMatches(request.headers["x-tomeet-internal-token"])) {
-        return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
-      }
-      const { userId } = z.object({ userId: uuidSchema }).parse(request.params);
-      const { language } = z.object({
-        language: adventurexLanguageSchema.default("zh")
-      }).parse(request.body ?? {});
-      const state = await options.store.ensureAdventurexOnboardingState(userId);
-      // A reconnect must never replay the opening sequence. `welcomeSentAt` is the
-      // durable one-shot boundary; delivery acknowledgement is useful telemetry, but
-      // losing it must not make an existing WeChat user look new again.
-      if (state.welcomeSentAt) return { message: null };
-      const message = await options.store.startAdventurexOnboarding(userId, language);
-      return { message };
-    }
-  );
-
   registerWechatRoutes(app, {
     runtime: options.wechat,
     internalApiEnabled: Boolean(options.internalApiToken),
@@ -314,30 +293,28 @@ export async function buildApp(options: BuildAppOptions) {
     isNewWechatIdentity: async (externalUserId) => (
       (await options.store.resolveChannelIdentity("wechat", externalUserId)) === null
     ),
-    onActivated: async ({ userId, deliverText, webRegistrationUrl }) => {
-      const onboardingState = await options.store.ensureAdventurexOnboardingState(userId);
-      if (onboardingState.welcomeSentAt) return;
+    onActivated: async ({ userId, webRegistrationUrl, webRegistrationClaimId }) => {
+      if (!options.wechat) return;
       const message = await options.store.startAdventurexOnboarding(userId, "zh");
-      if (!message || !deliverText) return;
+      if (!message) return;
       const bubbles = message.content.split(/\n\s*\n+/u).filter(Boolean);
-      for (const [index, text] of bubbles.entries()) {
-        await deliverText({ text, runId: `activation-welcome-${userId}-${index + 1}` });
-      }
       if (webRegistrationUrl) {
-        await deliverText({
-          text: "想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！",
-          runId: `activation-welcome-${userId}-web-register-intro`
-        });
-        await deliverText({
-          text: "这是微信里的同一个 TOMEET 账号，网页只用于注册和加好友；Agent 对话和发起匹配仍在微信",
-          runId: `activation-welcome-${userId}-web-register-continuity`
-        });
-        await deliverText({
-          text: `点这里为当前账号添加网页登录：${webRegistrationUrl}`,
-          runId: `activation-welcome-${userId}-web-register-link`
-        });
+        bubbles.push(
+          "想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！",
+          "这是微信里的同一个 TOMEET 账号，网页只用于注册和加好友；Agent 对话和发起匹配仍在微信",
+          `点这里为当前账号添加网页登录：${webRegistrationUrl}`
+        );
       }
-      await options.store.markAdventurexWelcomeDelivered(userId);
+      const claimId = webRegistrationClaimId ?? null;
+      const payloadCiphertext = options.wechat.cipher.encrypt(
+        JSON.stringify({ bubbles, claimId }),
+        `wechat-welcome-delivery:${message.id}`
+      );
+      await options.store.enqueueWechatOnboardingWelcome(
+        message,
+        payloadCiphertext,
+        claimId
+      );
     }
   });
 
@@ -349,6 +326,16 @@ export async function buildApp(options: BuildAppOptions) {
         return reply.code(401).send({ error: "unauthorized", message: "内部服务认证失败" });
       }
       const { userId } = z.object({ userId: uuidSchema }).parse(request.params);
+      const { claimId } = z.object({
+        claimId: uuidSchema.nullable().default(null)
+      }).parse(request.body ?? {});
+      if (claimId && options.wechat && options.wechatWebRegistration) {
+        await options.wechat.store.exposeWechatWebClaim(
+          claimId,
+          userId,
+          options.wechatWebRegistration.claimTtlMs ?? 15 * 60_000
+        );
+      }
       return { state: await options.store.markAdventurexWelcomeDelivered(userId) };
     }
   );
