@@ -53,6 +53,14 @@
       "sha256": "f2b544aa19a00904659b139a68026f950a68b82e3a6ae403dd05b63312ddfece",
       "reason": "Recreate matchmaking and WeChat completion RPC bodies to enforce founder-approved event-plan gating, extend delivery retries to eight attempts, and restrict all new plan tables and RPCs to service_role."
     },
+    "20260726030000_relationship_credentials.sql": {
+      "sha256": "08bf64b48c5b7c0a0c94d5852721665faed2be29089bae80b57173c091daa8e0",
+      "reason": "Create the relationship credential schema and scoped RPCs; REVOKE removes default table and function access before granting only participant reads, authenticated user workflows, and service-role chain jobs."
+    },
+    "20260726031000_relationship_qr_session_ambiguity_fix.sql": {
+      "sha256": "5b741374a2d0a6c0f8ee011d71e2e67f4fc243f60995d432dbb720cddb9c6249",
+      "reason": "Replace the relationship QR creation RPC with qualified column references and reapply its authenticated-only execution grant; REVOKE prevents accidental public execution."
+    },
     "20260726120000_wechat_web_registration_claims.sql": {
       "sha256": "69abb306ff543c8360bec366104fffb827f99162ac0833db6d2106f1ce182604",
       "reason": "Create a service-role-only table for short-lived encrypted Supabase sessions used by one-time WeChat-to-Web registration claims; REVOKE prevents browser roles from reading login credentials."

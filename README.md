@@ -11,6 +11,8 @@ Agent 通过用户主动提供的文本、图片、短录音和持续对话认�
 - `apps/api`：Fastify API，部署到 Railway。
 - `apps/intelligence-worker`：支持多并发槽位的智能任务 Worker，部署到 Railway。
 - `apps/wechat-ilink-worker`：微信 iLink 长轮询、收发消息与连接生命周期 Worker，部署到 Railway。
+- `apps/relationship-worker`：把双方确认的关系凭证锚定到 Injective EVM，并处理可重试撤销。
+- `contracts/RelationshipRegistry.sol`：隐私承诺式、不可转让的链上关系证明注册表。
 - `packages/*`：契约、Agent、用户模型、匹配、游戏目录、房间、反馈、数据访问和任务编排。
 - `supabase/migrations`：业务表、索引、私有 Storage Bucket 和并发安全 RPC。
 - Agent Memory V2：独立证据记忆、隐藏 profile、token-budgeted context 与同用户任务 FIFO；详见 [`docs/agent-memory-context.md`](docs/agent-memory-context.md)。
@@ -99,7 +101,7 @@ AdventureX 冷启动匹配使用在线贪心竞价：当前 `waiting` 用户优�
 
 生产上线的完整变量表、部署顺序、Supabase Auth 和冒烟验收步骤见 [`docs/railway-production.md`](docs/railway-production.md)。前端对接同时参考 [`docs/api.md`](docs/api.md) 和机器可读的 [`docs/openapi.yaml`](docs/openapi.yaml)。
 
-正式发布在同一个 Railway Project 中保留 Intelligence Worker、Web API、WeChat API 和 WeChat Worker 四个 Service，并统一从同一个 `main` commit 发布。详细变量和发布顺序见 [`docs/agent-layer-release.md`](docs/agent-layer-release.md)。
+正式发布在同一个 Railway Project 中保留 Intelligence Worker、Web API、WeChat API、WeChat Worker 和 Relationship Worker，并统一从同一个 `main` commit 发布。详细变量和发布顺序见 [`docs/agent-layer-release.md`](docs/agent-layer-release.md)。
 
 ### API Service
 
@@ -116,7 +118,13 @@ AdventureX 冷启动匹配使用在线贪心竞价：当前 `waiting` 用户优�
 - 环境变量：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、真实模型配置、用于联网搜索的 `TAVILY_API_KEY`，以及与 API 一致的 `ADVENTUREX_MATCHING_V1=true`。
 - `WORKER_CONCURRENCY` 默认 `8`，单实例最大允许 `32`；也可以在 Railway 横向增加副本。
 
-Worker 使用 Supabase PostgreSQL 的 `FOR UPDATE SKIP LOCKED` 领取任务。多槽位和多副本不会重复领取同一任务；`partition_key=user:{userId}` 保证同一用户任务严格顺序执行，不同用户仍可并行。失败任务使用指数退避，进程中断后的锁会自动回收。
+Worker 使用 Supabase PostgreSQL 的 `FOR UPDATE SKIP LOCKED` 领取任务。多槽位和多副本不会重复领取同一任务；交互回复使用 `partition_key=user:{userId}`，后台记忆与反馈使用 `partition_key=memory:{userId}`，避免较慢的记忆任务阻塞用户当前回复，同时各自保持 FIFO。失败任务使用指数退避，处于未来退避时间的旧任务不会占住分区，进程中断后的锁会自动回收。
+
+### Relationship Worker Service
+
+- Config file：`/railway.relationship.toml`
+- 环境变量：Supabase 服务端凭据、Injective EVM RPC/Chain ID、已部署的 Registry 地址和专用 relayer 私钥。
+- 合约通过 `pnpm contracts:test` 验证；部署前为 Ignition 明确传入冷钱包 `admin` 和专用热钱包 `attester`，不要在生产沿用默认同一账户。
 
 ## 外部扫码前端接入
 
@@ -127,7 +135,7 @@ Worker 使用 Supabase PostgreSQL 的 `FOR UPDATE SKIP LOCKED` 领取任务。�
 - 一个用户只能存在一个活跃匹配请求，由部分唯一索引保证。
 - LLM 任务通过唯一幂等键去重。
 - Worker 使用 `SKIP LOCKED` 并发领取任务。
-- 同一用户的回复、记忆、多模态和反馈任务按 `partition_key` FIFO；不同用户并行。
+- 同一用户的交互回复与后台记忆分别按 `user:*`、`memory:*` FIFO；两条队列互不阻塞。
 - 建房在单个数据库事务内锁定全部匹配请求，并再次校验等待状态、成员对应关系、重复成员和游戏人数范围。
 - 重叠匹配并发发生时，只有第一个事务能成功分配成员。
 - 建房记录 `source_job_id`，Worker 在建房后异常重试不会创建重复房间。

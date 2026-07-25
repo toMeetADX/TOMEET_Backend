@@ -13,6 +13,34 @@ beforeAll(async () => {
     create role authenticated;
     create role service_role bypassrls;
     create schema auth;
+    create function auth.uid()
+    returns uuid
+    language sql
+    stable
+    as $$
+      select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+    $$;
+    create function public.gen_random_bytes(p_length integer)
+    returns bytea
+    language sql
+    volatile
+    as $$
+      select decode(
+        substr(
+          repeat(md5(random()::text), ((p_length * 2 + 31) / 32)::integer),
+          1,
+          p_length * 2
+        ),
+        'hex'
+      )
+    $$;
+    create function public.digest(p_value text, p_algorithm text)
+    returns bytea
+    language sql
+    immutable
+    as $$
+      select decode(md5(p_value) || md5(p_value || ':' || p_algorithm), 'hex')
+    $$;
     create table auth.users (
       id uuid primary key,
       email text,
@@ -124,6 +152,13 @@ describe("Supabase migration", () => {
         create role authenticated;
         create role service_role bypassrls;
         create schema auth;
+        create function auth.uid()
+        returns uuid
+        language sql
+        stable
+        as $$
+          select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+        $$;
         create table auth.users (
           id uuid primary key,
           email text,
@@ -271,6 +306,117 @@ describe("Supabase migration", () => {
       can_update: true,
       can_delete: true
     });
+  });
+
+  it("creates, anchors, and revokes relationship credentials through scoped RPCs", async () => {
+    const tables = await db.query<{ relname: string; relrowsecurity: boolean }>(`
+      select relname, relrowsecurity
+      from pg_class
+      where oid in (
+        'public.social_profiles'::regclass,
+        'public.relationship_qr_sessions'::regclass,
+        'public.relationship_requests'::regclass,
+        'public.relationship_credentials'::regclass,
+        'public.relationship_onchain_jobs'::regclass,
+        'public.relationship_leaderboard_events'::regclass
+      )
+    `);
+    expect(tables.rows).toHaveLength(6);
+    expect(tables.rows.every((row) => row.relrowsecurity)).toBe(true);
+
+    const privileges = await db.query<{
+      anon_create: boolean;
+      authenticated_create: boolean;
+      authenticated_claim: boolean;
+      service_claim: boolean;
+    }>(`
+      select
+        has_function_privilege(
+          'anon', 'public.create_relationship_qr_session(text,text)', 'execute'
+        ) as anon_create,
+        has_function_privilege(
+          'authenticated', 'public.create_relationship_qr_session(text,text)', 'execute'
+        ) as authenticated_create,
+        has_function_privilege(
+          'authenticated', 'public.claim_relationship_onchain_job(text)', 'execute'
+        ) as authenticated_claim,
+        has_function_privilege(
+          'service_role', 'public.claim_relationship_onchain_job(text)', 'execute'
+        ) as service_claim
+    `);
+    expect(privileges.rows[0]).toEqual({
+      anon_create: false,
+      authenticated_create: true,
+      authenticated_claim: false,
+      service_claim: true
+    });
+
+    const firstUserId = "27000000-0000-4000-8000-000000000001";
+    const secondUserId = "27000000-0000-4000-8000-000000000002";
+    await db.query("select ensure_tomeet_user($1::uuid, 'First Friend')", [firstUserId]);
+    await db.query("select ensure_tomeet_user($1::uuid, 'Second Friend')", [secondUserId]);
+
+    await db.query("select set_config('request.jwt.claim.sub', $1, false)", [firstUserId]);
+    const qr = await db.query<{ token: string }>(`
+      select token from public.create_relationship_qr_session('First Friend', null)
+    `);
+    expect(qr.rows[0]?.token).toMatch(/^[0-9a-f]{64}$/u);
+
+    await db.query("select set_config('request.jwt.claim.sub', $1, false)", [secondUserId]);
+    const request = await db.query<{ request_id: string }>(`
+      select request_id from public.create_relationship_request($1)
+    `, [qr.rows[0]!.token]);
+    expect(request.rows[0]?.request_id).toEqual(expect.any(String));
+
+    await db.query("select set_config('request.jwt.claim.sub', $1, false)", [firstUserId]);
+    const accepted = await db.query<{ credential_id: string; relationship_status: string }>(`
+      select credential_id, relationship_status
+      from public.respond_relationship_request($1::uuid, true)
+    `, [request.rows[0]!.request_id]);
+    expect(accepted.rows[0]?.relationship_status).toBe("chain_pending");
+
+    const anchor = await db.query<{ job_id: string }>(`
+      select job_id from public.claim_relationship_onchain_job('relationship-test-worker')
+    `);
+    expect(anchor.rows[0]?.job_id).toEqual(expect.any(String));
+    await db.query(`
+      select public.complete_relationship_onchain_job(
+        $1::uuid,
+        'relationship-test-worker',
+        $2,
+        42,
+        1439,
+        $3
+      )
+    `, [anchor.rows[0]!.job_id, `0x${"a".repeat(64)}`, `0x${"b".repeat(40)}`]);
+
+    const anchored = await db.query<{ status: string }>(`
+      select status from public.relationship_credentials where id = $1::uuid
+    `, [accepted.rows[0]!.credential_id]);
+    expect(anchored.rows[0]?.status).toBe("chain_confirmed");
+
+    await db.query("select set_config('request.jwt.claim.sub', $1, false)", [secondUserId]);
+    expect((await db.query<{ revoke_relationship: string }>(`
+      select public.revoke_relationship($1::uuid)
+    `, [accepted.rows[0]!.credential_id])).rows[0]?.revoke_relationship).toBe("revoke_pending");
+    const revoke = await db.query<{ job_id: string }>(`
+      select job_id from public.claim_relationship_onchain_job('relationship-test-worker')
+    `);
+    await db.query(`
+      select public.complete_relationship_onchain_job(
+        $1::uuid,
+        'relationship-test-worker',
+        $2,
+        43,
+        1439,
+        $3
+      )
+    `, [revoke.rows[0]!.job_id, `0x${"c".repeat(64)}`, `0x${"b".repeat(40)}`]);
+
+    const revoked = await db.query<{ status: string; revoked_at: Date | null }>(`
+      select status, revoked_at from public.relationship_credentials where id = $1::uuid
+    `, [accepted.rows[0]!.credential_id]);
+    expect(revoked.rows[0]).toMatchObject({ status: "revoked", revoked_at: expect.any(Date) });
   });
 
   it("atomically provisions encrypted iLink connections with server-only access", async () => {

@@ -3,6 +3,7 @@ builder = "NIXPACKS"
 buildCommand = "corepack pnpm install --frozen-lockfile && corepack pnpm --filter @tomeet/relationship-worker... typecheck"
 watchPatterns = [
   "/apps/relationship-worker/**",
+  "/packages/**",
   "/package.json",
   "/pnpm-lock.yaml",
   "/pnpm-workspace.yaml",

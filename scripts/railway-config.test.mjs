@@ -22,6 +22,10 @@ const configs = [
   {
     file: "railway.wechat.toml",
     appPattern: "/apps/wechat-ilink-worker/**"
+  },
+  {
+    file: "railway.relationship.toml",
+    appPattern: "/apps/relationship-worker/**"
   }
 ];
 
