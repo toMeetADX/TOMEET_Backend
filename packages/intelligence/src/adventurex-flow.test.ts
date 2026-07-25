@@ -16,6 +16,68 @@ import {
 
 describe("AdventureX 12-user integration", () => {
   afterEach(() => vi.useRealTimers());
+
+  it("offers and settles the only valid pair when its relative judgement is acceptable", async () => {
+    const store = new MemoryStore();
+    const matcher = new MockMatchmakingIntelligence();
+    vi.spyOn(matcher, "judgeGroup").mockImplementation(async () => ({
+      verdict: "acceptable",
+      isolationRiskUserIds: [],
+      reasoning: "This is the highest-ranked valid pair in the current pool."
+    }));
+    const processor = new JobProcessor(store, new MockAgentIntelligence(), matcher, {
+      adventurexMatchingV1: true
+    });
+    const round = await store.createOrGetMatchRound("integration-two-person-relative-best", new Date().toISOString());
+    const users: Array<{ userId: string; requestId: string }> = [];
+    for (let index = 0; index < 2; index += 1) {
+      const userId = randomUUID();
+      await store.ensureUser(userId, `Two-person user ${index + 1}`);
+      const request = await store.createMatchRequest(userId, {
+        rawText: `Meet the other available person ${index + 1}`
+      });
+      users.push({ userId, requestId: request.requestId });
+      await store.addRequestToRound(round.roundId, request.requestId);
+    }
+    const generateJob = await store.enqueueJob({
+      type: "match_round_generate",
+      payload: { roundId: round.roundId },
+      idempotencyKey: `match-round-generate:${round.roundId}`,
+      partitionKey: `match-round:${round.roundId}`
+    });
+
+    const generated = await processor.process(generateJob);
+
+    expect(generated).toMatchObject({ candidateCount: 2, draftCount: 1, offerCount: 2 });
+    const offeredDraftIds: string[] = [];
+    for (const user of users) {
+      const options = await store.listCurrentMatchOptions(user.userId);
+      expect(options?.options).toHaveLength(1);
+      offeredDraftIds.push(String(options?.options[0]?.draftId));
+      await store.saveMatchChoices(user.requestId, {
+        preferredOptionNumber: 1,
+        acceptedOptionNumbers: [1],
+        requiredHookIds: [],
+        rawText: "1"
+      });
+    }
+    expect(new Set(offeredDraftIds).size).toBe(1);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 91_000));
+    const settleJob = await store.enqueueJob({
+      type: "match_round_settle",
+      payload: { roundId: round.roundId },
+      idempotencyKey: `two-person-relative-best-settle:${round.roundId}`,
+      partitionKey: `match-round:${round.roundId}`
+    });
+    const settled = await processor.process(settleJob);
+
+    expect(settled.roomIds).toHaveLength(1);
+    const room = await store.getRoom(String((settled.roomIds as string[])[0]));
+    expect(room?.members.map((member) => member.userId).sort()).toEqual(users.map((user) => user.userId).sort());
+  });
+
   it("offers real drafts and settles at least two non-overlapping confirmed rooms", async () => {
     const store = new MemoryStore();
     const matcher = new MockMatchmakingIntelligence();

@@ -1414,7 +1414,7 @@ export class JobProcessor {
       for (const room of rooms) {
         const roomCandidates = await this.buildRoomCandidates(room);
         const judgement = await this.matchmaking.judgeGroup([...roomCandidates, candidate], room.offlineGame);
-        if (judgement.verdict !== "good" && judgement.verdict !== "excellent") continue;
+        if (judgement.verdict === "bad") continue;
         const confirmedHooks = roomCandidates
           .flatMap((item) => item.socialHooks ?? [])
           .filter((hook) => hook.userId !== candidate.request.userId)
@@ -1457,7 +1457,7 @@ export class JobProcessor {
 
     const proposed = await this.matchmaking.proposeMatchRound(candidates, games);
     const validatedProposal = proposed ? validateMatchRoundProposal(proposed, candidates, games) : null;
-    const qualityRank = { good: 1, excellent: 2 } as const;
+    const qualityRank = { acceptable: 0, good: 1, excellent: 2 } as const;
     const qualifiedDrafts: Array<{
       draft: MatchRoundProposal["drafts"][number];
       quality: keyof typeof qualityRank;
@@ -1471,7 +1471,7 @@ export class JobProcessor {
         .filter((candidate): candidate is MatchCandidate => Boolean(candidate));
       if (members.length !== draft.candidateRequestIds.length) continue;
       const judgement = await this.matchmaking.judgeGroup(members, game);
-      if (judgement.verdict !== "good" && judgement.verdict !== "excellent") continue;
+      if (judgement.verdict === "bad") continue;
       qualifiedDrafts.push({
         draft,
         quality: judgement.verdict,
@@ -1795,7 +1795,7 @@ export class JobProcessor {
       if (!game) continue;
       const members = candidate.decision.requestIds.map((requestId) => candidateByRequest.get(requestId)).filter(Boolean) as MatchCandidate[];
       const judgement = await this.matchmaking.judgeGroup(members, game);
-      if (judgement.verdict !== "good" && judgement.verdict !== "excellent") continue;
+      if (judgement.verdict === "bad") continue;
       candidate.utility += MATCH_UTILITY_WEIGHTS.activity[judgement.verdict];
       judged.push(candidate);
     }
