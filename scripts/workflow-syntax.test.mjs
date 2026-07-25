@@ -32,12 +32,16 @@ test("GitHub Actions workflows are valid YAML with triggers and jobs", async () 
       assert.doesNotMatch(source, /\bpush:/u);
     }
     if (file === "agent-layer-release.yml") {
-      assert.match(source, /branches:\s*\n\s+- main/u);
-      assert.doesNotMatch(source, /branches:\s*\n\s+- feat\/wechat-channel/u);
+      assert.deepEqual(Object.keys(workflow.on), ["workflow_dispatch"]);
+      assert.doesNotMatch(source, /^\s*push:/mu);
       assert.doesNotMatch(source, /agent:release:verify/u);
       assert.match(source, /current-release/u);
       assert.match(source, /SMOKE_FRONTEND_ORIGIN/u);
       assert.match(source, /pnpm wechat:smoke:qr/u);
+    }
+    if (file === "production-watch.yml") {
+      assert.deepEqual(Object.keys(workflow.on), ["workflow_dispatch"]);
+      assert.doesNotMatch(source, /^\s*schedule:/mu);
     }
   }
 });

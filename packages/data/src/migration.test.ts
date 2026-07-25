@@ -1125,6 +1125,57 @@ describe("Supabase migration", () => {
     });
   });
 
+  it("grants lease-aware LLM job RPCs only to the service role", async () => {
+    const privileges = await db.query<{
+      anon_heartbeat: boolean;
+      authenticated_complete: boolean;
+      authenticated_fail: boolean;
+      service_heartbeat: boolean;
+      service_complete: boolean;
+      service_fail: boolean;
+    }>(`
+      select
+        has_function_privilege(
+          'anon',
+          'public.heartbeat_llm_job(uuid,text)',
+          'execute'
+        ) as anon_heartbeat,
+        has_function_privilege(
+          'authenticated',
+          'public.complete_llm_job(uuid,jsonb,text)',
+          'execute'
+        ) as authenticated_complete,
+        has_function_privilege(
+          'authenticated',
+          'public.fail_llm_job(uuid,text,text)',
+          'execute'
+        ) as authenticated_fail,
+        has_function_privilege(
+          'service_role',
+          'public.heartbeat_llm_job(uuid,text)',
+          'execute'
+        ) as service_heartbeat,
+        has_function_privilege(
+          'service_role',
+          'public.complete_llm_job(uuid,jsonb,text)',
+          'execute'
+        ) as service_complete,
+        has_function_privilege(
+          'service_role',
+          'public.fail_llm_job(uuid,text,text)',
+          'execute'
+        ) as service_fail
+    `);
+    expect(privileges.rows[0]).toEqual({
+      anon_heartbeat: false,
+      authenticated_complete: false,
+      authenticated_fail: false,
+      service_heartbeat: true,
+      service_complete: true,
+      service_fail: true
+    });
+  });
+
   it("keeps dynamic matchmaking state and RPCs service-role only", async () => {
     const privileges = await db.query<{
       rls_enabled: boolean;
