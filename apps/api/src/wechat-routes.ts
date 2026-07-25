@@ -559,7 +559,21 @@ export function registerWechatRoutes(
       const { token } = z.object({
         token: z.string().regex(/^[A-Za-z0-9_-]{43}$/u)
       }).parse(request.body ?? {});
-      const claim = await runtime.store.consumeWechatWebClaim(hashSessionToken(token));
+      const tokenHash = hashSessionToken(token);
+      const pendingClaim = await runtime.store.getWechatWebClaim(tokenHash);
+      if (!pendingClaim) {
+        return reply.code(401).send({
+          error: "wechat_web_claim_invalid",
+          message: "注册链接无效、已使用或已过期"
+        });
+      }
+      if (request.authUserId && request.authUserId !== pendingClaim.userId) {
+        return reply.code(409).send({
+          error: "wechat_web_account_switch_required",
+          message: "当前浏览器已登录其他 TOMEET 账号。请先确认退出当前账号，再继续使用微信里的同一个账号；聊天、画像和匹配状态都会保留。"
+        });
+      }
+      const claim = await runtime.store.consumeWechatWebClaim(tokenHash);
       if (!claim) {
         return reply.code(401).send({
           error: "wechat_web_claim_invalid",
@@ -582,7 +596,11 @@ export function registerWechatRoutes(
           "email_password",
           "phone_password",
           "google"
-        ]
+        ],
+        accountContinuity: {
+          mode: "upgrade_existing_wechat_user",
+          preserves: ["conversation", "profile", "matching"]
+        }
       };
     }
   );

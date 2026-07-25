@@ -38,6 +38,14 @@ export class MemoryWechatStore implements WechatConnectionStore {
     return structuredClone(claim);
   }
 
+  async getWechatWebClaim(tokenHash: string): Promise<WechatWebClaim | null> {
+    const claim = [...this.webClaims.values()].find((item) => item.tokenHash === tokenHash);
+    if (!claim || claim.consumedAt || new Date(claim.expiresAt).getTime() <= Date.now()) {
+      return null;
+    }
+    return structuredClone(claim);
+  }
+
   async consumeWechatWebClaim(tokenHash: string): Promise<WechatWebClaim | null> {
     const claim = [...this.webClaims.values()].find((item) => item.tokenHash === tokenHash);
     if (!claim || claim.consumedAt) {

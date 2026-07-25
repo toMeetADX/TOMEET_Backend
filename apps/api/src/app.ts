@@ -154,6 +154,7 @@ export async function buildApp(options: BuildAppOptions) {
   app.addHook("preValidation", async (request) => {
     if (!options.verifyAccessToken || request.method === "OPTIONS") return;
     const path = request.url.split("?", 1)[0];
+    const hasAuthorization = typeof request.headers.authorization === "string";
     const isWechatSessionCreation = request.method === "POST" && (
       path === "/wechat/connect/sessions"
       || path === "/wechat/connect/sessions/demo"
@@ -161,7 +162,7 @@ export async function buildApp(options: BuildAppOptions) {
     if (
       path === "/health"
       || path === "/ready"
-      || path === "/auth/wechat/claim"
+      || (path === "/auth/wechat/claim" && !hasAuthorization)
       || path?.startsWith("/internal/")
       || (path?.startsWith("/wechat/connect/sessions") && !isWechatSessionCreation)
       || (isWechatSessionCreation && !request.headers.authorization)
@@ -328,7 +329,11 @@ export async function buildApp(options: BuildAppOptions) {
           runId: `activation-welcome-${userId}-web-register-intro`
         });
         await deliverText({
-          text: `点这里完成注册：${webRegistrationUrl}`,
+          text: "这是你微信里的同一个 TOMEET 账号，注册只会添加网页登录方式，聊天、画像和匹配都会保留",
+          runId: `activation-welcome-${userId}-web-register-continuity`
+        });
+        await deliverText({
+          text: `点这里为当前账号添加网页登录：${webRegistrationUrl}`,
           runId: `activation-welcome-${userId}-web-register-link`
         });
       }
