@@ -127,7 +127,7 @@ WECHAT_TURN_PROGRESS_INTERVAL_MS=30000
 WECHAT_TURN_PROGRESS_MAX_NOTICES=1
 ```
 
-`WECHAT_BUBBLE_DELAY_MS` 控制一句话气泡之间的渐进发送间隔，允许 `0–5000` 毫秒，生产建议约 `180–220` 毫秒，测试使用 `0`。组局邀请和成局确认函字符卡片不会被拆分。
+`WECHAT_BUBBLE_DELAY_MS` 控制一句话气泡之间的渐进发送间隔，允许 `0–5000` 毫秒，生产建议约 `180–220` 毫秒，测试使用 `0`。组局邀请和成局确认函使用普通无边框文本，并按正常消息分段发送。
 
 `WECHAT_TURN_PROGRESS_DELAY_MS` 控制首条“Agent 正在工作”提示出现前的等待时间，
 `WECHAT_TURN_PROGRESS_INTERVAL_MS` 控制后续阶段提示间隔，`WECHAT_TURN_PROGRESS_MAX_NOTICES`

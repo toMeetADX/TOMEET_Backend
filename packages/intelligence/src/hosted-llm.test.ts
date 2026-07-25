@@ -1144,8 +1144,9 @@ describe("hosted Agent product-event composition", () => {
     expect(result.optionPreviews.map((option) => option.optionNumber)).toEqual([1, 2]);
     expect(result.optionPreviews[1]?.text).toContain("共同散步");
     expect(result.optionPreviews[1]?.text).toContain("边走边聊");
-    expect(result.content).toContain("┃ TOMEET 组局邀请");
+    expect(result.content).toContain("TOMEET 组局邀请");
     expect(result.content).toContain("2｜共同散步");
+    expect(result.content).not.toMatch(/[┏┓┗┛┣┫┃│]/u);
   });
 
   it("drops option previews on non-candidate product events", async () => {
@@ -1163,7 +1164,7 @@ describe("hosted Agent product-event composition", () => {
     expect(result.optionPreviews).toEqual([]);
   });
 
-  it("repairs invitation cards that include a right border", async () => {
+  it("normalizes a legacy framed invitation into organized plain text", async () => {
     const invalidRightFrame = [
       "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓",
       "┃ TOMEET 组局邀请            ┃",
@@ -1189,11 +1190,12 @@ describe("hosted Agent product-event composition", () => {
       }
     });
 
-    expect(result.content).toContain("┃ TOMEET 组局邀请");
-    expect(result.content).not.toMatch(/[┃│┫┤┓┐┛┘]\s*$/mu);
+    expect(result.content).toContain("TOMEET 组局邀请");
+    expect(result.content).toContain("1｜故事交换桌");
+    expect(result.content).not.toMatch(/[┏┓┗┛┣┫┃│]/u);
   });
 
-  it("accepts a left-frame-only formed-room confirmation", async () => {
+  it("normalizes a legacy framed room confirmation into plain text", async () => {
     const content = leftFrame("TOMEET 成局确认函", [
       "活动  故事交换桌",
       "人数  4 人",
@@ -1214,11 +1216,12 @@ describe("hosted Agent product-event composition", () => {
       }
     });
 
-    expect(result.content).toContain("┃ TOMEET 成局确认函");
-    expect(result.content.split("\n").every((line) => !/[┃│┫┤┓┐┛┘]\s*$/u.test(line))).toBe(true);
+    expect(result.content).toContain("TOMEET 成局确认函");
+    expect(result.content).toContain("活动  故事交换桌");
+    expect(result.content).not.toMatch(/[┏┓┗┛┣┫┃│]/u);
   });
 
-  it("allows at most two restrained emoji in invitation and confirmation cards", async () => {
+  it("keeps functional emoji in an organized plain room confirmation", async () => {
     const content = leftFrame("TOMEET 成局确认函", [
       "👥 人数  4 人",
       "📍 集合  TOMEET 集合点"
@@ -1239,21 +1242,7 @@ describe("hosted Agent product-event composition", () => {
     });
     expect(result.content).toContain("👥");
     expect(result.content).toContain("📍");
-
-    const crowded = leftFrame("TOMEET 成局确认函", ["👥 4 人", "📍 集合点", "✨ 已成局"]);
-    stubChatResponses(
-      { content: crowded, optionPreviews: [] },
-      { content: crowded, optionPreviews: [] }
-    );
-    await expect(hostedWithSearch().composeProductMessage(agentContext(), {
-      kind: "room_intro",
-      facts: {
-        activity: { name: "故事交换桌" },
-        playerCount: 4,
-        meetingPoint: "集合点",
-        confirmedFacts: []
-      }
-    })).rejects.toThrow("必须使用无右边框的左框字符卡片");
+    expect(result.content).not.toMatch(/[┏┓┗┛┣┫┃│]/u);
   });
 
   it("keeps unavailable messaging grounded in pool cause and consent state", async () => {

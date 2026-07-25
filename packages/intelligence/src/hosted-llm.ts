@@ -370,47 +370,35 @@ function structuredOutputIssues(error: z.ZodError): StructuredOutputIssue[] {
   }));
 }
 
-const leftFrameTitles = {
-  match_options: "TOMEET 组局邀请",
-  room_intro: "TOMEET 成局确认函"
-} as const;
-
-function assertLeftFrameContent(event: AgentProductEvent, content: string): void {
-  if (event.kind !== "match_options" && event.kind !== "room_intro") return;
-  const title = leftFrameTitles[event.kind];
-  const lines = content.split("\n");
-  const hasExpectedStructure = /^┏━{6,}$/u.test(lines[0] ?? "")
-    && lines[1]?.trim() === `┃ ${title}`
-    && /^┣━{6,}$/u.test(lines[2] ?? "")
-    && /^┗━{6,}$/u.test(lines.at(-1) ?? "")
-    && lines.slice(3, -1).every((line) => /^┃ .+/u.test(line) || /^┣━{6,}$/u.test(line));
-  const hasRightBorder = lines.some((line) => /[┃│┫┤┓┐┛┘]\s*$/u.test(line));
-  const emojiCount = content.match(/\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*/gu)?.length ?? 0;
-  if (!hasExpectedStructure || hasRightBorder || emojiCount > 2 || content.includes("```")) {
-    throw new Error(`${title} 必须使用无右边框的左框字符卡片`);
-  }
+function removeCharacterFrame(content: string): string {
+  return content
+    .split(/\r?\n/gu)
+    .map((line) => line
+      .replace(/^[\s┏┓┗┛┣┫┃│┌┐└┘├┤]+/gu, "")
+      .replace(/[┃│┫┤┓┐┛┘]\s*$/gu, "")
+      .trim())
+    .filter((line) => line.length > 0 && !/^[━─]+$/u.test(line))
+    .join("\n")
+    .trim();
 }
 
-function buildGroundedMatchOptionsFrame(optionPreviews: AgentProductMessage["optionPreviews"]): string {
-  const body = optionPreviews.flatMap((preview) => {
-    const text = preview.text
-      .replace(/```/gu, "")
-      .replace(/\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*/gu, "")
-      .split(/\r?\n/gu)
-      .map((line) => line
-        .replace(/^[\s┏┓┗┛┣┫┃│┌┐└┘├┤]+/gu, "")
-        .replace(/[┃│┫┤┓┐┛┘]\s*$/gu, "")
-        .trim())
-      .filter(Boolean);
-    return text.map((line, index) => index === 0 ? `${preview.optionNumber}｜${line}` : line);
+function buildGroundedMatchOptionsText(
+  optionPreviews: AgentProductMessage["optionPreviews"],
+  preferredLanguage: "zh" | "en"
+): string {
+  const title = preferredLanguage === "en" ? "TOMEET Match Options" : "TOMEET 组局邀请";
+  const prompt = preferredLanguage === "en"
+    ? "Reply with an option number to choose"
+    : "回复候选编号进行选择";
+  const options = optionPreviews.map((preview) => {
+    const prefix = new RegExp(`^(?:(?:候选|选项|option)\\s*)?${preview.optionNumber}\\s*[|｜:：.、-]\\s*`, "iu");
+    const text = removeCharacterFrame(preview.text)
+      .replace(/\*\*/gu, "")
+      .replace(prefix, "")
+      .trim();
+    return `${preview.optionNumber}｜${text || `Option ${preview.optionNumber}`}`;
   });
-  return [
-    "┏━━━━━━━━━━━━",
-    "┃ TOMEET 组局邀请",
-    "┣━━━━━━━━━━━━",
-    ...body.map((line) => `┃ ${line}`),
-    "┗━━━━━━━━━━━━"
-  ].join("\n");
+  return [title, ...options, prompt].join("\n\n");
 }
 
 export interface HostedLlmOptions {
@@ -864,9 +852,9 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
             "回复正文不要展示来源、引用、证据编号或参考资料列表；这些信息由系统结构化元数据保存。",
             "如果用户明确要求具体店铺或场地，可保留候选回复中的 Markdown 链接 [店铺名](https://...)，但店铺名和完整 URL 必须由同一条 webEvidence 明确支持。店名或 URL 任一无法核实时，改成不带链接的文本并说明尚不能确认。",
             "即使 candidateReply 看起来正确，也要根据证据重写或确认。reply 必须是可以直接发布的最终文本。",
-            "除产品字符卡片外，reply 必须推进对用户的了解：包含一个针对用户本人的具体问题，或一次对具体事实的确认请求，或真实的产品状态与明确的下一步。只复述用户上一句再加一句评价、既不提问也不请求确认的回复视为空转，必须重写并置 status=corrected。",
+            "reply 必须推进对用户的了解：包含一个针对用户本人的具体问题，或一次对具体事实的确认请求，或真实的产品状态与明确的下一步。只复述用户上一句再加一句评价、既不提问也不请求确认的回复视为空转，必须重写并置 status=corrected。",
             "重写时不得为了凑出一个问题而虚构事实；没有可用细节时就基于用户最近原话问一个容易回答的具体问题。用户已明确表示不想再被问时不要强行提问。",
-            "保留候选回复的一句话一气泡分段和用户当前语言。除字符卡片外，不得把多个短段重新合并成长段，每段结尾不要补中文句号或英文句点。",
+            "保留候选回复的一句话一气泡分段和用户当前语言。不得把多个短段重新合并成长段，每段结尾不要补中文句号或英文句点。",
             "status=verified 表示无需事实纠正；status=corrected 表示已纠错；证据不足时 status=insufficient_evidence 并使用不猜测的安全表述。",
             "usedMemoryIds 和 usedSourceIndexes 只能填写最终 reply 实际依赖的证据 id/index。",
             "只输出 JSON：{\"status\":\"verified|corrected|insufficient_evidence\",\"reply\":\"...\",\"issues\":[],\"usedMemoryIds\":[],\"usedSourceIndexes\":[]}。"
@@ -983,7 +971,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         "newMessage 以 [图片观察] 开头时，那是系统对用户刚发来图片的客观观察，不是用户原话。不要把观察当成用户已确认的事实，不要写进 socialHooks，也不要把观察清单复述给用户；要挑其中一条最具体的线索，向用户本人提一个求证性的问题，宾语是用户不是图片。此时 onboardingTransition=engaged。",
         "runtime.profileReadiness.confirmedSocialHooks 是已经从用户文字里确认下来、可以直接拿去匹配的事实。它为空或只有一条时，优先用这一轮把用户刚提到的具体事情问清楚并确认成新的事实；已经在列表里的事不要重复确认。",
         "默认使用 runtime.onboardingState.preferredLanguage 指定的语言回复，zh 用中文，en 用英文。微信新用户默认是 zh。用户明确要求改用英文时 onboardingTransition=language_en；明确要求切回中文时为 language_zh。切换语言时不要同时输出无关产品 action。",
-        "除候选邀请和确认函字符卡片外，回复要像微信短气泡：一句话一个段落，段与段之间用空行分开，每段结尾不要使用中文句号或英文句点。可以自然使用逗号、问号和感叹号，但不要故意写得支离破碎。内容较多时，先给一个很短的承接，再分成后续短句，让发送端可以逐句呈现。",
+        "回复要像微信短气泡：一句话一个段落，段与段之间用空行分开，每段结尾不要使用中文句号或英文句点。可以自然使用逗号、问号和感叹号，但不要故意写得支离破碎。内容较多时，先给一个很短的承接，再分成后续短句，让发送端可以逐句呈现。",
         "禁止抽象采访：不要问‘你是什么样的人/什么性格/喜欢和什么类型的人交朋友/最特别的经历’。不要在没有事实依据时说‘你好特别/有创造力’。",
         "用户拒绝图片时自然接住，不追问拒绝原因，不再要求图片；结合刚才的具体对话继续问一个容易回答的问题。示例方向：可以从用户最近投入时间的一件事聊起，但不要照抄固定句式。此时 onboardingTransition=image_declined。",
         "在首次了解阶段持续判断两件事：画像信息是否已经可用于匹配，以及用户是否出现退出了解过程的倾向。不要用固定题数、字段清单、标签数量或回答字数作为门槛。",
@@ -1219,17 +1207,17 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         [
           "你负责把 TOMEET 已经提交成功的结构化产品事件写成用户可直接收到的 Agent 消息。",
           "根据 recentMessages、profileSummary 和当前上下文调整语气、详略和承接方式；不要使用固定模板，不要机械重复同一句话。",
-          "使用 runtime.onboardingState.preferredLanguage 指定的语言。除字符卡片外，正文按微信短气泡写作：一句话一个段落，用空行分隔，每段结尾不用中文句号或英文句点；内容较多时先短承接，再逐句展开。",
+          "使用 runtime.onboardingState.preferredLanguage 指定的语言。正文按微信短气泡写作：一句话一个段落，用空行分隔，每段结尾不用中文句号或英文句点；内容较多时先短承接，再逐句展开。",
           "event.facts 是唯一可陈述的产品事实。不得添加人物经历、关系、身份、性格、兴趣标签、人口属性、地点、时间、人数或承诺。",
           "不得暴露内部 ID、hook、draft、offer、version、phase、status、RPC、Job 等工程字段。",
           "人物事实只能逐字或保守转述 facts 中提供的 hookText，不得升级、概括成性格标签或推测。",
           "match_options 必须为每个 optionNumber 返回一条 optionPreviews，编号集合必须与输入完全一致；confirmedFacts 是已确认成员，possibleFacts 只是可能参与者，语气必须明确区分。content 是把这些候选自然组织后的完整消息，可以增加与用户上下文相关但不新增事实的承接和选择提示。",
           "match_option_detail 只解释 facts.option 中的单个候选：只能使用该 option 的 activityName、activityDescription、confirmedFacts、possibleFacts、confirmedCount、remainingSeats 等已给事实；不得引入其他 option 或编造人物。optionPreviews=[]。",
           "action_failed 表示用户刚才触发的产品动作没有完成。只根据 facts.failedActions 中的 type 与 code 用自然语气说明暂时没办成，并保留用户可继续的下一步；不得复述内部错误原文，不得声称已经匹配、成局或退出成功。optionPreviews=[]。",
-          "match_options 的 content 必须是无右边框字符卡片：第一行是至少 6 个横线的 ┏━━━━，第二行只能是‘┃ TOMEET 组局邀请’，第三行是 ┣━━━━；正文每行以‘┃ ’开头，分隔线以‘┣’开头，末行以‘┗’加横线结束。任何一行都不得以 ┃、│、┫、┤、┓、┐、┛、┘ 结尾，不加 Markdown 代码围栏。整张卡片最多使用 2 个克制、功能性的 emoji，例如人数或集合信息提示，不要装饰每一行。optionPreviews.text 只保存对应选项的自然文字，不重复外框。",
+          "match_options 的 content 使用普通无边框文本，按候选编号清晰分段，不使用字符画外框或 Markdown 代码围栏。optionPreviews.text 只保存对应选项的自然文字。",
           "match_unavailable 要如实说明本次暂时没有足够合适的人或局。cause=insufficient_pool 时可以说当前可用人较少；cause=low_fit 时可以说当前候选的整体契合度还不够；cause=no_activity 时说明暂时没有合适活动；cause=attempt_not_formed 时说明这一次具体候选没有成局。只能在 canEnableProactivePush=true 时询问是否授权未来主动推送；proactivePushAlreadyEnabled=true 时说明会继续留意，不要再次索要授权。",
           "match_confirmation_incomplete 表示用户已经做出选择，但这次候选最终没有成局。先确认用户的选择已收到，再中性说明本次安排没有完成成局确认；不得说或暗示某个具体用户拒绝了他，不得归因于用户不够合适，也不得虚构拒绝原因。currentAttemptEnded=true 时要明确这次具体尝试已经结束。canEnableProactivePush=true 时可以询问是否授权未来主动推送；proactivePushAlreadyEnabled=true 时说明会继续留意。followUpPriority=confirmation_follow_up 表示之后再次出现合格机会时，该用户在 watching 用户中优先，但仍不得承诺一定或立即成局。",
-          "room_intro 只能描述最终已确认成员和当前房间事实，不能使用查看者自己的人物事实。room_intro 的 content 使用与 match_options 相同的无右边框字符卡片，但第二行只能是‘┃ TOMEET 成局确认函’；正文以结构化事实自然组织，不得为了排版补充不存在的信息。",
+          "room_intro 只能描述最终已确认成员和当前房间事实，不能使用查看者自己的人物事实。room_intro 的 content 使用普通无边框文本，按活动、人数、集合信息等事实自然分段，不得为了排版补充不存在的信息。",
           "match_expired 用于候选窗口内没有完成选择等真正超时情形；不得把用户已经选择但未成局描述成用户超时，也不得声称系统会自动重新匹配。",
           "match_progress 是系统主动处理期间的短状态反馈。只说明仍在处理、当前不需要用户操作，不虚构已找到候选、人数、完成比例或预计完成时间；每次措辞应自然变化，避免机械重复。",
           "room_change 和 draft_change 只说明输入中真实发生的变化，并自然给出可用的下一步，不替用户做决定。room_change 中 currentlyFormed=false 时必须明确当前人数暂未达到活动最低人数，不能继续说已经成局；可以说明系统正在留意合适补位。",
@@ -1262,7 +1250,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
           "保持 recentMessages 和 profileSummary 所支持的个性化语气与自然承接，但它们不能成为新增产品事实的来源。",
           "不得暴露内部 ID 或工程字段。不得输出来源、校验过程或解释。",
           "match_options 的 optionPreviews 编号集合必须与 expectedOptionNumbers 完全一致，每个编号恰好一条；其他事件必须返回空数组。",
-          "event.kind=match_options 或 room_intro 时，必须保留无右边框左框卡片：只允许左侧 ┃，不得补回任何右边框；标题分别为‘TOMEET 组局邀请’和‘TOMEET 成局确认函’，不使用 Markdown 代码围栏。整张卡片最多保留 2 个克制、功能性的 emoji，不得增加密集装饰。",
+          "event.kind=match_options 或 room_intro 时使用普通无边框文本，保留清晰的标题、编号和分段，不使用字符画外框或 Markdown 代码围栏。",
           "保留 candidateMessage 中一句话一气泡的空行和当前语言，不要把多段合并成长段，每个普通段落结尾不要增加中文句号或英文句点。",
           "只输出 JSON：{\"content\":\"...\",\"optionPreviews\":[{\"optionNumber\":1,\"text\":\"...\"}]}。"
         ].join("\n"),
@@ -1309,15 +1297,19 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
     } else if (result.optionPreviews.length > 0) {
       throw new Error("非候选事件不能返回 optionPreviews");
     }
-    try {
-      assertLeftFrameContent(event, finalized.content);
-    } catch (error) {
-      if (event.kind !== "match_options") throw error;
+    if (event.kind === "match_options") {
       finalized = {
         ...finalized,
-        content: buildGroundedMatchOptionsFrame(finalized.optionPreviews)
+        content: buildGroundedMatchOptionsText(
+          finalized.optionPreviews,
+          context.onboardingState?.preferredLanguage ?? "zh"
+        )
       };
-      assertLeftFrameContent(event, finalized.content);
+    } else if (event.kind === "room_intro") {
+      finalized = {
+        ...finalized,
+        content: removeCharacterFrame(finalized.content)
+      };
     }
     return finalized;
   }
