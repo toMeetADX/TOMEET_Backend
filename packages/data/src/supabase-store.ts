@@ -300,7 +300,7 @@ function mapMemoryProfile(row: JsonRow): UserMemoryProfile {
     profileNarrative: row.profile_narrative ?? row.profileNarrative ?? "",
     matchingNarrative: row.matching_narrative ?? row.matchingNarrative ?? "",
     sourceMemoryIds: row.source_memory_ids ?? row.sourceMemoryIds ?? [],
-    sourceWatermark: row.source_watermark ?? row.sourceWatermark ?? null,
+    sourceWatermark: normalizeDateTime(row.source_watermark ?? row.sourceWatermark ?? null),
     version: row.version ?? 0,
     stale: row.stale ?? false,
     updatedAt: normalizeDateTime(row.updated_at ?? row.updatedAt)
