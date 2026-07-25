@@ -46,6 +46,7 @@ async function setup(
   });
   const store = new MemoryStore();
   const wechatStore = new MemoryWechatStore(store);
+  const provisionedUserId = integration?.provisionedUserId ?? randomUUID();
   const verifyAccessToken = vi.fn(async (accessToken: string) => {
     const userId = integration?.userByToken?.[accessToken];
     if (userId) return userId;
@@ -58,7 +59,6 @@ async function setup(
         new MockMatchmakingIntelligence()
     )
     : undefined;
-  const provisionedUserId = integration?.provisionedUserId ?? randomUUID();
   const accountProvisioner = {
     provision: vi.fn(async () => ({
       userId: provisionedUserId,
@@ -156,11 +156,17 @@ describe("WeChat one-time QR onboarding", () => {
     const texts = sentMessageTexts(sentMessages);
     expect(texts.slice(0, 4)).toEqual(adventurexWelcomeBubbles.zh);
     expect(texts[4]).toBe("想在网页上和别人线下加好友吗，有机会上TOMEET“必吃榜”！");
-    expect(texts[5]).toMatch(
-      /^点这里完成注册：https:\/\/tomeet\.chat\/register#claim=[A-Za-z0-9_-]{43}$/u
+    expect(texts[5]).toBe(
+      "这是微信里的同一个 TOMEET 账号，网页只用于注册和加好友；Agent 对话和发起匹配仍在微信"
     );
-    const token = texts[5]?.match(/#claim=([A-Za-z0-9_-]{43})$/u)?.[1];
+    expect(texts[6]).toMatch(
+      /^点这里为当前账号添加网页登录：https:\/\/tomeet\.chat\/register#claim=[A-Za-z0-9_-]{43}$/u
+    );
+    const token = texts[6]?.match(/#claim=([A-Za-z0-9_-]{43})$/u)?.[1];
     expect(token).toEqual(expect.any(String));
+    const existingWechatMatch = await store.createMatchRequest(provisionedUserId, {
+      rawText: "在微信里开始匹配"
+    });
 
     const claim = await app.inject({
       method: "POST",
@@ -176,8 +182,14 @@ describe("WeChat one-time QR onboarding", () => {
         accessToken: "anonymous-access-token",
         refreshToken: "anonymous-refresh-token"
       },
-      registrationMethods: ["email_password", "phone_password", "google"]
+      registrationMethods: ["email_password", "phone_password", "google"],
+      accountContinuity: {
+        mode: "upgrade_existing_wechat_user",
+        preserves: ["conversation", "profile", "matching"]
+      }
     });
+    expect(await store.getLatestMatchRequestForUser(provisionedUserId))
+      .toEqual(existingWechatMatch);
 
     const repeated = await app.inject({
       method: "POST",
@@ -189,6 +201,56 @@ describe("WeChat one-time QR onboarding", () => {
     expect(repeated.headers["referrer-policy"]).toBe("no-referrer");
     expect(JSON.stringify(sentMessages)).not.toContain("anonymous-access-token");
     expect(JSON.stringify(sentMessages)).not.toContain("anonymous-refresh-token");
+  });
+
+  it("keeps the claim intact when the browser is signed in to a different account", async () => {
+    const provisionedUserId = randomUUID();
+    const otherUserId = randomUUID();
+    const { app, sentMessages } = await setup([{
+      status: "confirmed",
+      bot_token: "account-switch-bot-secret",
+      ilink_bot_id: "account-switch-bot",
+      baseurl: "https://ilink-api.example.com",
+      ilink_user_id: "wechat-owner-account-switch"
+    }], undefined, undefined, undefined, {
+      webRegistration: true,
+      provisionedUserId,
+      userByToken: { "other-account-token": otherUserId }
+    });
+
+    const created = (await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    })).json();
+    await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${created.sessionId}`,
+      headers: { "x-wechat-session-token": created.sessionToken }
+    });
+    const token = sentMessageTexts(sentMessages)[6]?.match(
+      /#claim=([A-Za-z0-9_-]{43})$/u
+    )?.[1];
+    expect(token).toEqual(expect.any(String));
+
+    const conflict = await app.inject({
+      method: "POST",
+      url: "/auth/wechat/claim",
+      headers: { authorization: "Bearer other-account-token" },
+      payload: { token }
+    });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json()).toMatchObject({
+      error: "wechat_web_account_switch_required"
+    });
+
+    const afterSignOut = await app.inject({
+      method: "POST",
+      url: "/auth/wechat/claim",
+      payload: { token }
+    });
+    expect(afterSignOut.statusCode).toBe(200);
+    expect(afterSignOut.json()).toMatchObject({ userId: provisionedUserId });
   });
 
   it("keeps one Web user and one welcome when the same WeChat account scans different QR codes", async () => {
@@ -234,7 +296,7 @@ describe("WeChat one-time QR onboarding", () => {
       .toMatchObject({ userId: provisionedUserId });
     expect(accountProvisioner.provision).toHaveBeenCalledTimes(1);
     expect(accountProvisioner.discard).not.toHaveBeenCalled();
-    expect(sentMessageTexts(sentMessages)).toHaveLength(6);
+    expect(sentMessageTexts(sentMessages)).toHaveLength(7);
     expect(sentMessageTexts(sentMessages).slice(0, 4)).toEqual(adventurexWelcomeBubbles.zh);
   });
 

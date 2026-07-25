@@ -114,6 +114,18 @@ export class SupabaseWechatStore implements WechatConnectionStore {
     return mapWebClaim(data as JsonRow);
   }
 
+  async getWechatWebClaim(tokenHash: string): Promise<WechatWebClaim | null> {
+    const { data, error } = await this.client
+      .from("wechat_web_claims")
+      .select("*")
+      .eq("token_hash", tokenHash)
+      .is("consumed_at", null)
+      .gt("expires_at", new Date().toISOString())
+      .maybeSingle();
+    if (error) this.throwError("Read WeChat Web claim", error);
+    return data ? mapWebClaim(data as JsonRow) : null;
+  }
+
   async consumeWechatWebClaim(tokenHash: string): Promise<WechatWebClaim | null> {
     const now = new Date().toISOString();
     const { data, error } = await this.client

@@ -815,8 +815,12 @@ paths:
         in the JSON body. A successful response returns the Supabase anonymous
         session that already owns the WeChat profile. The client must call
         supabase.auth.setSession before upgrading that same user with email and
-        password, phone and password, or a linked Google identity.
-      security: []
+        password, phone and password, or a linked Google identity. If the browser
+        already has a session, send its optional Bearer token; a different account
+        receives a non-consuming 409 account-switch response.
+      security:
+        - {}
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -843,6 +847,12 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           description: Claim is invalid, expired, or already consumed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionError"
+        "409":
+          description: The browser is signed in to a different TOMEET account; the claim is not consumed
           content:
             application/json:
               schema:
@@ -1195,7 +1205,7 @@ components:
     WechatWebClaimResponse:
       type: object
       additionalProperties: false
-      required: [userId, session, registrationMethods]
+      required: [userId, session, registrationMethods, accountContinuity]
       properties:
         userId:
           $ref: "#/components/schemas/Uuid"
@@ -1218,6 +1228,21 @@ components:
             - const: google
           minItems: 3
           maxItems: 3
+        accountContinuity:
+          type: object
+          additionalProperties: false
+          required: [mode, preserves]
+          properties:
+            mode:
+              const: upgrade_existing_wechat_user
+            preserves:
+              type: array
+              prefixItems:
+                - const: conversation
+                - const: profile
+                - const: matching
+              minItems: 3
+              maxItems: 3
     WechatSessionError:
       type: object
       required: [error, message]
