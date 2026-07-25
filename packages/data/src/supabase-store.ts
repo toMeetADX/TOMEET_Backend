@@ -191,6 +191,9 @@ function mapOnboardingState(row: JsonRow): AdventurexOnboardingState {
     welcomeSentAt: normalizeDateTime(
       row.adventurex_welcome_sent_at ?? row.welcome_sent_at ?? row.welcomeSentAt ?? null
     ),
+    welcomeDeliveredAt: normalizeDateTime(
+      row.adventurex_welcome_delivered_at ?? row.welcome_delivered_at ?? row.welcomeDeliveredAt ?? null
+    ),
     createdAt: normalizeDateTime(
       row.adventurex_state_created_at ?? row.created_at ?? row.createdAt
     ),
@@ -356,6 +359,14 @@ export class SupabaseStore implements DataStore {
     const result = unwrapRpcData(data) as { message?: JsonRow | null } | JsonRow;
     const message = ("message" in result ? result.message : result) as JsonRow | null | undefined;
     return message ? mapMessage(message) : null;
+  }
+
+  async markAdventurexWelcomeDelivered(userId: string): Promise<AdventurexOnboardingState> {
+    const { data, error } = await this.client.rpc("mark_adventurex_welcome_delivered", {
+      p_user_id: userId
+    });
+    if (error) this.throwError("标记 AdventureX 欢迎语已投递", error);
+    return mapOnboardingState(unwrapRpcData(data) as JsonRow);
   }
 
   async updateAdventurexOnboardingState(
@@ -879,6 +890,20 @@ export class SupabaseStore implements DataStore {
     });
     if (error) this.throwError("保存轮次候选", error);
     return ((data ?? []) as JsonRow[]).map((row) => mapOffer(row));
+  }
+
+  async activateMatchOfferWindow(
+    requestId: string,
+    roundId: string,
+    windowSeconds: number
+  ): Promise<MatchRequest> {
+    const { data, error } = await this.client.rpc("activate_match_offer_window", {
+      p_request_id: requestId,
+      p_round_id: roundId,
+      p_window_seconds: windowSeconds
+    });
+    if (error) this.throwError("启动候选选择窗口", error);
+    return mapMatchRequest(unwrapRpcData(data) as JsonRow);
   }
 
   async listCurrentMatchOptions(userId: string): Promise<MatchOptionContext | null> {

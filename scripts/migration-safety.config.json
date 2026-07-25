@@ -40,6 +40,14 @@
     "20260725230000_dynamic_room_matchmaking.sql": {
       "sha256": "8b164fb510321928434c5f5438086e6ec35a9bcdc4e5bdb5733a2d48f6dde937",
       "reason": "Replace matching status constraints and legacy execution grants while adding transactional invitations, RLS, and synchronized room lifecycle state."
+    },
+    "20260725240000_llm_job_lease_heartbeat.sql": {
+      "sha256": "397867a188acbc0ee8d76262e5ca6d065bc934de24aae84edda1f438931e15d6",
+      "reason": "Replace legacy completion and failure RPC signatures with lease-owner-aware overloads, add the heartbeat RPC, and restrict execution to privileged roles."
+    },
+    "20260726010000_end_to_end_delivery_guards.sql": {
+      "sha256": "ef70495c73d7f64ea8d3ddc054db4ede9afcdb71edc52c516356cf31f1f694a5",
+      "reason": "Replace the LLM job type constraint, recreate transactional matchmaking RPC bodies, and restrict new delivery/window RPCs to service_role; DELETE only replaces a user's choices atomically."
     }
   }
 }

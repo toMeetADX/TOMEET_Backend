@@ -789,9 +789,9 @@ describe("Supabase migration", () => {
     `, [roomId, userIds[0]]);
     expect(authorizedExit.rows[0]).toEqual({
       withdrawal_reason: "临时有事",
-      status: "matching",
-      phase: "watching",
-      proactive_push_enabled: true,
+      status: "cancelled",
+      phase: "waiting",
+      proactive_push_enabled: false,
       room_id: null,
       active_round_id: null,
       options_expires_at: null

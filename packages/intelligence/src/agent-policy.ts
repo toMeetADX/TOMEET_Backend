@@ -69,6 +69,7 @@ export function defaultDeliveryClassForEvent(kind: AgentProductEventKind): Outbo
     case "match_confirmation_incomplete":
     case "room_intro":
     case "match_expired":
+    case "match_progress":
     case "room_change":
     case "draft_change":
     case "legacy_match_ready":

@@ -61,7 +61,7 @@ export interface SaveRoundPlanInput {
   roundId: string;
   proposal: MatchRoundProposal | null;
   offers: PreparedMatchOffer[];
-  offerExpiresAt: string;
+  offerExpiresAt: string | null;
 }
 
 export interface RoundSettlementState {
@@ -135,6 +135,7 @@ export interface DataStore {
   ensureUser(userId: string, displayName?: string): Promise<void>;
   ensureAdventurexOnboardingState(userId: string): Promise<AdventurexOnboardingState>;
   startAdventurexOnboarding(userId: string, language?: AdventurexLanguage): Promise<Message | null>;
+  markAdventurexWelcomeDelivered(userId: string): Promise<AdventurexOnboardingState>;
   updateAdventurexOnboardingState(
     userId: string,
     patch: {
@@ -223,6 +224,11 @@ export interface DataStore {
   addRequestToRound(roundId: string, requestId: string): Promise<void>;
   listRoundCandidates(roundId: string): Promise<MatchCandidate[]>;
   saveRoundProposals(input: SaveRoundPlanInput): Promise<MatchOptionOffer[]>;
+  activateMatchOfferWindow(
+    requestId: string,
+    roundId: string,
+    windowSeconds: number
+  ): Promise<MatchRequest>;
   listCurrentMatchOptions(userId: string): Promise<MatchOptionContext | null>;
   saveMatchChoices(requestId: string, input: SaveMatchChoicesInput): Promise<MatchChoice[]>;
   expireMatchOptions(requestId: string): Promise<void>;

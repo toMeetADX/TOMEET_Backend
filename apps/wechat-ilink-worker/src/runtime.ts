@@ -29,6 +29,7 @@ type RuntimeStore = Pick<
 
 export interface AgentTextClient {
   startOnboarding(input: { userId: string }): Promise<string | null>;
+  markOnboardingWelcomeDelivered(input: { userId: string }): Promise<void>;
   setResponseGeneration(input: {
     connectionId: string;
     generationToken: string;
@@ -36,9 +37,8 @@ export interface AgentTextClient {
   sendTextBatch(input: {
     connectionId: string;
     generationToken: string;
-    messageIds: string[];
     userId: string;
-    contents: string[];
+    turns: Array<{ messageId: string; content: string }>;
   }): Promise<{ reply: string | null; stale: boolean }>;
   sendText(input: {
     connectionId: string;
@@ -49,13 +49,13 @@ export interface AgentTextClient {
   sendImages(input: {
     connectionId: string;
     generationToken: string;
-    messageIds: string[];
     userId: string;
     images: Array<{
+      messageId: string;
       bytes: Uint8Array;
       mimeType: "image/jpeg" | "image/png" | "image/webp";
     }>;
-    hint?: string;
+    turns: Array<{ messageId: string; content?: string; imageCount: number }>;
   }): Promise<{ reply: string | null; stale: boolean }>;
   sendEvent(input: {
     connectionId: string;
@@ -330,26 +330,31 @@ class WechatTurnBatcher implements WechatTurnBatchSink {
     const latest = batch.messages.at(-1)!;
     try {
       const images = batch.messages
-        .flatMap((message) => message.images)
+        .flatMap((message) => message.images.map((image) => ({
+          ...image,
+          messageId: message.messageId
+        })))
         .slice(0, WECHAT_IMAGE_BATCH_MAX);
-      const contents = batch.messages
-        .map((message) => message.content)
-        .filter((value): value is string => Boolean(value));
+      const turns = batch.messages.map((message) => ({
+        messageId: message.messageId,
+        ...(message.content ? { content: message.content } : {}),
+        imageCount: message.images.length
+      }));
       const result = images.length > 0
         ? await this.dependencies.tomeet.sendImages({
             connectionId: this.connection.id,
             generationToken: latest.generationToken,
-            messageIds,
             userId: this.connection.userId,
             images,
-            hint: contents.join("\n") || undefined
+            turns
           })
         : await this.dependencies.tomeet.sendTextBatch({
             connectionId: this.connection.id,
             generationToken: latest.generationToken,
-            messageIds,
             userId: this.connection.userId,
-            contents
+            turns: turns.flatMap((turn) => turn.content
+              ? [{ messageId: turn.messageId, content: turn.content }]
+              : [])
           });
       batch.settled = true;
       if (
@@ -489,7 +494,11 @@ export async function handleWechatMessage(
   if (!started) return false;
 
   try {
-    if (!connection.lastMessageAt && message.context_token) {
+    // iLink needs this first contextual message to open the bot conversation. The activation
+    // callback may already have delivered the welcome, but the handshake still must not reach
+    // the Agent as user-authored content.
+    const isOpeningTrigger = !connection.lastMessageAt && Boolean(message.context_token);
+    if (message.context_token) {
       const welcome = await dependencies.tomeet.startOnboarding({
         userId: connection.userId
       });
@@ -502,6 +511,12 @@ export async function handleWechatMessage(
           contextToken: message.context_token,
           runIdBase: `first-inbound-welcome-${connection.id}-${id}`
         });
+        await dependencies.tomeet.markOnboardingWelcomeDelivered({ userId: connection.userId });
+      }
+      if (welcome || isOpeningTrigger) {
+        await dependencies.store.completeWechatMessage(connection.id, id);
+        connection.lastMessageAt = new Date().toISOString();
+        return true;
       }
     }
     const content = WechatILinkClient.extractText(message);

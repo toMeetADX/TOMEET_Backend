@@ -144,6 +144,180 @@ const multimodalInsightSchema = z.object({
   recentImpression: z.string().min(1).max(4_000)
 }).passthrough();
 
+type CandidateNormalizer = (candidate: unknown) => unknown;
+
+interface ParseOrRepairOptions {
+  model?: string;
+  temperature?: number;
+  stage?: string;
+  normalize?: CandidateNormalizer;
+}
+
+interface StructuredOutputIssue {
+  path: string;
+  code: string;
+  expected?: string;
+  received?: string;
+}
+
+export class StructuredOutputValidationError extends Error {
+  constructor(
+    readonly stage: string,
+    readonly issues: StructuredOutputIssue[],
+    cause: z.ZodError
+  ) {
+    const summary = issues.map((issue) => {
+      const typeMismatch = issue.expected
+        ? ` expected=${issue.expected}${issue.received ? ` received=${issue.received}` : ""}`
+        : "";
+      return `${issue.path || "<root>"} ${issue.code}${typeMismatch}`;
+    }).join("; ");
+    super(`LLM 结构化输出校验失败 stage=${stage}: ${summary}`, { cause });
+    this.name = "StructuredOutputValidationError";
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeTextValue(value: unknown, joiner = "\n\n"): unknown {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const parts = value.map((item) => normalizeTextValue(item, " "));
+    return parts.every((item): item is string => typeof item === "string")
+      ? parts.join(joiner)
+      : value;
+  }
+  if (!isRecord(value)) return value;
+  for (const key of [
+    "text",
+    "content",
+    "value",
+    "query",
+    "message",
+    "reason",
+    "summary",
+    "hookText",
+    "reply",
+    "replyDraft",
+    "answer"
+  ]) {
+    if (typeof value[key] === "string") return value[key];
+  }
+  for (const key of ["paragraphs", "bubbles", "lines"]) {
+    if (Array.isArray(value[key])) return normalizeTextValue(value[key], joiner);
+  }
+  return value;
+}
+
+function normalizeStringArray(value: unknown): unknown {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) {
+    const items = value.map((item) => normalizeTextValue(item, " "));
+    return items.every((item): item is string => typeof item === "string") ? items : value;
+  }
+  const singleton = normalizeTextValue(value, " ");
+  return typeof singleton === "string" ? [singleton] : value;
+}
+
+function normalizeIdentifierArray(value: unknown): unknown {
+  if (typeof value === "string") return [value];
+  if (isRecord(value) && typeof value.id === "string") return [value.id];
+  if (!Array.isArray(value)) return value;
+  const items = value.map((item) => {
+    if (typeof item === "string") return item;
+    return isRecord(item) && typeof item.id === "string" ? item.id : item;
+  });
+  return items.every((item): item is string => typeof item === "string") ? items : value;
+}
+
+function normalizeConversationPlanCandidate(candidate: unknown): unknown {
+  if (!isRecord(candidate)) return candidate;
+  const normalized: Record<string, unknown> = {
+    ...candidate,
+    replyDraft: normalizeTextValue(candidate.replyDraft)
+  };
+
+  if (isRecord(candidate.memoryPlan)) {
+    normalized.memoryPlan = {
+      ...candidate.memoryPlan,
+      queries: normalizeStringArray(candidate.memoryPlan.queries)
+    };
+  }
+  if (isRecord(candidate.searchPlan) && Array.isArray(candidate.searchPlan.queries)) {
+    normalized.searchPlan = {
+      ...candidate.searchPlan,
+      queries: candidate.searchPlan.queries.map((query) => isRecord(query)
+        ? {
+            ...query,
+            query: normalizeTextValue(query.query, " "),
+            ...(query.timeRange === undefined
+              ? {}
+              : { timeRange: normalizeTextValue(query.timeRange, " ") })
+          }
+        : query)
+    };
+  }
+  if (Array.isArray(candidate.socialHooks)) {
+    normalized.socialHooks = candidate.socialHooks.map((hook) => isRecord(hook)
+      ? {
+          ...hook,
+          hookText: normalizeTextValue(hook.hookText, " "),
+          evidenceMessageIds: normalizeIdentifierArray(hook.evidenceMessageIds)
+        }
+      : hook);
+  }
+  if (Array.isArray(candidate.actions)) {
+    normalized.actions = candidate.actions.map((action) => {
+      if (!isRecord(action)) return action;
+      const next: Record<string, unknown> = { ...action };
+      for (const key of ["rawText", "reason", "peopleFeedback", "gameFeedback", "nextIntent"]) {
+        if (key in next) next[key] = normalizeTextValue(next[key], " ");
+      }
+      if ("requiredHookIds" in next) next.requiredHookIds = normalizeIdentifierArray(next.requiredHookIds);
+      if ("connectionUserIds" in next) next.connectionUserIds = normalizeIdentifierArray(next.connectionUserIds);
+      if (typeof next.intent === "string") {
+        next.intent = { rawText: next.intent };
+      } else if (isRecord(next.intent) && "rawText" in next.intent) {
+        next.intent = { ...next.intent, rawText: normalizeTextValue(next.intent.rawText, " ") };
+      }
+      return next;
+    });
+  }
+  return normalized;
+}
+
+function normalizeReplyCandidate(candidate: unknown): unknown {
+  if (!isRecord(candidate)) return candidate;
+  return {
+    ...candidate,
+    ...(candidate.reply === undefined ? {} : { reply: normalizeTextValue(candidate.reply) }),
+    ...(candidate.content === undefined ? {} : { content: normalizeTextValue(candidate.content) }),
+    ...(candidate.summary === undefined ? {} : { summary: normalizeTextValue(candidate.summary) }),
+    ...(candidate.issues === undefined ? {} : { issues: normalizeStringArray(candidate.issues) }),
+    ...(candidate.usedMemoryIds === undefined
+      ? {}
+      : { usedMemoryIds: normalizeIdentifierArray(candidate.usedMemoryIds) }),
+    ...(Array.isArray(candidate.optionPreviews)
+      ? {
+          optionPreviews: candidate.optionPreviews.map((preview) => isRecord(preview)
+            ? { ...preview, text: normalizeTextValue(preview.text, " ") }
+            : preview)
+        }
+      : {})
+  };
+}
+
+function structuredOutputIssues(error: z.ZodError): StructuredOutputIssue[] {
+  return error.issues.map((issue) => ({
+    path: issue.path.map(String).join("."),
+    code: issue.code,
+    ...("expected" in issue && typeof issue.expected === "string" ? { expected: issue.expected } : {}),
+    ...("received" in issue && typeof issue.received === "string" ? { received: issue.received } : {})
+  }));
+}
+
 const leftFrameTitles = {
   match_options: "TOMEET 组局邀请",
   room_intro: "TOMEET 成局确认函"
@@ -221,14 +395,17 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
     result: unknown,
     contract: string,
     source: unknown,
-    model = this.options.textModel,
-    temperature = 0.3
+    options: ParseOrRepairOptions = {}
   ): Promise<T> {
-    let candidate = result;
+    const normalize = options.normalize ?? ((candidate: unknown) => candidate);
+    const model = options.model ?? this.options.textModel;
+    const temperature = options.temperature ?? 0;
+    const stage = options.stage ?? "unknown";
+    let candidate = normalize(result);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const parsed = schema.safeParse(candidate);
       if (parsed.success) return parsed.data;
-      candidate = await this.chatJson(
+      candidate = normalize(await this.chatJson(
         [
           "你是 JSON 契约修复器。只修复结构和与状态冲突的 action，不新增没有证据的动作。",
           contract,
@@ -241,9 +418,11 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         }),
         model,
         temperature
-      );
+      ));
     }
-    return schema.parse(candidate);
+    const parsed = schema.safeParse(candidate);
+    if (parsed.success) return parsed.data;
+    throw new StructuredOutputValidationError(stage, structuredOutputIssues(parsed.error), parsed.error);
   }
 
   private emitWebSearchEvent(event: WebSearchEvent): void {
@@ -348,7 +527,8 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
           userQuestion: userContent,
           memoryIds: memories.map((memory) => memory.id),
           evidenceCount: search.results.length
-        }
+        },
+        { stage: "agent_reply.grounding", normalize: normalizeReplyCandidate }
       );
       candidateReply = grounded.reply;
       candidateUsedMemoryIds = grounded.usedMemoryIds;
@@ -412,8 +592,20 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
           this.options.textModel,
           0
         );
-      verified = verifiedReplySchema.parse(verificationResult);
+      verified = await this.parseOrRepair(
+        verifiedReplySchema,
+        verificationResult,
+        "只输出 status、reply:string、issues:string[]、usedMemoryIds:string[] 和 usedSourceIndexes:number[]。reply 必须是单个字符串，多气泡用两个换行符分隔，不得输出字符串数组。",
+        {
+          userMessage: userContent,
+          candidateReply,
+          memoryIds: memories.map((memory) => memory.id),
+          evidenceCount: search.results.length
+        },
+        { stage: "agent_reply.verification", normalize: normalizeReplyCandidate }
+      );
     } catch (error) {
+      if (error instanceof StructuredOutputValidationError) throw error;
       throw new Error("发布前事实校验失败", { cause: error });
     }
     const memoryIds = new Set(memories.map((memory) => memory.id));
@@ -489,7 +681,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         "如果上一轮刚询问退出理由，用户当前只回复一个简单理由，也视为继续完成退出。确认函之前的受邀成员仍可直接退出。",
         "runtime.matchRequest.phase=push_consent 表示本次具体尝试已经结束，可能是没有足够合适的候选，也可能是用户已经选择但候选最终未成局，当前正在征求未来主动推送授权。用户明确同意以后有合适的主动告诉他时输出 enable_match_push；用户明确要求现在立即重新匹配时输出 activate_match；明确拒绝继续留意时输出 disable_match_push。",
         "runtime.matchRequest.phase=watching 表示用户已经授权未来主动推送，但当前没有占用实时匹配优先级。用户明确说现在就想再匹配时输出 activate_match；用户要求停止留意或停止推送时输出 disable_match_push。不要把普通寒暄误判为重新激活。",
-        "cancel_match 的回复可以结合上下文询问用户是否希望重新匹配，但不要未经同意直接重启。leave_room 的回复绝不能询问或暗示重新匹配：proactivePushEnabled=true 时说明退出后回到被动留意状态，有真正合适的安排再主动通知；否则说明本次组局到此结束。",
+        "cancel_match 的回复可以结合上下文询问用户是否希望重新匹配，但不要未经同意直接重启。leave_room 后本次请求一律结束，不进入 watching 或任何自动匹配；可以说明只有用户之后明确提出重新匹配才会开始新请求。",
         this.options.adventurexMatchingV1
           ? "AdventureX V1 接受候选即加入并确认，禁止输出 confirm_room。runtime.room.status=confirming 只表示人数尚未达到活动最低要求、仍在补位；只允许 leave_room 或 actions=[]，向用户说明无需再次确认。"
           : "只有用户明确接受当前 confirming 房间时才输出 confirm_room。",
@@ -561,10 +753,12 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         "memoryPlan 必须包含 queries:string[] 和 reviewSuggested:boolean；queries 最多 2 条。",
         "socialHooks 最多 4 条，每条包含 hookText 和 evidenceMessageIds；证据 ID 只能来自输入。",
         "searchPlan.required=false 时 queries 必须为空；required=true 时 queries 必须有 1–2 个 {query, topic, timeRange?}。",
+        "replyDraft 必须是单个字符串，多气泡使用两个换行符分隔，绝不能输出字符串数组。memoryPlan.queries 的每一项必须直接是字符串，不能写成 {query:...}。",
         "如果 type=submit_feedback，peopleFeedback、gameFeedback、connectionUserIds、nextIntent 必须与 action 同级。",
         actionPolicy
       ].join("\n"),
-        { newMessage: userContent, userMessageId, runtime: context.promptRuntime, roomStatus: context.room?.status ?? null }
+        { newMessage: userContent, userMessageId, runtime: context.promptRuntime, roomStatus: context.room?.status ?? null },
+        { stage: "agent_reply.plan", normalize: normalizeConversationPlanCandidate }
     );
     insight = normalizeRoomExitReason(insight, userContent);
     if (insight.actions.some((action) => !isActionAllowed(action, context, userContent, this.options.adventurexMatchingV1 === true))) {
@@ -577,7 +771,13 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         ].join("\n"),
         JSON.stringify({ output: insight, newMessage: userContent })
       );
-      insight = normalizeRoomExitReason(plannedConversationInsightSchema.parse(corrected), userContent);
+      insight = normalizeRoomExitReason(await this.parseOrRepair(
+        plannedConversationInsightSchema,
+        corrected,
+        "保持完整 Agent 规划结构，只修正当前状态不允许的 actions。replyDraft 必须是字符串，memoryPlan.queries 必须是字符串数组。",
+        { newMessage: userContent, roomStatus: context.room?.status ?? null, actionPolicy },
+        { stage: "agent_reply.action_correction", normalize: normalizeConversationPlanCandidate }
+      ), userContent);
     }
     if (insight.actions.some((action) => !isActionAllowed(action, context, userContent, this.options.adventurexMatchingV1 === true))) {
       throw new Error("模型返回了当前状态不允许的产品动作");
@@ -623,9 +823,11 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
           "match_confirmation_incomplete 表示用户已经做出选择，但这次候选最终没有成局。先确认用户的选择已收到，再中性说明本次安排没有完成成局确认；不得说或暗示某个具体用户拒绝了他，不得归因于用户不够合适，也不得虚构拒绝原因。currentAttemptEnded=true 时要明确这次具体尝试已经结束。canEnableProactivePush=true 时可以询问是否授权未来主动推送；proactivePushAlreadyEnabled=true 时说明会继续留意。followUpPriority=confirmation_follow_up 表示之后再次出现合格机会时，该用户在 watching 用户中优先，但仍不得承诺一定或立即成局。",
           "room_intro 只能描述最终已确认成员和当前房间事实，不能使用查看者自己的人物事实。room_intro 的 content 使用与 match_options 相同的无右边框字符卡片，但第二行只能是‘┃ TOMEET 成局确认函’；正文以结构化事实自然组织，不得为了排版补充不存在的信息。",
           "match_expired 用于候选窗口内没有完成选择等真正超时情形；不得把用户已经选择但未成局描述成用户超时，也不得声称系统会自动重新匹配。",
+          "match_progress 是系统主动处理期间的短状态反馈。只说明仍在处理、当前不需要用户操作，不虚构已找到候选、人数、完成比例或预计完成时间；每次措辞应自然变化，避免机械重复。",
           "room_change 和 draft_change 只说明输入中真实发生的变化，并自然给出可用的下一步，不替用户做决定。room_change 中 currentlyFormed=false 时必须明确当前人数暂未达到活动最低人数，不能继续说已经成局；可以说明系统正在留意合适补位。",
           "legacy_match_ready 只使用当前房间、活动和成员事实。unsupported_channel_message 只说明能力边界并邀请用户换一种可处理的表达，facts.supportedInputs 里已有的输入方式不得说成不支持。",
           "channel_media_unreadable 表示用户确实发来了 facts.receivedKinds 里的内容，只是这一次没有取到。必须承认收到了，说明这一次没读出来并邀请重发一次；不得说不支持这种内容，不得复述内部错误原文，不得凭空猜测内容。optionPreviews=[]。",
+          "match_progress 只能保留仍在处理且用户无需操作这一事实，不得增加候选、人数、完成比例或完成时间。",
           "只输出 JSON：{\"content\":\"...\",\"optionPreviews\":[{\"optionNumber\":1,\"text\":\"...\"}]}。非 match_options 时 optionPreviews=[]。"
         ].join("\n"),
         JSON.stringify({
@@ -638,7 +840,8 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         })
       ),
       "只使用输入事实，返回可直接发送的个性化 content；match_options 的 optionPreviews 编号必须与输入完全一致。",
-      { eventKind: event.kind, expectedOptionNumbers }
+      { eventKind: event.kind, expectedOptionNumbers },
+      { stage: "agent_event.draft", normalize: normalizeReplyCandidate }
     );
     const result = await this.parseOrRepair(
       agentProductMessageSchema,
@@ -666,7 +869,8 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         0
       ),
       "发布前移除无事实依据的内容；候选编号必须完整且唯一，非候选事件 optionPreviews=[]。",
-      { eventKind: event.kind, expectedOptionNumbers }
+      { eventKind: event.kind, expectedOptionNumbers },
+      { stage: "agent_event.verification", normalize: normalizeReplyCandidate }
     );
     if (event.kind === "match_options") {
       const actual = result.optionPreviews.map((option) => option.optionNumber).sort();
@@ -696,7 +900,8 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       z.object({ summary: z.string().min(1).max(4_000) }),
       result,
       "只输出 {summary:string}。",
-      { previousSummary, newMessages: messages }
+      { previousSummary, newMessages: messages },
+      { stage: "conversation_summary", normalize: normalizeReplyCandidate }
     )).summary;
   }
 
@@ -736,7 +941,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
         result,
         "只输出 observableDetails、uncertainty、personCues、suggestedQuestion，不要输出面向用户的回复。",
         { kind: input.kind, hint: input.hint },
-        this.options.visionModel ?? this.options.textModel
+        { stage: "multimodal.image", model: this.options.visionModel ?? this.options.textModel }
       );
       return {
         ...parsed,
@@ -1003,8 +1208,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       result,
       "只输出 drafts 和 userOptions；所有 ID 必须来自输入。",
       input,
-      this.options.textModel,
-      0.1
+      { stage: "match_round.proposal", model: this.options.textModel, temperature: 0.1 }
     );
   }
 
@@ -1042,8 +1246,7 @@ export class HostedLlmIntelligence implements AgentIntelligence, MatchmakingInte
       result,
       "只输出 verdict、isolationRiskUserIds、reasoning；ID 必须来自输入。",
       input,
-      this.options.textModel,
-      0
+      { stage: "match_round.judgement", model: this.options.textModel, temperature: 0 }
     );
   }
 }

@@ -76,6 +76,13 @@ export class TomeetClient {
     return message.content;
   }
 
+  async markOnboardingWelcomeDelivered(input: { userId: string }): Promise<void> {
+    await this.request(
+      `/internal/users/${input.userId}/adventurex-onboarding/welcome-delivered`,
+      { method: "POST" }
+    );
+  }
+
   async sendText(input: {
     connectionId: string;
     messageId: string;
@@ -127,25 +134,29 @@ export class TomeetClient {
   async sendTextBatch(input: {
     connectionId: string;
     generationToken: string;
-    messageIds: string[];
     userId: string;
-    contents: string[];
+    turns: Array<{ messageId: string; content: string }>;
   }): Promise<AgentTurnResult> {
-    const content = input.contents.length === 1
-      ? input.contents[0]!
-      : input.contents.map((item, index) => `${index + 1}. ${item}`).join("\n");
+    const content = input.turns.length === 1
+      ? input.turns[0]!.content
+      : input.turns.map((item, index) => `${index + 1}. ${item.content}`).join("\n");
     const payload = agentMessageInputSchema.parse({
       userId: input.userId,
       displayName: "微信用户",
       content,
-      idempotencyKey: idempotencyKey(input.connectionId, `turn:${input.messageIds.join(":")}`)
+      idempotencyKey: idempotencyKey(input.connectionId, `generation:${input.generationToken}`)
     });
     const response = await this.request<{ job: unknown }>("/internal/agent/messages", {
       method: "POST",
       body: JSON.stringify({
         ...payload,
         connectionId: input.connectionId,
-        generationToken: input.generationToken
+        generationToken: input.generationToken,
+        messages: input.turns.map((turn) => ({
+          messageId: turn.messageId,
+          content: turn.content,
+          idempotencyKey: idempotencyKey(input.connectionId, turn.messageId)
+        }))
       })
     });
     return this.waitForTurnResult(llmJobSchema.parse(response.job));
@@ -154,24 +165,28 @@ export class TomeetClient {
   async sendImages(input: {
     connectionId: string;
     generationToken: string;
-    messageIds: string[];
     userId: string;
     images: Array<{
+      messageId: string;
       bytes: Uint8Array;
       mimeType: "image/jpeg" | "image/png" | "image/webp";
     }>;
-    hint?: string;
+    turns: Array<{ messageId: string; content?: string; imageCount: number }>;
   }): Promise<AgentTurnResult> {
-    const messageKey = idempotencyKey(input.connectionId, `images:${input.messageIds.join(":")}`);
+    const messageKey = idempotencyKey(input.connectionId, `images:${input.generationToken}`);
     const response = await this.request<{ job: unknown }>("/internal/agent/multimodal-inputs", {
       method: "POST",
       body: JSON.stringify({
         userId: input.userId,
         images: input.images.map((image) => ({
+          messageId: image.messageId,
           mimeType: image.mimeType,
           dataBase64: Buffer.from(image.bytes).toString("base64")
         })),
-        hint: input.hint,
+        turns: input.turns.map((turn) => ({
+          ...turn,
+          idempotencyKey: idempotencyKey(input.connectionId, turn.messageId)
+        })),
         idempotencyKey: messageKey,
         connectionId: input.connectionId,
         generationToken: input.generationToken

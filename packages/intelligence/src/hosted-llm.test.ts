@@ -355,6 +355,68 @@ describe("hosted Agent web search", () => {
 });
 
 describe("hosted Agent exploration pressure", () => {
+  it("normalizes common structured text shapes without failing the Agent job", async () => {
+    const lookupMemories = vi.fn(async () => []);
+    const requestBodies = stubChatResponses(
+      plannedReply({
+        replyDraft: ["好，我记下了", "那我们继续往前走"],
+        memoryPlan: {
+          queries: [{ query: "用户明确表达过的摄影经历" }],
+          reviewSuggested: false
+        },
+        socialHooks: [{
+          hookText: { text: "平时会拍街头摄影" },
+          evidenceMessageIds: "message-1"
+        }],
+        searchPlan: { required: false, queries: [] }
+      }),
+      {
+        reply: ["好，我记下了", "那我们继续往前走"],
+        usedSourceIndexes: [],
+        usedMemoryIds: []
+      },
+      {
+        status: "verified",
+        reply: { paragraphs: ["好，我记下了", "那我们继续往前走"] },
+        issues: [{ message: "无需修改" }],
+        usedSourceIndexes: [],
+        usedMemoryIds: []
+      }
+    );
+
+    const insight = await hostedWithSearch().reply(
+      agentContext(),
+      "我平时会拍街头摄影",
+      lookupMemories,
+      "message-1"
+    );
+
+    expect(insight.reply).toBe("好，我记下了\n\n那我们继续往前走");
+    expect(insight.socialHooks).toEqual([{
+      hookText: "平时会拍街头摄影",
+      evidenceMessageIds: ["message-1"]
+    }]);
+    expect(lookupMemories).toHaveBeenCalledWith(["用户明确表达过的摄影经历"]);
+    expect(requestBodies).toHaveLength(3);
+  });
+
+  it("reports the exact stage and field after deterministic repair is exhausted", async () => {
+    const invalidPlan = plannedReply({
+      replyDraft: { unexpected: true },
+      searchPlan: { required: false, queries: [] }
+    });
+    const requestBodies = stubChatResponses(invalidPlan, invalidPlan, invalidPlan);
+
+    await expect(hostedWithSearch().reply(agentContext(), "没什么特别介意的"))
+      .rejects.toThrow(
+        "LLM 结构化输出校验失败 stage=agent_reply.plan: replyDraft invalid_type expected=string received=object"
+      );
+
+    expect(requestBodies).toHaveLength(3);
+    const repairRequest = JSON.parse(requestBodies[1]!) as { temperature: number };
+    expect(repairRequest.temperature).toBe(0);
+  });
+
   it("forbids mirror replies in planning and rewrites one at the publish gate", async () => {
     const requestBodies = stubChatResponses(
       plannedReply({
@@ -504,6 +566,7 @@ describe("hosted Agent proactive matching actions", () => {
         preferredLanguage: "zh",
         boundaryPromptedAt: null,
         welcomeSentAt: now,
+        welcomeDeliveredAt: now,
         updatedAt: now
       }
     });

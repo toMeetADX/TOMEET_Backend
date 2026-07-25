@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { SupabaseStore } from "@tomeet/data";
-import { HostedLlmIntelligence, JobProcessor, TavilyWebSearchProvider } from "@tomeet/intelligence";
+import {
+  HostedLlmIntelligence,
+  JobProcessor,
+  StructuredOutputValidationError,
+  TavilyWebSearchProvider
+} from "@tomeet/intelligence";
 import { config } from "dotenv";
 import { createWorkerHealthServer } from "./health-server.js";
 
@@ -124,7 +129,17 @@ async function runSlot(slot: number): Promise<void> {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await store.failJob(job.id, message, slotId);
-        console.error(JSON.stringify({ level: "error", event: "job_failed", worker: slotId, jobId: job.id, type: job.type, error: message }));
+        console.error(JSON.stringify({
+          level: "error",
+          event: "job_failed",
+          worker: slotId,
+          jobId: job.id,
+          type: job.type,
+          error: message,
+          ...(error instanceof StructuredOutputValidationError
+            ? { errorStage: error.stage, validationIssues: error.issues }
+            : {})
+        }));
       }
     } catch (error) {
       console.error(JSON.stringify({ level: "error", event: "worker_loop_error", worker: slotId, error: error instanceof Error ? error.message : String(error) }));

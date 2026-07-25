@@ -145,11 +145,14 @@ describe("TomeetClient", () => {
     await expect(client.sendImages({
       connectionId: "connection-images",
       generationToken: "generation-images",
-      messageIds: ["image-1", "image-2"],
       userId: "25000000-0000-4000-8000-000000000001",
       images: [
-        { bytes: Uint8Array.from([1, 2]), mimeType: "image/jpeg" },
-        { bytes: Uint8Array.from([3, 4]), mimeType: "image/png" }
+        { messageId: "image-1", bytes: Uint8Array.from([1, 2]), mimeType: "image/jpeg" },
+        { messageId: "image-2", bytes: Uint8Array.from([3, 4]), mimeType: "image/png" }
+      ],
+      turns: [
+        { messageId: "image-1", imageCount: 1 },
+        { messageId: "image-2", imageCount: 1 }
       ]
     })).resolves.toEqual({
       reply: "两张图片放在一起看，最吸引你的是哪一处？",
@@ -161,8 +164,12 @@ describe("TomeetClient", () => {
       connectionId: "connection-images",
       generationToken: "generation-images",
       images: [
-        { dataBase64: "AQI=", mimeType: "image/jpeg" },
-        { dataBase64: "AwQ=", mimeType: "image/png" }
+        { messageId: "image-1", dataBase64: "AQI=", mimeType: "image/jpeg" },
+        { messageId: "image-2", dataBase64: "AwQ=", mimeType: "image/png" }
+      ],
+      turns: [
+        { messageId: "image-1", imageCount: 1, idempotencyKey: expect.stringMatching(/^wechat:[a-f0-9]{64}$/) },
+        { messageId: "image-2", imageCount: 1, idempotencyKey: expect.stringMatching(/^wechat:[a-f0-9]{64}$/) }
       ]
     });
     expect(String(postedBody?.idempotencyKey)).toMatch(/^wechat:[a-f0-9]{64}$/);

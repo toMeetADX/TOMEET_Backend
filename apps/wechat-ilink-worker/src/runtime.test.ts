@@ -65,6 +65,7 @@ function setup() {
   } satisfies WechatTransport;
   const tomeet = {
     startOnboarding: vi.fn<AgentTextClient["startOnboarding"]>(async () => null),
+    markOnboardingWelcomeDelivered: vi.fn<AgentTextClient["markOnboardingWelcomeDelivered"]>(async () => undefined),
     setResponseGeneration: vi.fn(async () => undefined),
     sendTextBatch: vi.fn<AgentTextClient["sendTextBatch"]>(async () => ({
       reply: "Agent reply",
@@ -180,6 +181,7 @@ describe("WeChat worker runtime", () => {
   it("forwards one user message and completes its idempotency receipt", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
 
     await expect(handleWechatMessage(
       runtime.dependencies,
@@ -197,9 +199,8 @@ describe("WeChat worker runtime", () => {
     expect(runtime.tomeet.sendTextBatch).toHaveBeenCalledWith({
       connectionId: activeConnection.id,
       generationToken: expect.any(String),
-      messageIds: ["42"],
       userId: activeConnection.userId,
-      contents: ["你好"]
+      turns: [{ messageId: "42", content: "你好" }]
     });
     expect(runtime.ilink.sendText).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -216,7 +217,37 @@ describe("WeChat worker runtime", () => {
     expect(JSON.stringify(runtime.logger.info.mock.calls)).not.toContain("bot-secret");
   });
 
-  it("sends the onboarding welcome before the first Agent reply and only once", async () => {
+  it("consumes the first inbound trigger when activation already delivered the welcome", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+
+    await expect(handleWechatMessage(
+      runtime.dependencies,
+      activeConnection,
+      "bot-secret",
+      {
+        message_id: 41,
+        message_type: 1,
+        from_user_id: activeConnection.ownerIlinkUserId,
+        context_token: "context-opening-trigger",
+        item_list: [{ type: 1, text_item: { text: "123456" } }]
+      }
+    )).resolves.toBe(true);
+
+    expect(runtime.tomeet.startOnboarding).toHaveBeenCalledTimes(1);
+    expect(runtime.tomeet.markOnboardingWelcomeDelivered).not.toHaveBeenCalled();
+    expect(runtime.tomeet.setResponseGeneration).not.toHaveBeenCalled();
+    expect(runtime.tomeet.sendTextBatch).not.toHaveBeenCalled();
+    expect(runtime.tomeet.sendImages).not.toHaveBeenCalled();
+    expect(runtime.ilink.sendText).not.toHaveBeenCalled();
+    expect(runtime.store.completeWechatMessage).toHaveBeenCalledWith(
+      activeConnection.id,
+      "41"
+    );
+    expect(activeConnection.lastMessageAt).not.toBeNull();
+  });
+
+  it("consumes the opening trigger after sending the onboarding welcome", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
     runtime.tomeet.startOnboarding.mockResolvedValue(adventurexWelcomeContent("zh"));
@@ -230,10 +261,19 @@ describe("WeChat worker runtime", () => {
     });
 
     expect(runtime.tomeet.startOnboarding).toHaveBeenCalledTimes(1);
+    expect(runtime.tomeet.markOnboardingWelcomeDelivered).toHaveBeenCalledWith({
+      userId: activeConnection.userId
+    });
     expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
-      ...adventurexWelcomeBubbles.zh,
-      "Agent reply"
+      ...adventurexWelcomeBubbles.zh
     ]);
+    expect(runtime.tomeet.setResponseGeneration).not.toHaveBeenCalled();
+    expect(runtime.tomeet.sendTextBatch).not.toHaveBeenCalled();
+    expect(runtime.tomeet.sendImages).not.toHaveBeenCalled();
+    expect(runtime.store.completeWechatMessage).toHaveBeenCalledWith(
+      activeConnection.id,
+      "45"
+    );
     expect(runtime.ilink.sendText.mock.calls.slice(0, 4).map(([input]) => input.runId)).toEqual([
       `first-inbound-welcome-${activeConnection.id}-45-bubble-1`,
       `first-inbound-welcome-${activeConnection.id}-45-bubble-2`,
@@ -243,6 +283,8 @@ describe("WeChat worker runtime", () => {
     expect(activeConnection.lastMessageAt).not.toBeNull();
 
     runtime.tomeet.startOnboarding.mockClear();
+    runtime.tomeet.startOnboarding.mockResolvedValue(null);
+    runtime.tomeet.sendTextBatch.mockClear();
     runtime.ilink.sendText.mockClear();
     await handleWechatMessage(runtime.dependencies, activeConnection, "bot-secret", {
       message_id: 46,
@@ -252,7 +294,10 @@ describe("WeChat worker runtime", () => {
       item_list: [{ type: 1, text_item: { text: "第二条" } }]
     });
 
-    expect(runtime.tomeet.startOnboarding).not.toHaveBeenCalled();
+    expect(runtime.tomeet.startOnboarding).toHaveBeenCalledTimes(1);
+    expect(runtime.tomeet.sendTextBatch).toHaveBeenCalledWith(expect.objectContaining({
+      turns: [{ messageId: "46", content: "第二条" }]
+    }));
     expect(runtime.ilink.sendText.mock.calls.map(([input]) => input.text)).toEqual([
       "Agent reply"
     ]);
@@ -261,6 +306,7 @@ describe("WeChat worker runtime", () => {
   it("groups multiple inbound image messages into one vision request and one reply", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
     runtime.ilink.getUpdates.mockResolvedValueOnce({
       ret: 0,
       get_updates_buf: "cursor-1",
@@ -305,11 +351,14 @@ describe("WeChat worker runtime", () => {
     expect(runtime.tomeet.sendImages).toHaveBeenCalledWith(expect.objectContaining({
       connectionId: activeConnection.id,
       generationToken: expect.any(String),
-      messageIds: ["51", "52"],
       userId: activeConnection.userId,
       images: [
-        { bytes: Uint8Array.from([1]), mimeType: "image/jpeg" },
-        { bytes: Uint8Array.from([2]), mimeType: "image/jpeg" }
+        { messageId: "51", bytes: Uint8Array.from([1]), mimeType: "image/jpeg" },
+        { messageId: "52", bytes: Uint8Array.from([2]), mimeType: "image/jpeg" }
+      ],
+      turns: [
+        { messageId: "51", imageCount: 1 },
+        { messageId: "52", imageCount: 1 }
       ]
     }));
     expect(runtime.ilink.sendText).toHaveBeenCalledTimes(1);
@@ -406,9 +455,12 @@ describe("WeChat worker runtime", () => {
 
     expect(runtime.tomeet.sendImages).toHaveBeenCalledTimes(2);
     expect(runtime.tomeet.sendImages.mock.calls[1]?.[0]).toMatchObject({
-      messageIds: ["71", "72", "73"],
-      images: [{ bytes: Uint8Array.from([7]), mimeType: "image/jpeg" }],
-      hint: "这张照片是我上周拍的\n是在苏州河边"
+      images: [{ messageId: "71", bytes: Uint8Array.from([7]), mimeType: "image/jpeg" }],
+      turns: [
+        { messageId: "71", imageCount: 1 },
+        { messageId: "72", content: "这张照片是我上周拍的", imageCount: 0 },
+        { messageId: "73", content: "是在苏州河边", imageCount: 0 }
+      ]
     });
     expect(runtime.ilink.sendText).toHaveBeenCalledTimes(1);
     expect(runtime.ilink.sendText).toHaveBeenCalledWith(expect.objectContaining({
@@ -451,8 +503,10 @@ describe("WeChat worker runtime", () => {
 
     expect(runtime.tomeet.sendTextBatch).toHaveBeenCalledTimes(1);
     expect(runtime.tomeet.sendTextBatch).toHaveBeenCalledWith(expect.objectContaining({
-      messageIds: ["61", "62"],
-      contents: ["我平时喜欢拍城市夜景", "最近也在学胶片摄影"]
+      turns: [
+        { messageId: "61", content: "我平时喜欢拍城市夜景" },
+        { messageId: "62", content: "最近也在学胶片摄影" }
+      ]
     }));
     expect(runtime.ilink.sendText).toHaveBeenCalledTimes(1);
   });
@@ -464,6 +518,7 @@ describe("WeChat worker runtime", () => {
       stale: false
     });
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
 
     await handleWechatMessage(runtime.dependencies, activeConnection, "bot-secret", {
       message_id: 44,
@@ -510,6 +565,7 @@ describe("WeChat worker runtime", () => {
   it("asks the Agent to compose the reply for unsupported message content", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
 
     await expect(handleWechatMessage(
       runtime.dependencies,
@@ -546,6 +602,7 @@ describe("WeChat worker runtime", () => {
   it("reports an unreadable picture as received instead of unsupported", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
+    activeConnection.lastMessageAt = "2026-07-25T12:00:00.000Z";
     runtime.dependencies.downloadImage = vi.fn(async () => {
       throw new Error("微信图片缺少 CDN 下载参数");
     });
@@ -596,7 +653,7 @@ describe("WeChat worker runtime", () => {
 
     expect(runtime.tomeet.sendEvent).not.toHaveBeenCalled();
     expect(runtime.tomeet.sendTextBatch).toHaveBeenCalledWith(expect.objectContaining({
-      contents: ["看看这张"]
+      turns: [{ messageId: "82", content: "看看这张" }]
     }));
   });
 
@@ -698,7 +755,7 @@ describe("WeChat worker runtime", () => {
       turnBatchWindowMs: 0
     });
 
-    expect(runtime.tomeet.sendTextBatch.mock.calls.map(([input]) => input.messageIds)).toEqual([
+    expect(runtime.tomeet.sendTextBatch.mock.calls.map(([input]) => input.turns.map((turn) => turn.messageId))).toEqual([
       ["101"],
       ["102"]
     ]);
@@ -773,7 +830,7 @@ describe("WeChat worker runtime", () => {
       turnBatchWindowMs: 0
     });
 
-    expect(runtime.tomeet.sendTextBatch.mock.calls.map(([input]) => input.messageIds)).toEqual([
+    expect(runtime.tomeet.sendTextBatch.mock.calls.map(([input]) => input.turns.map((turn) => turn.messageId))).toEqual([
       ["111"],
       ["111", "112"]
     ]);
