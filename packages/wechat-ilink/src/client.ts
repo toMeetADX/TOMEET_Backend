@@ -19,6 +19,7 @@ export interface WechatILinkClientOptions {
   botAgent?: string;
   requestTimeoutMs?: number;
   longPollTimeoutMs?: number;
+  longPollGraceMs?: number;
 }
 
 export class WechatILinkError extends Error {
@@ -64,6 +65,7 @@ export class WechatILinkClient {
   private readonly botAgent: string;
   private readonly requestTimeoutMs: number;
   private readonly longPollTimeoutMs: number;
+  private readonly longPollGraceMs: number;
 
   constructor(options: WechatILinkClientOptions = {}) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
@@ -74,6 +76,7 @@ export class WechatILinkClient {
     this.botAgent = options.botAgent ?? "TOMEET/0.1.0";
     this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
     this.longPollTimeoutMs = options.longPollTimeoutMs ?? 35_000;
+    this.longPollGraceMs = options.longPollGraceMs ?? 15_000;
   }
 
   async createLoginQr(): Promise<WechatQrStart> {
@@ -151,8 +154,10 @@ export class WechatILinkClient {
     baseUrl: string;
     botToken: string;
     cursor?: string;
+    timeoutMs?: number;
     signal?: AbortSignal;
   }): Promise<WechatUpdates> {
+    const expectedLongPollMs = input.timeoutMs ?? this.longPollTimeoutMs;
     try {
       return await this.request<WechatUpdates>(
         normalizeBaseUrl(input.baseUrl),
@@ -166,11 +171,16 @@ export class WechatILinkClient {
           }),
           signal: input.signal
         },
-        this.longPollTimeoutMs
+        expectedLongPollMs + this.longPollGraceMs
       );
     } catch (error) {
       if (isAbortLike(error)) {
-        return { ret: 0, msgs: [], get_updates_buf: input.cursor ?? "" };
+        return {
+          ret: 0,
+          msgs: [],
+          get_updates_buf: input.cursor ?? "",
+          transport_timed_out: !input.signal?.aborted
+        };
       }
       throw error;
     }

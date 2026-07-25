@@ -74,6 +74,7 @@ export interface WechatTransport {
     baseUrl: string;
     botToken: string;
     cursor?: string;
+    timeoutMs?: number;
     signal?: AbortSignal;
   }): Promise<WechatUpdates>;
   sendText(input: {
@@ -102,6 +103,7 @@ export interface WechatRuntimeDependencies {
   turnBatchWindowMs?: number;
   turnProgressDelayMs?: number;
   turnProgressIntervalMs?: number;
+  turnProgressMaxNotices?: number;
   imageBatchWindowMs?: number;
   imageCdnBaseUrl?: string;
   downloadImage?: typeof downloadWechatImage;
@@ -130,8 +132,20 @@ function errorName(error: unknown): string {
 
 const WECHAT_BUBBLE_MAX_CHARS = 260;
 const WECHAT_IMAGE_BATCH_MAX = 9;
-const WECHAT_TURN_PROGRESS_DELAY_MS = 30_000;
+const WECHAT_TURN_PROGRESS_DELAY_MS = 60_000;
 const WECHAT_TURN_PROGRESS_INTERVAL_MS = 30_000;
+const WECHAT_TURN_PROGRESS_MAX_NOTICES = 1;
+const WECHAT_LONG_POLL_DEFAULT_TIMEOUT_MS = 35_000;
+const WECHAT_LONG_POLL_MIN_TIMEOUT_MS = 5_000;
+const WECHAT_LONG_POLL_MAX_TIMEOUT_MS = 60_000;
+
+function normalizedLongPollTimeout(value: number | undefined): number | null {
+  if (!Number.isFinite(value) || !value || value <= 0) return null;
+  return Math.min(
+    WECHAT_LONG_POLL_MAX_TIMEOUT_MS,
+    Math.max(WECHAT_LONG_POLL_MIN_TIMEOUT_MS, Math.round(value))
+  );
+}
 
 function stripTerminalPeriods(content: string): string {
   return content.trim().replace(/[。.]+$/u, "").trimEnd();
@@ -258,7 +272,9 @@ class WechatTurnProgressNotifier {
   private schedule(delayMs: number): void {
     if (this.stopped || !this.shouldContinue()) return;
     const notices = channelTurnProgressNotices[this.dependencies.noticeLanguage ?? "zh"];
-    if (this.noticeIndex >= notices.length) return;
+    const maxNotices = this.dependencies.turnProgressMaxNotices
+      ?? WECHAT_TURN_PROGRESS_MAX_NOTICES;
+    if (this.noticeIndex >= notices.length || this.noticeIndex >= maxNotices) return;
     this.timer = setTimeout(() => {
       this.timer = null;
       if (this.stopped || !this.shouldContinue()) return;
@@ -784,6 +800,8 @@ export async function monitorWechatConnection(
     );
     turnBatcher = new WechatTurnBatcher(dependencies, connection, botToken);
     let cursor = connection.syncCursor;
+    let nextLongPollTimeoutMs = WECHAT_LONG_POLL_DEFAULT_TIMEOUT_MS;
+    let consecutiveTransportTimeouts = 0;
     // Activating or reactivating an iLink connection resets its cursor. The first new inbound
     // message after that reset opens the conversation and must not be sent to the Agent. For a
     // historical identity it is consumed silently; only a genuinely new conversation can start
@@ -797,13 +815,38 @@ export async function monitorWechatConnection(
       );
       if (!renewed) return;
 
+      const pollStartedAt = Date.now();
+      const cursorBeforePoll = cursor;
+      const pollTimeoutMs = nextLongPollTimeoutMs;
       const updates = await dependencies.ilink.getUpdates({
         baseUrl: connection.baseUrl,
         botToken,
         cursor,
+        timeoutMs: pollTimeoutMs,
         signal
       });
       if (signal.aborted) return;
+      const providerLongPollTimeoutMs = normalizedLongPollTimeout(
+        updates.longpolling_timeout_ms
+      );
+      if (providerLongPollTimeoutMs !== null) {
+        nextLongPollTimeoutMs = providerLongPollTimeoutMs;
+      }
+      consecutiveTransportTimeouts = updates.transport_timed_out
+        ? consecutiveTransportTimeouts + 1
+        : 0;
+      logger.info(JSON.stringify({
+        level: "info",
+        event: "wechat_updates_poll",
+        connection: connectionFingerprint,
+        durationMs: Date.now() - pollStartedAt,
+        messageCount: updates.msgs?.length ?? 0,
+        cursorChanged: (updates.get_updates_buf ?? cursorBeforePoll) !== cursorBeforePoll,
+        expectedLongPollTimeoutMs: pollTimeoutMs,
+        providerLongPollTimeoutMs,
+        transportTimedOut: Boolean(updates.transport_timed_out),
+        consecutiveTransportTimeouts
+      }));
       if ((updates.ret && updates.ret !== 0) || (updates.errcode && updates.errcode !== 0)) {
         const code = updates.errcode ?? updates.ret;
         const reauthRequired = code === -14;

@@ -59,15 +59,21 @@ const turnBatchWindowMs = integerEnvironment(
 );
 const turnProgressDelayMs = integerEnvironment(
   "WECHAT_TURN_PROGRESS_DELAY_MS",
-  30_000,
+  60_000,
   0,
-  60_000
+  300_000
 );
 const turnProgressIntervalMs = integerEnvironment(
   "WECHAT_TURN_PROGRESS_INTERVAL_MS",
   30_000,
   250,
-  60_000
+  300_000
+);
+const turnProgressMaxNotices = integerEnvironment(
+  "WECHAT_TURN_PROGRESS_MAX_NOTICES",
+  1,
+  0,
+  3
 );
 const claimIntervalMs = integerEnvironment(
   "WECHAT_WORKER_CLAIM_INTERVAL_MS",
@@ -122,6 +128,7 @@ async function monitorConnection(connection: WechatConnection): Promise<void> {
     turnBatchWindowMs,
     turnProgressDelayMs,
     turnProgressIntervalMs,
+    turnProgressMaxNotices,
     imageCdnBaseUrl: process.env.WECHAT_ILINK_CDN_BASE_URL
   });
 }
@@ -181,7 +188,8 @@ async function run(): Promise<void> {
     bubbleDelayMs,
     turnBatchWindowMs,
     turnProgressDelayMs,
-    turnProgressIntervalMs
+    turnProgressIntervalMs,
+    turnProgressMaxNotices
   }));
   while (!abortController.signal.aborted) {
     const capacity = concurrency - active.size;
