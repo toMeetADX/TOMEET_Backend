@@ -152,7 +152,12 @@ function classifyWechatError(error: unknown): {
   if (error instanceof CredentialDecryptionError) {
     return {
       code: "credential_decryption_failed",
-      reauthRequired: true
+      // This is an operational key/configuration mismatch, not an upstream
+      // WeChat authorization failure. During a rolling secret update an older
+      // worker may briefly claim credentials written by a newer API instance.
+      // Leave the connection retryable so a correctly configured worker can
+      // take it over instead of forcing the user to scan again.
+      reauthRequired: false
     };
   }
   if (error instanceof WechatILinkError) {

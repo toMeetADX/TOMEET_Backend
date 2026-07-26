@@ -160,7 +160,7 @@ describe("WeChat worker runtime", () => {
     expect(JSON.stringify(runtime.logger.info.mock.calls)).not.toContain("bot-secret");
   });
 
-  it("quarantines an outbound connection when its credential cannot be decrypted", async () => {
+  it("retries outbound delivery without quarantining when its credential cannot be decrypted", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
     const completeWechatOutboundMessage = vi.fn(async () => undefined);
@@ -187,12 +187,11 @@ describe("WeChat worker runtime", () => {
     expect(completeWechatOutboundMessage).toHaveBeenCalledWith(
       delivery.id,
       "worker-1",
-      "Stored credential could not be decrypted",
-      true
+      "Stored credential could not be decrypted"
     );
     expect(JSON.parse(runtime.logger.error.mock.calls[0]![0])).toMatchObject({
       errorCode: "credential_decryption_failed",
-      reauthRequired: true
+      reauthRequired: false
     });
     expect(JSON.stringify(runtime.logger.error.mock.calls))
       .not.toContain(activeConnection.botTokenCiphertext);
@@ -1377,7 +1376,7 @@ describe("WeChat worker runtime", () => {
     expect(JSON.stringify(runtime.logger.error.mock.calls)).not.toContain("bot-secret");
   });
 
-  it("marks an undecryptable monitored connection as requiring fresh authorization", async () => {
+  it("keeps an undecryptable monitored connection retryable for another worker", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);
 
@@ -1395,11 +1394,11 @@ describe("WeChat worker runtime", () => {
       connectionId: activeConnection.id,
       workerId: "worker-1",
       message: "Stored credential could not be decrypted",
-      reauthRequired: true
+      reauthRequired: false
     });
     expect(JSON.parse(runtime.logger.error.mock.calls[0]![0])).toMatchObject({
       errorCode: "credential_decryption_failed",
-      reauthRequired: true
+      reauthRequired: false
     });
   });
 
