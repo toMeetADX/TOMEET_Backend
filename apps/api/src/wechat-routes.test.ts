@@ -1507,6 +1507,104 @@ describe("WeChat one-time QR onboarding", () => {
     );
   });
 
+  it("prioritizes the signed-in user's existing bot token beyond the newest 10", async () => {
+    const userByToken: Record<string, string> = {};
+    const statuses = Array.from({ length: 12 }, (_, index) => ({
+      status: "confirmed",
+      bot_token: `priority-token-${index}`,
+      ilink_bot_id: `priority-bot-${index}`,
+      baseurl: "https://ilink-api.example.com",
+      ilink_user_id: `priority-owner-${index}`
+    }));
+    const { app, store, wechatStore, fetchMock } = await setup(
+      statuses,
+      undefined,
+      undefined,
+      undefined,
+      { userByToken }
+    );
+
+    for (let index = 0; index < 12; index += 1) {
+      const created = (await app.inject({
+        method: "POST",
+        url: "/wechat/connect/sessions",
+        payload: {}
+      })).json();
+      await app.inject({
+        method: "GET",
+        url: `/wechat/connect/sessions/${created.sessionId}`,
+        headers: { "x-wechat-session-token": created.sessionToken }
+      });
+      for (const connection of memoryConnections(wechatStore).values()) {
+        if (connection.ownerIlinkUserId === `priority-owner-${index}`) {
+          connection.updatedAt = new Date(Date.UTC(2026, 6, 26, 0, 0, index)).toISOString();
+        }
+      }
+    }
+
+    const oldestIdentity = await store.resolveChannelIdentity("wechat", "priority-owner-0");
+    userByToken["existing-user-token"] = oldestIdentity!.userId;
+    const created = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      headers: { authorization: "Bearer existing-user-token" },
+      payload: {}
+    });
+
+    expect(created.statusCode).toBe(201);
+    const submittedTokens = qrLocalTokenLists(fetchMock).at(-1)!;
+    expect(submittedTokens).toHaveLength(10);
+    expect(submittedTokens[0]).toBe("priority-token-0");
+    expect(submittedTokens).toContain("priority-token-11");
+  });
+
+  it("treats binded_redirect as success without rotating the existing connection", async () => {
+    const owner = "owner-already-connected";
+    const { app, wechatStore, fetchMock, cipher } = await setup([
+      {
+        status: "confirmed",
+        bot_token: "stable-existing-token",
+        ilink_bot_id: "stable-existing-bot",
+        baseurl: "https://ilink-api.example.com",
+        ilink_user_id: owner
+      },
+      { status: "binded_redirect" }
+    ]);
+
+    const first = (await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    })).json();
+    await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${first.sessionId}`,
+      headers: { "x-wechat-session-token": first.sessionToken }
+    });
+    const before = [...memoryConnections(wechatStore).values()][0]!;
+    const beforeSnapshot = structuredClone(before);
+
+    const second = (await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    })).json();
+    expect(qrLocalTokenLists(fetchMock).at(-1)).toEqual(["stable-existing-token"]);
+    const alreadyConnected = await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${second.sessionId}`,
+      headers: { "x-wechat-session-token": second.sessionToken }
+    });
+
+    expect(alreadyConnected.json()).toMatchObject({ status: "active" });
+    const after = [...memoryConnections(wechatStore).values()][0]!;
+    expect(after).toEqual(beforeSnapshot);
+    expect(cipher.decrypt(
+      after.botTokenCiphertext,
+      `wechat-connection:${after.ownerIlinkUserId}`
+    )).toBe("stable-existing-token");
+  });
+
   it("keeps one connection row when the same WeChat identity reconnects", async () => {
     const confirmed = {
       status: "confirmed",

@@ -412,10 +412,14 @@ async function pollSession(
         ifStatusIn: NON_TERMINAL_SESSION_STATUSES
       });
     case "binded_redirect":
+      // iLink returns binded_redirect when the scanned bot matches one of the local tokens
+      // submitted with this QR. No new credentials are issued: the existing connection is
+      // still valid and must not be replaced or marked as disconnected.
       return runtime.store.updateWechatSession(session.id, {
-        status: "failed",
-        errorCode: "already_bound_elsewhere",
-        errorMessage: "该微信已绑定其他 iLink 客户端，请先解除旧连接后重试"
+        status: "active",
+        confirmedAt: new Date().toISOString(),
+        errorCode: null,
+        errorMessage: null
       }, {
         ifStatusIn: NON_TERMINAL_SESSION_STATUSES
       });
@@ -630,7 +634,10 @@ export function registerWechatRoutes(
     if (!runtime) return null;
     const id = randomUUID();
     const sessionToken = randomBytes(32).toString("base64url");
-    const connections = await runtime.store.listActiveWechatConnectionsForQr(10);
+    const connections = await runtime.store.listActiveWechatConnectionsForQr(
+      10,
+      requestedUserId
+    );
     const localTokenList: string[] = [];
     for (const connection of connections) {
       try {
@@ -640,8 +647,14 @@ export function registerWechatRoutes(
             `wechat-connection:${connection.ownerIlinkUserId}`
           )
         );
-      } catch {
-        // Skip undecryptable credentials; QR creation must still succeed.
+      } catch (error) {
+        if (requestedUserId && connection.userId === requestedUserId) {
+          // Creating a QR without this user's current token could turn a repeat scan into a
+          // new login and invalidate the still-working bot. Preserve the existing connection.
+          throw error;
+        }
+        // A damaged credential for another user must not block this QR. It is never logged or
+        // included in the request, and the current user's token remains first when available.
       }
     }
     const qr = await runtime.client.createLoginQr({ localTokenList });

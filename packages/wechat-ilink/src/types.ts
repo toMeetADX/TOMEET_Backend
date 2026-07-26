@@ -175,6 +175,9 @@ export interface CreateWechatSessionInput {
 export interface WechatSessionUpdate {
   status?: WechatConnectionSessionStatus;
   pollBaseUrl?: string;
+  connectionId?: string | null;
+  userId?: string | null;
+  confirmedAt?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
 }

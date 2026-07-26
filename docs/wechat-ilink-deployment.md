@@ -303,8 +303,10 @@ pnpm dev:wechat
 
 多个不同微信号可以同时保持 `wechat_ilink_connections.status='active'`。创建二维码时
 API 会查询最多 10 个 active 连接，解密 `bot_token` 后作为 `local_token_list` 提交给
-iLink `get_bot_qrcode`，让上游识别已在线 bot，避免新扫码会话顶掉旧会话（否则先登录
-方长轮询常收到 `-14` → Worker 标 `reauth_required`）。
+iLink `get_bot_qrcode`，让上游识别已在线 bot，避免重复签发会话。登录用户创建二维码时，
+自己的 active token 始终优先排在首位，不会因全局连接超过 10 个而被挤出。iLink 返回
+`binded_redirect` 表示该 bot 已经连接，本地会将扫码会话视为成功并继续复用原凭证，
+不会把原连接标为失败或轮换 token；只有 `confirmed` 返回一组新 bot 凭证时才执行原子替换。
 
 验收：
 

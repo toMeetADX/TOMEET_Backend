@@ -230,6 +230,9 @@ export class SupabaseWechatStore implements WechatConnectionStore {
     const values: JsonRow = { updated_at: new Date().toISOString() };
     if (update.status !== undefined) values.status = update.status;
     if (update.pollBaseUrl !== undefined) values.poll_base_url = update.pollBaseUrl;
+    if (update.connectionId !== undefined) values.connection_id = update.connectionId;
+    if (update.userId !== undefined) values.user_id = update.userId;
+    if (update.confirmedAt !== undefined) values.confirmed_at = update.confirmedAt;
     if (update.errorCode !== undefined) values.error_code = update.errorCode;
     if (update.errorMessage !== undefined) values.error_message = update.errorMessage;
     let query = this.client
@@ -272,16 +275,39 @@ export class SupabaseWechatStore implements WechatConnectionStore {
     };
   }
 
-  async listActiveWechatConnectionsForQr(limit = 10): Promise<WechatConnection[]> {
+  async listActiveWechatConnectionsForQr(
+    limit = 10,
+    prioritizeUserId?: string
+  ): Promise<WechatConnection[]> {
     const capped = Math.max(0, Math.min(limit, 10));
-    const { data, error } = await this.client
+    if (capped === 0) return [];
+
+    let prioritized: WechatConnection | null = null;
+    if (prioritizeUserId) {
+      const { data, error } = await this.client
+        .from("wechat_ilink_connections")
+        .select("*")
+        .eq("status", "active")
+        .eq("user_id", prioritizeUserId)
+        .maybeSingle();
+      if (error) this.throwError("Read prioritized WeChat connection for QR", error);
+      prioritized = data ? mapConnection(data as JsonRow) : null;
+    }
+
+    let query = this.client
       .from("wechat_ilink_connections")
       .select("*")
       .eq("status", "active")
-      .order("updated_at", { ascending: false })
-      .limit(capped);
+      .order("updated_at", { ascending: false });
+    if (prioritized) query = query.neq("id", prioritized.id);
+    const remainingLimit = capped - (prioritized ? 1 : 0);
+    if (remainingLimit === 0) return [prioritized!];
+    const { data, error } = await query.limit(remainingLimit);
     if (error) this.throwError("List active WeChat connections for QR", error);
-    return (data ?? []).map((row) => mapConnection(row as JsonRow));
+    return [
+      ...(prioritized ? [prioritized] : []),
+      ...(data ?? []).map((row) => mapConnection(row as JsonRow))
+    ];
   }
 
   async claimWechatActivationCallback(sessionId: string): Promise<boolean> {

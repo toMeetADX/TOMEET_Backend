@@ -229,11 +229,20 @@ export class MemoryWechatStore implements WechatConnectionStore {
     };
   }
 
-  async listActiveWechatConnectionsForQr(limit = 10): Promise<WechatConnection[]> {
+  async listActiveWechatConnectionsForQr(
+    limit = 10,
+    prioritizeUserId?: string
+  ): Promise<WechatConnection[]> {
     const capped = Math.max(0, Math.min(limit, 10));
     return [...this.connections.values()]
       .filter((connection) => connection.status === "active")
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .sort((left, right) => {
+        if (prioritizeUserId) {
+          if (left.userId === prioritizeUserId && right.userId !== prioritizeUserId) return -1;
+          if (right.userId === prioritizeUserId && left.userId !== prioritizeUserId) return 1;
+        }
+        return right.updatedAt.localeCompare(left.updatedAt);
+      })
       .slice(0, capped)
       .map((connection) => structuredClone(connection));
   }

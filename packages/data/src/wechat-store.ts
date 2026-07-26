@@ -31,7 +31,10 @@ export interface WechatConnectionStore {
     session: WechatConnectionSession;
     connection: WechatConnection;
   }>;
-  listActiveWechatConnectionsForQr(limit?: number): Promise<WechatConnection[]>;
+  listActiveWechatConnectionsForQr(
+    limit?: number,
+    prioritizeUserId?: string
+  ): Promise<WechatConnection[]>;
   claimWechatActivationCallback(sessionId: string): Promise<boolean>;
   claimWechatConnections(input: {
     workerId: string;
