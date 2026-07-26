@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { StoreConflictError, type WechatConnectionStore } from "@tomeet/data";
@@ -71,6 +71,7 @@ interface RegisterWechatRoutesOptions {
   internalApiEnabled: boolean;
   internalTokenMatches(candidate: unknown): boolean;
   publicSessionRateLimitMax?: number;
+  rapidSessionRateLimitMax?: number;
   rapidQrAccessTokenMatches?(accessToken: string): Promise<boolean>;
   isNewWechatIdentity?(externalUserId: string): Promise<boolean>;
   onActivated?(context: WechatActivationContext): Promise<void>;
@@ -488,6 +489,11 @@ export function registerWechatRoutes(
     controller: AbortController;
     task: Promise<void>;
   }>();
+  type CreatedSession = NonNullable<Awaited<ReturnType<typeof createSession>>>;
+  const rapidQrSlots = new Map<string, {
+    current: CreatedSession[];
+    inFlight?: Promise<CreatedSession | null>;
+  }>();
   const reportWebRegistrationError = (error: unknown) => {
     app.log.error({
       err: error,
@@ -547,6 +553,7 @@ export function registerWechatRoutes(
     const monitors = [...claimedSessionMonitors.values()];
     for (const monitor of monitors) monitor.controller.abort();
     await Promise.allSettled(monitors.map((monitor) => monitor.task));
+    rapidQrSlots.clear();
   });
 
   app.post(
@@ -659,6 +666,39 @@ export function registerWechatRoutes(
     };
   }
 
+  async function createOrReuseRapidSession(slotIdentity: string) {
+    const runtime = options.runtime;
+    if (!runtime) return null;
+    const slotKey = createHash("sha256").update(slotIdentity).digest("hex");
+    const slot = rapidQrSlots.get(slotKey) ?? { current: [] };
+    rapidQrSlots.set(slotKey, slot);
+    if (slot.inFlight) return slot.inFlight;
+
+    const task = Promise.resolve().then(async () => {
+      const states = await Promise.all(slot.current.map(async (created) => ({
+        created,
+        session: await runtime.store.getWechatSession(created.session.id)
+      })));
+      const pending = states
+        .filter(({ session }) => (
+          session?.status === "pending"
+          && new Date(session.expiresAt).getTime() > Date.now()
+        ))
+        .map(({ created }) => created);
+      slot.current = pending;
+      if (pending.length >= 2) {
+        return pending[pending.length - 1] ?? null;
+      }
+      const created = await createSession();
+      if (created) slot.current.push(created);
+      return created;
+    }).finally(() => {
+      if (slot.inFlight === task) slot.inFlight = undefined;
+    });
+    slot.inFlight = task;
+    return task;
+  }
+
   app.post(
     "/wechat/connect/sessions",
     {
@@ -688,7 +728,14 @@ export function registerWechatRoutes(
 
   app.post(
     "/wechat/connect/sessions/demo",
-    { config: { rateLimit: false } },
+    {
+      config: {
+        rateLimit: {
+          max: options.rapidSessionRateLimitMax ?? 120,
+          timeWindow: "10 minutes"
+        }
+      }
+    },
     async (request, reply) => {
       if (!options.rapidQrAccessTokenMatches) {
         return reply.code(503).send({
@@ -713,9 +760,13 @@ export function registerWechatRoutes(
           message: "当前账户不能使用路演二维码模式"
         });
       }
-      // The bearer token authorizes the roadshow operator to create unlimited
-      // QR codes. It does not identify the visitor who scans the displayed QR.
-      const created = await createSession();
+      // The bearer token identifies the roadshow display, not the visitor. Keep at most the
+      // displayed QR plus one standby QR. Concurrent refresh effects are coalesced, and once
+      // the displayed code is scanned the standby can be promoted immediately while the
+      // claimed session keeps activating in the background.
+      const created = await createOrReuseRapidSession(
+        request.authUserId ?? accessToken
+      );
       if (!created) {
         return reply.code(503).send({
           error: "wechat_connect_disabled",

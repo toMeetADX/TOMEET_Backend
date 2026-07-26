@@ -58,6 +58,7 @@ export interface BuildAppOptions {
   trustProxy?: boolean;
   rateLimitMax?: number;
   wechatQrRateLimitMax?: number;
+  wechatRapidQrRateLimitMax?: number;
   wechatRapidQrAccessTokenMatches?: EmailAccessTokenMatcher;
   adventurexTestPoolAccessTokenMatches?: EmailAccessTokenMatcher;
   exposeInternalErrors?: boolean;
@@ -288,6 +289,7 @@ export async function buildApp(options: BuildAppOptions) {
     internalApiEnabled: Boolean(options.internalApiToken),
     internalTokenMatches,
     publicSessionRateLimitMax: options.wechatQrRateLimitMax,
+    rapidSessionRateLimitMax: options.wechatRapidQrRateLimitMax,
     rapidQrAccessTokenMatches: options.wechatRapidQrAccessTokenMatches,
     webRegistration: options.wechatWebRegistration,
     isNewWechatIdentity: async (externalUserId) => (
