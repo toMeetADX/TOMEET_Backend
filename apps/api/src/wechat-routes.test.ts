@@ -46,6 +46,7 @@ async function setup(
     processJobsInline?: boolean;
     userByToken?: Record<string, string>;
     rapidQrTokens?: string[];
+    rapidQrRateLimitMax?: number;
     webRegistration?: boolean;
     provisionedUserId?: string;
     provisionError?: Error;
@@ -101,6 +102,7 @@ async function setup(
     inlineProcessor,
     internalApiToken,
     wechatQrRateLimitMax,
+    wechatRapidQrRateLimitMax: integration?.rapidQrRateLimitMax,
     verifyAccessToken,
     wechatRapidQrAccessTokenMatches: integration?.rapidQrTokens
       ? async (accessToken) => integration.rapidQrTokens!.includes(accessToken)
@@ -459,7 +461,7 @@ describe("WeChat one-time QR onboarding", () => {
     expect(events.payload).not.toContain("qrTokenCiphertext");
   });
 
-  it("allows only the roadshow account to bypass the public QR creation limit", async () => {
+  it("caps roadshow QR issuance at one displayed code plus one standby", async () => {
     const roadshowUserId = randomUUID();
     const otherUserId = randomUUID();
     const { app, wechatStore } = await setup(
@@ -503,25 +505,81 @@ describe("WeChat one-time QR onboarding", () => {
     });
     expect(wrongAccount.statusCode).toBe(403);
 
-    const first = await app.inject({
+    const firstResponse = await app.inject({
       method: "POST",
       url: "/wechat/connect/sessions/demo",
       headers: { authorization: "Bearer roadshow-token" },
       payload: {}
     });
-    const second = await app.inject({
+    expect(firstResponse.statusCode).toBe(201);
+    const first = firstResponse.json();
+
+    const concurrent = await Promise.all(Array.from({ length: 12 }, () => app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions/demo",
+      headers: { authorization: "Bearer roadshow-token" },
+      payload: {}
+    })));
+    expect(concurrent.every((response) => response.statusCode === 201)).toBe(true);
+    const concurrentStandby = concurrent[0]!.json();
+    expect(new Set(concurrent.map((response) => response.json().sessionId))).toEqual(
+      new Set([concurrentStandby.sessionId])
+    );
+    expect(new Set(concurrent.map((response) => response.json().sessionToken))).toEqual(
+      new Set([concurrentStandby.sessionToken])
+    );
+    expect(await wechatStore.getWechatSession(first.sessionId))
+      .toMatchObject({ requestedUserId: null });
+
+    const standby = await app.inject({
       method: "POST",
       url: "/wechat/connect/sessions/demo",
       headers: { authorization: "Bearer roadshow-token" },
       payload: {}
     });
-    expect(first.statusCode).toBe(201);
-    expect(second.statusCode).toBe(201);
-    expect(first.json().sessionId).not.toBe(second.json().sessionId);
-    expect(await wechatStore.getWechatSession(first.json().sessionId))
+    const duplicateStandby = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions/demo",
+      headers: { authorization: "Bearer roadshow-token" },
+      payload: {}
+    });
+    expect(standby.statusCode).toBe(201);
+    expect(standby.json().sessionId).not.toBe(first.sessionId);
+    expect(standby.json().sessionId).toBe(concurrentStandby.sessionId);
+    expect(duplicateStandby.json().sessionId).toBe(standby.json().sessionId);
+
+    await wechatStore.updateWechatSession(first.sessionId, { status: "scanned" });
+    const replacement = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions/demo",
+      headers: { authorization: "Bearer roadshow-token" },
+      payload: {}
+    });
+    expect(replacement.statusCode).toBe(201);
+    expect(replacement.json().sessionId).not.toBe(standby.json().sessionId);
+    expect(replacement.json().qrCodeContent).toBe("weixin://connect/4");
+    expect(await wechatStore.getWechatSession(replacement.json().sessionId))
       .toMatchObject({ requestedUserId: null });
-    expect(await wechatStore.getWechatSession(second.json().sessionId))
-      .toMatchObject({ requestedUserId: null });
+  });
+
+  it("keeps the roadshow QR endpoint bounded independently from public creation", async () => {
+    const roadshowUserId = randomUUID();
+    const { app } = await setup([], undefined, undefined, 1, {
+      rapidQrTokens: ["roadshow-token"],
+      rapidQrRateLimitMax: 2,
+      userByToken: { "roadshow-token": roadshowUserId }
+    });
+    const responses = [];
+    for (let index = 0; index < 3; index += 1) {
+      responses.push(await app.inject({
+        method: "POST",
+        url: "/wechat/connect/sessions/demo",
+        headers: { authorization: "Bearer roadshow-token" },
+        payload: {}
+      }));
+    }
+    expect(responses.slice(0, 2).every((response) => response.statusCode === 201)).toBe(true);
+    expect(responses[2]?.statusCode).toBe(429);
   });
 
   it("creates a profile and reuses it when the same WeChat identity reconnects", async () => {

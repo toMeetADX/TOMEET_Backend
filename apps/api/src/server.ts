@@ -22,6 +22,7 @@ config({ path: resolve(process.cwd(), ".env") });
 config({ path: resolve(process.cwd(), "../../.env"), override: false });
 
 const demoMode = process.env.DEMO_MODE === "true";
+const WECHAT_RAPID_QR_EMAIL = "andy4fe0119@gmail.com";
 const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.RAILWAY_ENVIRONMENT_ID);
 if (isProduction && demoMode) throw new Error("生产环境禁止 DEMO_MODE=true");
 
@@ -57,7 +58,7 @@ if (demoMode) {
   wechatRapidQrAccessTokenMatches = createSupabaseEmailAccessTokenMatcher(
     url,
     key,
-    process.env.WECHAT_RAPID_QR_EMAIL ?? "andy4fe0119@gmail.com"
+    WECHAT_RAPID_QR_EMAIL
   );
   if (process.env.ADVENTUREX_TEST_POOL_ENABLED === "true") {
     adventurexTestPoolAccessTokenMatches = createSupabaseEmailAccessTokenMatcher(
@@ -149,6 +150,11 @@ const app = await buildApp({
     process.env.WECHAT_PUBLIC_QR_RATE_LIMIT_MAX,
     30,
     "WECHAT_PUBLIC_QR_RATE_LIMIT_MAX"
+  ),
+  wechatRapidQrRateLimitMax: parsePositiveInteger(
+    process.env.WECHAT_RAPID_QR_RATE_LIMIT_MAX,
+    120,
+    "WECHAT_RAPID_QR_RATE_LIMIT_MAX"
   ),
   wechatRapidQrAccessTokenMatches,
   adventurexTestPoolAccessTokenMatches,

@@ -1434,6 +1434,70 @@ describe("WeChat worker runtime", () => {
     expect(runtime.store.releaseWechatConnection).toHaveBeenCalled();
   });
 
+  it("renews the connection lease while a long poll or Agent turn is still in flight", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    let releasePoll!: () => void;
+    runtime.ilink.getUpdates.mockImplementationOnce(() => new Promise((resolve) => {
+      releasePoll = () => resolve({
+        ret: 0,
+        msgs: [],
+        get_updates_buf: "cursor-after-heartbeat"
+      });
+    }));
+
+    const monitoring = monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      leaseHeartbeatMs: 10,
+      signal: new AbortController().signal
+    });
+
+    await vi.waitFor(() => {
+      expect(runtime.store.renewWechatConnectionLease.mock.calls.length)
+        .toBeGreaterThanOrEqual(2);
+    });
+    releasePoll();
+    await monitoring;
+
+    expect(runtime.store.markWechatConnectionError).not.toHaveBeenCalled();
+    expect(runtime.store.releaseWechatConnection).toHaveBeenCalled();
+  });
+
+  it("retries a transient iLink transport failure without releasing the bot connection", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    runtime.ilink.getUpdates
+      .mockRejectedValueOnce(new Error("temporary network failure"))
+      .mockResolvedValueOnce({
+        ret: 0,
+        msgs: [],
+        get_updates_buf: "cursor-after-retry"
+      });
+
+    await monitorWechatConnection({
+      ...runtime.dependencies,
+      connection: activeConnection,
+      workerId: "worker-1",
+      leaseSeconds: 300,
+      signal: new AbortController().signal
+    });
+
+    expect(runtime.ilink.getUpdates).toHaveBeenCalledTimes(2);
+    expect(runtime.store.updateWechatConnectionCursor).toHaveBeenCalledWith(
+      activeConnection.id,
+      "worker-1",
+      "cursor-after-retry",
+      undefined
+    );
+    expect(runtime.store.markWechatConnectionError).not.toHaveBeenCalled();
+    expect(runtime.logger.error).toHaveBeenCalledWith(expect.stringContaining(
+      '"event":"wechat_updates_transport_failed"'
+    ));
+  });
+
   it("uses the provider long-poll timeout on the next request and logs poll timing", async () => {
     const runtime = setup();
     const activeConnection = connection(runtime.cipher);

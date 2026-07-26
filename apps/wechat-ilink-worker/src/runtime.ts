@@ -217,6 +217,9 @@ const WECHAT_TURN_PROGRESS_MAX_NOTICES = 1;
 const WECHAT_LONG_POLL_DEFAULT_TIMEOUT_MS = 35_000;
 const WECHAT_LONG_POLL_MIN_TIMEOUT_MS = 5_000;
 const WECHAT_LONG_POLL_MAX_TIMEOUT_MS = 60_000;
+const WECHAT_LEASE_HEARTBEAT_MAX_INTERVAL_MS = 30_000;
+const WECHAT_TRANSPORT_RETRY_MIN_MS = 250;
+const WECHAT_TRANSPORT_RETRY_MAX_MS = 5_000;
 
 function normalizedLongPollTimeout(value: number | undefined): number | null {
   if (!Number.isFinite(value) || !value || value <= 0) return null;
@@ -224,6 +227,27 @@ function normalizedLongPollTimeout(value: number | undefined): number | null {
     WECHAT_LONG_POLL_MAX_TIMEOUT_MS,
     Math.max(WECHAT_LONG_POLL_MIN_TIMEOUT_MS, Math.round(value))
   );
+}
+
+function retryDelayMs(failureCount: number): number {
+  return Math.min(
+    WECHAT_TRANSPORT_RETRY_MAX_MS,
+    WECHAT_TRANSPORT_RETRY_MIN_MS * (2 ** Math.min(Math.max(failureCount - 1, 0), 5))
+  );
+}
+
+async function waitForAbortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted || delayMs <= 0) return;
+  await new Promise<void>((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delayMs);
+    timer.unref?.();
+    signal.addEventListener("abort", finish, { once: true });
+  });
 }
 
 function stripTerminalPeriods(content: string): string {
@@ -884,6 +908,7 @@ export async function monitorWechatConnection(
     connection: WechatConnection;
     workerId: string;
     leaseSeconds: number;
+    leaseHeartbeatMs?: number;
     signal: AbortSignal;
   }
 ): Promise<void> {
@@ -896,37 +921,103 @@ export async function monitorWechatConnection(
   const logger = dependencies.logger ?? console;
   const connectionFingerprint = fingerprint(connection.id);
   let turnBatcher: WechatTurnBatcher | null = null;
+  const leaseController = new AbortController();
+  const monitorSignal = AbortSignal.any([signal, leaseController.signal]);
+  const heartbeatIntervalMs = dependencies.leaseHeartbeatMs ?? Math.max(
+    1_000,
+    Math.min(
+      WECHAT_LEASE_HEARTBEAT_MAX_INTERVAL_MS,
+      Math.floor((leaseSeconds * 1000) / 3)
+    )
+  );
+  let leaseHeartbeat: ReturnType<typeof setInterval> | null = null;
+  let leaseHeartbeatInFlight: Promise<void> | null = null;
+  let leaseValidUntil = 0;
+  let leaseLost = false;
+  const stopLeaseHeartbeat = async () => {
+    if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+    leaseHeartbeat = null;
+    await leaseHeartbeatInFlight?.catch(() => undefined);
+  };
   try {
     const botToken = dependencies.cipher.decrypt(
       connection.botTokenCiphertext,
       `wechat-connection:${connection.ownerIlinkUserId}`
     );
     turnBatcher = new WechatTurnBatcher(dependencies, connection, botToken);
-    let cursor = connection.syncCursor;
-    let nextLongPollTimeoutMs = WECHAT_LONG_POLL_DEFAULT_TIMEOUT_MS;
-    let consecutiveTransportTimeouts = 0;
-    // Empty polling responses may advance the cursor before the user speaks, so lastMessageAt is
-    // also needed only to identify the first transport opener. It does not decide who gets welcome.
-    let openingTriggerPending = cursor.length === 0 || !connection.lastMessageAt;
-    while (!signal.aborted) {
-      const renewed = await dependencies.store.renewWechatConnectionLease(
+    const initiallyRenewed = await dependencies.store.renewWechatConnectionLease(
+      connection.id,
+      workerId,
+      leaseSeconds
+    );
+    if (!initiallyRenewed) return;
+    leaseValidUntil = Date.now() + leaseSeconds * 1000;
+    leaseHeartbeat = setInterval(() => {
+      if (leaseHeartbeatInFlight || monitorSignal.aborted) return;
+      leaseHeartbeatInFlight = dependencies.store.renewWechatConnectionLease(
         connection.id,
         workerId,
         leaseSeconds
-      );
-      if (!renewed) return;
-
+      ).then((renewed) => {
+        if (!renewed) {
+          leaseLost = true;
+          leaseController.abort();
+          return;
+        }
+        leaseValidUntil = Date.now() + leaseSeconds * 1000;
+      }).catch((error: unknown) => {
+        logger.error(JSON.stringify({
+          level: "error",
+          event: "wechat_lease_heartbeat_failed",
+          connection: connectionFingerprint,
+          errorType: errorName(error)
+        }));
+        if (Date.now() >= leaseValidUntil) {
+          leaseLost = true;
+          leaseController.abort();
+        }
+      }).finally(() => {
+        leaseHeartbeatInFlight = null;
+      });
+    }, heartbeatIntervalMs);
+    leaseHeartbeat.unref?.();
+    let cursor = connection.syncCursor;
+    let nextLongPollTimeoutMs = WECHAT_LONG_POLL_DEFAULT_TIMEOUT_MS;
+    let consecutiveTransportTimeouts = 0;
+    let consecutiveTransportFailures = 0;
+    // Empty polling responses may advance the cursor before the user speaks, so lastMessageAt is
+    // also needed only to identify the first transport opener. It does not decide who gets welcome.
+    let openingTriggerPending = cursor.length === 0 || !connection.lastMessageAt;
+    while (!monitorSignal.aborted) {
       const pollStartedAt = Date.now();
       const cursorBeforePoll = cursor;
       const pollTimeoutMs = nextLongPollTimeoutMs;
-      const updates = await dependencies.ilink.getUpdates({
-        baseUrl: connection.baseUrl,
-        botToken,
-        cursor,
-        timeoutMs: pollTimeoutMs,
-        signal
-      });
-      if (signal.aborted) return;
+      let updates: WechatUpdates;
+      try {
+        updates = await dependencies.ilink.getUpdates({
+          baseUrl: connection.baseUrl,
+          botToken,
+          cursor,
+          timeoutMs: pollTimeoutMs,
+          signal: monitorSignal
+        });
+        consecutiveTransportFailures = 0;
+      } catch (error) {
+        if (monitorSignal.aborted) return;
+        consecutiveTransportFailures += 1;
+        const retryMs = retryDelayMs(consecutiveTransportFailures);
+        logger.error(JSON.stringify({
+          level: "error",
+          event: "wechat_updates_transport_failed",
+          connection: connectionFingerprint,
+          errorType: errorName(error),
+          consecutiveFailures: consecutiveTransportFailures,
+          retryMs
+        }));
+        await waitForAbortableDelay(retryMs, monitorSignal);
+        continue;
+      }
+      if (monitorSignal.aborted) return;
       const providerLongPollTimeoutMs = normalizedLongPollTimeout(
         updates.longpolling_timeout_ms
       );
@@ -951,6 +1042,7 @@ export async function monitorWechatConnection(
       if ((updates.ret && updates.ret !== 0) || (updates.errcode && updates.errcode !== 0)) {
         const code = updates.errcode ?? updates.ret;
         const reauthRequired = code === -14;
+        await stopLeaseHeartbeat();
         await dependencies.store.markWechatConnectionError({
           connectionId: connection.id,
           workerId,
@@ -1003,13 +1095,16 @@ export async function monitorWechatConnection(
       if (!updated) return;
     }
   } catch (error) {
+    await stopLeaseHeartbeat();
     const classification = classifyWechatError(error);
-    await dependencies.store.markWechatConnectionError({
-      connectionId: connection.id,
-      workerId,
-      message: errorMessage(error),
-      reauthRequired: classification.reauthRequired
-    }).catch(() => undefined);
+    if (!leaseLost) {
+      await dependencies.store.markWechatConnectionError({
+        connectionId: connection.id,
+        workerId,
+        message: errorMessage(error),
+        reauthRequired: classification.reauthRequired
+      }).catch(() => undefined);
+    }
     logger.error(JSON.stringify({
       level: "error",
       event: "wechat_connection_monitor_failed",
@@ -1017,6 +1112,7 @@ export async function monitorWechatConnection(
       ...wechatErrorLogFields(error)
     }));
   } finally {
+    await stopLeaseHeartbeat();
     await turnBatcher?.flush().catch(() => undefined);
     await dependencies.store.releaseWechatConnection(
       connection.id,

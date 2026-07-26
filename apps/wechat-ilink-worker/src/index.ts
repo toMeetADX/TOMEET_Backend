@@ -194,31 +194,47 @@ async function run(): Promise<void> {
   while (!abortController.signal.aborted) {
     const capacity = concurrency - active.size;
     if (capacity > 0) {
-      const claimed = await store.claimWechatConnections({
-        workerId,
-        limit: capacity,
-        leaseSeconds
-      });
-      for (const connection of claimed) {
-        if (active.has(connection.id)) continue;
-        const task = monitorConnection(connection).finally(() => active.delete(connection.id));
-        active.set(connection.id, task);
+      try {
+        const claimed = await store.claimWechatConnections({
+          workerId,
+          limit: capacity,
+          leaseSeconds
+        });
+        for (const connection of claimed) {
+          if (active.has(connection.id)) continue;
+          const task = monitorConnection(connection).finally(() => active.delete(connection.id));
+          active.set(connection.id, task);
+        }
+      } catch (error) {
+        console.error(JSON.stringify({
+          level: "error",
+          event: "wechat_connection_claim_failed",
+          errorType: error instanceof Error ? error.name : "UnknownError"
+        }));
       }
     }
     const outboundCapacity = outboundConcurrency - activeOutbound.size;
     if (outboundCapacity > 0) {
-      const claimed = await store.claimWechatOutboundMessages({
-        workerId,
-        limit: outboundCapacity
-      });
-      for (const delivery of claimed) {
-        if (activeOutbound.has(delivery.id)) continue;
-        const task = deliverWechatOutboundMessage(
-          { store, cipher, ilink, tomeet, bubbleDelayMs },
-          delivery,
-          workerId
-        ).finally(() => activeOutbound.delete(delivery.id));
-        activeOutbound.set(delivery.id, task);
+      try {
+        const claimed = await store.claimWechatOutboundMessages({
+          workerId,
+          limit: outboundCapacity
+        });
+        for (const delivery of claimed) {
+          if (activeOutbound.has(delivery.id)) continue;
+          const task = deliverWechatOutboundMessage(
+            { store, cipher, ilink, tomeet, bubbleDelayMs },
+            delivery,
+            workerId
+          ).finally(() => activeOutbound.delete(delivery.id));
+          activeOutbound.set(delivery.id, task);
+        }
+      } catch (error) {
+        console.error(JSON.stringify({
+          level: "error",
+          event: "wechat_outbound_claim_failed",
+          errorType: error instanceof Error ? error.name : "UnknownError"
+        }));
       }
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, claimIntervalMs));
