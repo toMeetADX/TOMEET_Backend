@@ -5,7 +5,7 @@ import {
   channelTurnFailureNotice,
   channelTurnProgressNotices
 } from "@tomeet/contracts";
-import type { WechatConnectionStore } from "@tomeet/data";
+import { StoreConflictError, type WechatConnectionStore } from "@tomeet/data";
 import {
   CredentialCipher,
   WechatILinkError,
@@ -232,6 +232,43 @@ describe("WeChat worker runtime", () => {
     expect(JSON.parse(runtime.logger.error.mock.calls[0]![0])).toMatchObject({
       errorCode: "ilink_prepare_failed",
       reauthRequired: true
+    });
+  });
+
+  it("never reschedules an outbound message that WeChat already received", async () => {
+    const runtime = setup();
+    const activeConnection = connection(runtime.cipher);
+    const completeWechatOutboundMessage = vi.fn(async () => {
+      throw new StoreConflictError("候选当前不能开始选择计时");
+    });
+    const delivery: WechatOutboundDelivery = {
+      id: "27000000-0000-4000-8000-000000000025",
+      messageId: "27000000-0000-4000-8000-000000000026",
+      userId: activeConnection.userId,
+      content: "match options",
+      kind: "message",
+      claimId: null,
+      attempts: 1,
+      connection: activeConnection
+    };
+
+    await deliverWechatOutboundMessage({
+      store: { completeWechatOutboundMessage },
+      cipher: runtime.cipher,
+      ilink: runtime.ilink,
+      tomeet: runtime.tomeet,
+      logger: runtime.logger
+    }, delivery, "worker-1");
+
+    expect(runtime.ilink.sendText).toHaveBeenCalledTimes(1);
+    for (const call of completeWechatOutboundMessage.mock.calls) {
+      expect(call).toEqual([delivery.id, "worker-1"]);
+    }
+    expect(JSON.parse(runtime.logger.error.mock.calls[0]![0])).toMatchObject({
+      event: "wechat_outbound_bookkeeping_failed",
+      errorCode: "store_operation_failed",
+      reauthRequired: false,
+      settled: false
     });
   });
 

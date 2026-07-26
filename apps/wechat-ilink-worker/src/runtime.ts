@@ -5,7 +5,11 @@ import {
   channelTurnProgressNotices,
   type AdventurexLanguage
 } from "@tomeet/contracts";
-import type { WechatConnectionStore } from "@tomeet/data";
+import {
+  StoreConflictError,
+  StoreNotFoundError,
+  type WechatConnectionStore
+} from "@tomeet/data";
 import {
   CredentialDecryptionError,
   CredentialCipher,
@@ -141,6 +145,7 @@ type WechatErrorCode =
   | "ilink_prepare_failed"
   | "ilink_session_expired"
   | "ilink_transport_failed"
+  | "store_operation_failed"
   | "unknown_error";
 
 function classifyWechatError(error: unknown): {
@@ -190,6 +195,12 @@ function classifyWechatError(error: unknown): {
       reauthRequired: false,
       ...(error.code !== undefined ? { providerCode: error.code } : {}),
       ...(error.status !== undefined ? { httpStatus: error.status } : {})
+    };
+  }
+  if (error instanceof StoreConflictError || error instanceof StoreNotFoundError) {
+    return {
+      code: "store_operation_failed",
+      reauthRequired: false
     };
   }
   return {
@@ -685,6 +696,7 @@ export async function deliverWechatOutboundMessage(
   workerId: string
 ): Promise<void> {
   const logger = dependencies.logger ?? console;
+  let deliveredToWechat = false;
   try {
     const botToken = dependencies.cipher.decrypt(
       delivery.connection.botTokenCiphertext,
@@ -722,6 +734,7 @@ export async function deliverWechatOutboundMessage(
         await waitBetweenBubbles(dependencies.bubbleDelayMs ?? 0);
       }
     }
+    deliveredToWechat = true;
     if (delivery.kind === "onboarding_welcome") {
       await dependencies.tomeet.completeOnboardingWelcomeDelivery({
         userId: delivery.userId,
@@ -738,6 +751,25 @@ export async function deliverWechatOutboundMessage(
       attempt: delivery.attempts
     }));
   } catch (error) {
+    if (deliveredToWechat) {
+      // The user already received these bubbles. Recording a delivery error would
+      // reschedule the row and send them a second time, so retry the success
+      // completion instead and surface the bookkeeping failure on its own.
+      const settled = await dependencies.store
+        .completeWechatOutboundMessage(delivery.id, workerId)
+        .then(() => true)
+        .catch(() => false);
+      logger.error(JSON.stringify({
+        level: "error",
+        event: "wechat_outbound_bookkeeping_failed",
+        outbound: fingerprint(delivery.id),
+        connection: fingerprint(delivery.connection.id),
+        settled,
+        ...wechatErrorLogFields(error),
+        attempt: delivery.attempts
+      }));
+      return;
+    }
     const classification = classifyWechatError(error);
     const completion = classification.reauthRequired
       ? dependencies.store.completeWechatOutboundMessage(
