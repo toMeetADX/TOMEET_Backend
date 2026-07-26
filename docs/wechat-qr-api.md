@@ -6,6 +6,12 @@ Production API base URL:
 https://api.tomeet.chat
 ```
 
+Built-in multi-user kiosk page (same origin, preferred for roadshow / multi-login):
+
+```text
+GET /wechat/connect/
+```
+
 The browser integration uses four public endpoints. The QR payload and session
 token must be treated as temporary credentials and must not be stored in
 `localStorage`, analytics events, or application logs.

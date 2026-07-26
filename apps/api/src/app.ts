@@ -160,9 +160,16 @@ export async function buildApp(options: BuildAppOptions) {
       path === "/wechat/connect/sessions"
       || path === "/wechat/connect/sessions/demo"
     );
+    const isWechatConnectPage = request.method === "GET" && (
+      path === "/wechat/connect"
+      || path === "/wechat/connect/"
+      || path === "/wechat/connect/index.html"
+      || path === "/wechat/connect/qr-encode.js"
+    );
     if (
       path === "/health"
       || path === "/ready"
+      || isWechatConnectPage
       || (path === "/auth/wechat/claim" && !hasAuthorization)
       || path?.startsWith("/internal/")
       || (path?.startsWith("/wechat/connect/sessions") && !isWechatSessionCreation)

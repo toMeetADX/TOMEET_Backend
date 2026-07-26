@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TOMEET · 微信接入</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,500;9..40,700&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #14201c;
+      --fog: #e8f0eb;
+      --mist: rgba(20, 32, 28, 0.55);
+      --leaf: #1f6b4a;
+      --leaf-bright: #2f9a68;
+      --warn: #b45309;
+      --danger: #b42318;
+      --panel: rgba(255, 255, 255, 0.88);
+      --line: rgba(20, 32, 28, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: "DM Sans", "PingFang SC", "Noto Sans SC", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 700px at 10% -10%, #b8e0c8 0%, transparent 55%),
+        radial-gradient(900px 600px at 100% 0%, #dce9ff 0%, transparent 50%),
+        linear-gradient(165deg, #f3faf5 0%, #e7eef6 48%, #f7f3ea 100%);
+      min-height: 100%;
+    }
+
+    .shell {
+      min-height: 100%;
+      display: grid;
+      place-items: center;
+      padding: clamp(1.25rem, 4vw, 2.5rem);
+    }
+
+    .stage {
+      width: min(100%, 28rem);
+      display: grid;
+      gap: 1.25rem;
+      justify-items: center;
+      text-align: center;
+      animation: rise 0.7s ease both;
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: none; }
+    }
+
+    .brand {
+      font-family: Syne, "DM Sans", sans-serif;
+      font-weight: 800;
+      font-size: clamp(2.4rem, 8vw, 3.4rem);
+      letter-spacing: -0.04em;
+      line-height: 0.95;
+      margin: 0;
+    }
+
+    .lede {
+      margin: 0;
+      max-width: 22rem;
+      color: var(--mist);
+      font-size: 1.05rem;
+      line-height: 1.45;
+    }
+
+    .qr-frame {
+      position: relative;
+      width: min(100%, 18.5rem);
+      aspect-ratio: 1;
+      padding: 1rem;
+      border-radius: 1.35rem;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: 0 24px 60px rgba(20, 32, 28, 0.12);
+      overflow: hidden;
+    }
+
+    .qr-frame::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(120deg, transparent 40%, rgba(255,255,255,0.45) 50%, transparent 60%);
+      transform: translateX(-120%);
+      animation: sheen 4.5s ease-in-out infinite;
+      pointer-events: none;
+    }
+
+    @keyframes sheen {
+      0%, 70% { transform: translateX(-120%); }
+      100% { transform: translateX(120%); }
+    }
+
+    #qr {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      place-items: center;
+    }
+
+    #qr svg { width: 100%; height: 100%; display: block; }
+
+    .qr-frame.is-masked #qr { filter: blur(7px) brightness(1.05); opacity: 0.35; }
+    .qr-frame.is-masked::before {
+      content: "已扫码 · 请在手机确认";
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 1.05rem;
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.55);
+      backdrop-filter: blur(2px);
+    }
+
+    .status {
+      min-height: 1.5rem;
+      margin: 0;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    .status[data-tone="ok"] { color: var(--leaf); }
+    .status[data-tone="wait"] { color: var(--ink); }
+    .status[data-tone="warn"] { color: var(--warn); }
+    .status[data-tone="danger"] { color: var(--danger); }
+
+    .meta {
+      margin: 0;
+      color: var(--mist);
+      font-size: 0.92rem;
+    }
+
+    .claimed {
+      width: 100%;
+      display: grid;
+      gap: 0.5rem;
+    }
+
+    .chip {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.7rem 0.9rem;
+      border-radius: 0.75rem;
+      background: rgba(255,255,255,0.65);
+      border: 1px solid var(--line);
+      font-size: 0.9rem;
+      text-align: left;
+    }
+
+    .chip strong { font-weight: 700; }
+    .chip span { color: var(--mist); }
+
+    .verify {
+      width: 100%;
+      display: none;
+      gap: 0.65rem;
+      padding: 1rem;
+      border-radius: 1rem;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      text-align: left;
+    }
+    .verify.is-open { display: grid; }
+    .verify label {
+      font-size: 0.85rem;
+      color: var(--mist);
+      font-weight: 600;
+    }
+    .verify-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 0.5rem;
+    }
+    .verify input {
+      border: 1px solid var(--line);
+      border-radius: 0.65rem;
+      padding: 0.7rem 0.85rem;
+      font: inherit;
+      font-size: 1.1rem;
+      letter-spacing: 0.12em;
+    }
+    .verify button, .actions button {
+      border: 0;
+      border-radius: 0.65rem;
+      padding: 0.7rem 1rem;
+      font: inherit;
+      font-weight: 700;
+      color: white;
+      background: linear-gradient(135deg, var(--leaf), var(--leaf-bright));
+      cursor: pointer;
+    }
+    .actions button[disabled], .verify button[disabled] {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .actions {
+      display: flex;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .actions button.secondary {
+      background: transparent;
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }
+
+    .footnote {
+      margin: 0;
+      font-size: 0.8rem;
+      color: rgba(20, 32, 28, 0.4);
+      max-width: 22rem;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="stage" aria-live="polite">
+      <h1 class="brand">TOMEET</h1>
+      <p class="lede">微信扫码接入。多人可连续扫同一屏幕上的新码，已登录用户不会被挤下线。</p>
+
+      <div id="qrFrame" class="qr-frame" aria-label="微信登录二维码">
+        <div id="qr"></div>
+      </div>
+
+      <p id="status" class="status" data-tone="wait">正在准备二维码…</p>
+      <p id="meta" class="meta"></p>
+
+      <form id="verify" class="verify" autocomplete="one-time-code">
+        <label for="code">微信要求验证码时，填写并提交（对应已扫码会话）</label>
+        <div class="verify-row">
+          <input id="code" name="code" inputmode="numeric" pattern="\d{4,12}" maxlength="12" placeholder="4–12 位数字" required />
+          <button type="submit">提交</button>
+        </div>
+      </form>
+
+      <div id="claimed" class="claimed" hidden></div>
+
+      <div class="actions">
+        <button type="button" id="refresh" class="secondary">换一张码</button>
+      </div>
+
+      <p class="footnote">SSE 断开不会自动狂刷新码；仅在扫码轮换、临近过期或终态失败时创建下一张。后端创建码时携带已在线 bot token。</p>
+    </section>
+  </main>
+
+  <script src="/wechat/connect/qr-encode.js"></script>
+  <script>
+    (() => {
+      const API_BASE = ""; // same-origin wechat-api
+      const REFRESH_BEFORE_MS = 30_000;
+      const SSE_RETRY_MS = 1_500;
+      const MAX_SSE_RETRIES = 4;
+
+      const el = {
+        qr: document.getElementById("qr"),
+        frame: document.getElementById("qrFrame"),
+        status: document.getElementById("status"),
+        meta: document.getElementById("meta"),
+        claimed: document.getElementById("claimed"),
+        verify: document.getElementById("verify"),
+        code: document.getElementById("code"),
+        refresh: document.getElementById("refresh")
+      };
+
+      /** @type {null | SessionHandle} */
+      let displayed = null;
+      /** @type {Map<string, SessionHandle>} */
+      const claimed = new Map();
+      let createInFlight = null;
+      let refreshTimer = null;
+      let stopped = false;
+
+      /**
+       * @typedef {{
+       *   sessionId: string,
+       *   sessionToken: string,
+       *   qrCodeContent?: string,
+       *   status: string,
+       *   expiresAt: string,
+       *   errorCode: string | null,
+       *   errorMessage: string | null,
+       *   abort: AbortController,
+       *   role: "displayed" | "claimed",
+       *   sseRetries: number
+       * }} SessionHandle
+       */
+
+      function setStatus(text, tone = "wait") {
+        el.status.textContent = text;
+        el.status.dataset.tone = tone;
+      }
+
+      function setMeta(text) {
+        el.meta.textContent = text;
+      }
+
+      function renderClaimed() {
+        if (claimed.size === 0) {
+          el.claimed.hidden = true;
+          el.claimed.innerHTML = "";
+          return;
+        }
+        el.claimed.hidden = false;
+        el.claimed.innerHTML = [...claimed.values()].map((s) => {
+          const label = statusLabel(s.status);
+          return `<div class="chip"><strong>${shortId(s.sessionId)}</strong><span>${label}</span></div>`;
+        }).join("");
+      }
+
+      function shortId(id) {
+        return `会话 ${id.slice(0, 8)}`;
+      }
+
+      function statusLabel(status) {
+        switch (status) {
+          case "pending": return "等待扫码";
+          case "scanned": return "已扫码，待确认";
+          case "verification_required": return "需要验证码";
+          case "active": return "已接入";
+          case "expired": return "已过期";
+          case "failed": return "失败";
+          default: return status;
+        }
+      }
+
+      function isTerminal(status) {
+        return status === "active" || status === "expired" || status === "failed";
+      }
+
+      function clearRefreshTimer() {
+        if (refreshTimer) {
+          clearTimeout(refreshTimer);
+          refreshTimer = null;
+        }
+      }
+
+      function schedulePendingRefresh(session) {
+        clearRefreshTimer();
+        if (session.role !== "displayed" || session.status !== "pending") return;
+        const due = new Date(session.expiresAt).getTime() - REFRESH_BEFORE_MS - Date.now();
+        refreshTimer = setTimeout(() => {
+          if (displayed?.sessionId === session.sessionId && displayed.status === "pending") {
+            void rotateDisplayed("临近过期，已换新码");
+          }
+        }, Math.max(1_000, due));
+      }
+
+      async function api(path, { method = "GET", token, body, signal } = {}) {
+        const headers = { Accept: "application/json" };
+        if (token) headers["x-wechat-session-token"] = token;
+        if (body !== undefined) headers["Content-Type"] = "application/json";
+        const res = await fetch(`${API_BASE}${path}`, {
+          method,
+          headers,
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+          signal
+        });
+        if (!res.ok) {
+          let message = `请求失败 (${res.status})`;
+          try {
+            const data = await res.json();
+            if (data?.message) message = data.message;
+          } catch { /* ignore */ }
+          const err = new Error(message);
+          err.status = res.status;
+          throw err;
+        }
+        if (res.status === 204) return null;
+        return res.json();
+      }
+
+      async function createSession() {
+        if (createInFlight) return createInFlight;
+        createInFlight = (async () => {
+          const data = await api("/wechat/connect/sessions", {
+            method: "POST",
+            body: {}
+          });
+          return data;
+        })();
+        try {
+          return await createInFlight;
+        } finally {
+          createInFlight = null;
+        }
+      }
+
+      function showQr(content) {
+        try {
+          window.TomeetQr.renderInto(el.qr, content);
+        } catch (error) {
+          el.qr.textContent = "二维码生成失败";
+          throw error;
+        }
+      }
+
+      function abortHandle(handle) {
+        try { handle.abort.abort(); } catch { /* ignore */ }
+      }
+
+      async function listenSession(handle) {
+        while (!stopped && !isTerminal(handle.status)) {
+          try {
+            await streamOnce(handle);
+            if (isTerminal(handle.status)) break;
+            // Stream ended while still non-terminal: retry SSE, do NOT create a new QR.
+            handle.sseRetries += 1;
+            if (handle.sseRetries > MAX_SSE_RETRIES) {
+              await pollFallback(handle);
+              if (isTerminal(handle.status)) break;
+              handle.sseRetries = 0;
+            }
+            await sleep(SSE_RETRY_MS);
+          } catch (error) {
+            if (handle.abort.signal.aborted || stopped) return;
+            handle.sseRetries += 1;
+            if (handle.sseRetries > MAX_SSE_RETRIES) {
+              setStatus(error.message || "状态同步中断", "danger");
+              return;
+            }
+            await sleep(SSE_RETRY_MS * handle.sseRetries);
+          }
+        }
+      }
+
+      async function streamOnce(handle) {
+        const res = await fetch(
+          `${API_BASE}/wechat/connect/sessions/${handle.sessionId}/events`,
+          {
+            headers: {
+              Accept: "text/event-stream",
+              "x-wechat-session-token": handle.sessionToken
+            },
+            signal: handle.abort.signal
+          }
+        );
+        if (!res.ok || !res.body) {
+          throw new Error(`SSE 不可用 (${res.status})`);
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const chunks = buffer.split("\n\n");
+          buffer = chunks.pop() || "";
+          for (const chunk of chunks) applySseChunk(handle, chunk);
+          if (isTerminal(handle.status) && handle.role === "claimed") break;
+          // displayed rotates away on scanned; keep reading until abort
+          if (handle.role === "displayed" && handle.status === "scanned") {
+            // ownership moved to claimed map; stop this listener loop via role change
+          }
+        }
+      }
+
+      function applySseChunk(handle, chunk) {
+        const lines = chunk.split("\n");
+        let event = "message";
+        const dataLines = [];
+        for (const line of lines) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        }
+        if (!dataLines.length) return;
+        let payload;
+        try { payload = JSON.parse(dataLines.join("\n")); }
+        catch { return; }
+        if (event === "session" || event === "done") {
+          onSessionUpdate(handle, payload);
+        } else if (event === "error") {
+          setStatus(payload.message || "推送中断", "danger");
+        }
+      }
+
+      async function pollFallback(handle) {
+        const data = await api(`/wechat/connect/sessions/${handle.sessionId}`, {
+          token: handle.sessionToken,
+          signal: handle.abort.signal
+        });
+        onSessionUpdate(handle, data);
+      }
+
+      function onSessionUpdate(handle, payload) {
+        if (!payload || payload.sessionId !== handle.sessionId) return;
+        const prev = handle.status;
+        handle.status = payload.status;
+        handle.expiresAt = payload.expiresAt || handle.expiresAt;
+        handle.errorCode = payload.errorCode ?? null;
+        handle.errorMessage = payload.errorMessage ?? null;
+
+        if (handle.role === "displayed") {
+          updateDisplayedUi(handle);
+          if (prev !== "scanned" && handle.status === "scanned") {
+            promoteToClaimed(handle);
+            void rotateDisplayed("上一位已扫码，这是给下一位的新码");
+            return;
+          }
+          if (handle.status === "verification_required") {
+            openVerify(handle);
+          }
+          if (handle.status === "active") {
+            setStatus("已接入微信", "ok");
+            el.frame.classList.remove("is-masked");
+            void rotateDisplayed("接入成功，继续展示新码供下一位扫");
+            return;
+          }
+          if (handle.status === "expired" || handle.status === "failed") {
+            setStatus(handle.errorMessage || statusLabel(handle.status), "warn");
+            void rotateDisplayed("当前码已结束，已生成新码");
+          }
+        } else {
+          renderClaimed();
+          if (handle.status === "verification_required") openVerify(handle);
+          if (handle.status === "active") {
+            setStatus(`${shortId(handle.sessionId)} 已接入`, "ok");
+            abortHandle(handle);
+            claimed.delete(handle.sessionId);
+            renderClaimed();
+            closeVerifyIf(handle.sessionId);
+          }
+          if (handle.status === "expired" || handle.status === "failed") {
+            setStatus(
+              `${shortId(handle.sessionId)} ${handle.errorMessage || statusLabel(handle.status)} · 请扫当前新码`,
+              "warn"
+            );
+            abortHandle(handle);
+            claimed.delete(handle.sessionId);
+            renderClaimed();
+            closeVerifyIf(handle.sessionId);
+          }
+        }
+      }
+
+      function updateDisplayedUi(handle) {
+        el.frame.classList.toggle("is-masked", handle.status === "scanned");
+        if (handle.status === "pending") {
+          setStatus("请使用微信扫一扫", "wait");
+          setMeta(`有效至 ${formatTime(handle.expiresAt)}`);
+          schedulePendingRefresh(handle);
+        } else if (handle.status === "scanned") {
+          setStatus("已扫码，请在手机上确认", "ok");
+        } else if (handle.status === "verification_required") {
+          setStatus("需要验证码", "warn");
+        }
+      }
+
+      function promoteToClaimed(handle) {
+        clearRefreshTimer();
+        handle.role = "claimed";
+        claimed.set(handle.sessionId, handle);
+        renderClaimed();
+        // keep SSE alive on same abort controller / listener
+      }
+
+      async function rotateDisplayed(reason) {
+        if (stopped) return;
+        if (displayed && displayed.role === "displayed") {
+          abortHandle(displayed);
+        }
+        setStatus(reason || "正在生成二维码…", "wait");
+        try {
+          const data = await createSession();
+          const handle = {
+            sessionId: data.sessionId,
+            sessionToken: data.sessionToken,
+            qrCodeContent: data.qrCodeContent,
+            status: data.status,
+            expiresAt: data.expiresAt,
+            errorCode: data.errorCode,
+            errorMessage: data.errorMessage,
+            abort: new AbortController(),
+            role: "displayed",
+            sseRetries: 0
+          };
+          displayed = handle;
+          el.frame.classList.remove("is-masked");
+          showQr(handle.qrCodeContent);
+          updateDisplayedUi(handle);
+          void listenSession(handle);
+        } catch (error) {
+          setStatus(error.message || "创建二维码失败", "danger");
+          setMeta("可点击「换一张码」重试");
+        }
+      }
+
+      function openVerify(handle) {
+        el.verify.dataset.sessionId = handle.sessionId;
+        el.verify.classList.add("is-open");
+        el.code.value = "";
+        el.code.focus();
+      }
+
+      function closeVerifyIf(sessionId) {
+        if (el.verify.dataset.sessionId === sessionId) {
+          el.verify.classList.remove("is-open");
+          delete el.verify.dataset.sessionId;
+        }
+      }
+
+      function findVerifyTarget() {
+        const id = el.verify.dataset.sessionId;
+        if (id && claimed.has(id)) return claimed.get(id);
+        if (id && displayed?.sessionId === id) return displayed;
+        for (const s of claimed.values()) {
+          if (s.status === "verification_required") return s;
+        }
+        if (displayed?.status === "verification_required") return displayed;
+        return null;
+      }
+
+      el.verify.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const target = findVerifyTarget();
+        if (!target) {
+          setStatus("没有需要验证码的会话", "warn");
+          return;
+        }
+        const code = el.code.value.trim();
+        if (!/^\d{4,12}$/.test(code)) {
+          setStatus("验证码须为 4–12 位数字", "warn");
+          return;
+        }
+        try {
+          const data = await api(`/wechat/connect/sessions/${target.sessionId}/verify`, {
+            method: "POST",
+            token: target.sessionToken,
+            body: { code }
+          });
+          onSessionUpdate(target, data);
+        } catch (error) {
+          setStatus(error.message || "验证失败", "danger");
+        }
+      });
+
+      el.refresh.addEventListener("click", () => {
+        void rotateDisplayed("已手动换码");
+      });
+
+      function formatTime(iso) {
+        try {
+          return new Date(iso).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        } catch {
+          return iso;
+        }
+      }
+
+      function sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+      }
+
+      window.addEventListener("pagehide", () => {
+        stopped = true;
+        clearRefreshTimer();
+        if (displayed) abortHandle(displayed);
+        for (const s of claimed.values()) abortHandle(s);
+        claimed.clear();
+      });
+
+      void rotateDisplayed();
+    })();
+  </script>
+</body>
+</html>

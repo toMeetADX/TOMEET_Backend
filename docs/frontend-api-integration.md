@@ -683,7 +683,11 @@ interface FeedbackResponse {
 
 ## 10. 微信扫码连接
 
-当前仓库外部的扫码客户端使用独立的一次性会话，并匿名创建二维码。扫码确认后，
+推荐使用 API 同域多用户扫码页：`GET /wechat/connect/`（见
+[`wechat-ilink-deployment.md`](./wechat-ilink-deployment.md) §8.1）。该页在 `scanned`
+后轮换展示码，且 SSE 断开不会盲目重发码。
+
+当前仓库外部的扫码客户端亦可使用独立的一次性会话，并匿名创建二维码。扫码确认后，
 后端按微信身份创建或复用独立 profile，不要求 Supabase Bearer token。接口仍兼容
 未来已登录客户端在创建时携带 Bearer token，但这不属于当前扫码前端契约。
 
