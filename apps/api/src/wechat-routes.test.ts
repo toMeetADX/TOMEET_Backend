@@ -1467,6 +1467,64 @@ describe("WeChat one-time QR onboarding", () => {
     expect(qrLocalTokenLists(fetchMock).at(-1)).toEqual(["good-token"]);
   });
 
+  it("expires other open QR sessions when a connection activates", async () => {
+    const { app, wechatStore, fetchMock } = await setup([
+      {
+        status: "confirmed",
+        bot_token: "tok-a",
+        ilink_bot_id: "bot-a",
+        baseurl: "https://ilink-api.example.com",
+        ilink_user_id: "owner-a"
+      },
+      {
+        status: "confirmed",
+        bot_token: "tok-b",
+        ilink_bot_id: "bot-b",
+        baseurl: "https://ilink-api.example.com",
+        ilink_user_id: "owner-b"
+      }
+    ]);
+
+    const firstCreate = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    const first = firstCreate.json();
+
+    const staleCreate = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    const stale = staleCreate.json();
+    expect(await wechatStore.getWechatSession(stale.sessionId)).toMatchObject({
+      status: "pending"
+    });
+
+    await app.inject({
+      method: "GET",
+      url: `/wechat/connect/sessions/${first.sessionId}`,
+      headers: { "x-wechat-session-token": first.sessionToken }
+    });
+
+    expect(await wechatStore.getWechatSession(first.sessionId)).toMatchObject({
+      status: "active"
+    });
+    expect(await wechatStore.getWechatSession(stale.sessionId)).toMatchObject({
+      status: "expired",
+      errorCode: "superseded_by_activation"
+    });
+
+    const next = await app.inject({
+      method: "POST",
+      url: "/wechat/connect/sessions",
+      payload: {}
+    });
+    expect(next.statusCode).toBe(201);
+    expect(qrLocalTokenLists(fetchMock).at(-1)).toEqual(["tok-a"]);
+  });
+
   it("caps local_token_list submitted to iLink at 10 active tokens", async () => {
     const statuses = Array.from({ length: 12 }, (_, index) => ({
       status: "confirmed",
@@ -1653,5 +1711,25 @@ describe("WeChat one-time QR onboarding", () => {
       ownerIlinkUserId: "owner-upsert-once",
       ilinkBotId: "bot-2"
     });
+  });
+
+  it("serves the multi-user wechat connect kiosk page without auth", async () => {
+    const { app } = await setup([{ status: "wait" }]);
+
+    const redirect = await app.inject({ method: "GET", url: "/wechat/connect" });
+    expect(redirect.statusCode).toBe(302);
+    expect(redirect.headers.location).toBe("/wechat/connect/");
+
+    const page = await app.inject({ method: "GET", url: "/wechat/connect/" });
+    expect(page.statusCode).toBe(200);
+    expect(page.headers["content-type"]).toContain("text/html");
+    expect(page.body).toContain("TOMEET");
+    expect(page.body).toContain("/wechat/connect/sessions");
+    expect(page.body).toContain("SSE 断开不会自动狂刷新码");
+
+    const script = await app.inject({ method: "GET", url: "/wechat/connect/qr-encode.js" });
+    expect(script.statusCode).toBe(200);
+    expect(script.headers["content-type"]).toContain("javascript");
+    expect(script.body).toContain("TomeetQr");
   });
 });

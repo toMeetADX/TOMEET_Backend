@@ -308,6 +308,33 @@ iLink `get_bot_qrcode`，让上游识别已在线 bot，避免重复签发会话
 `binded_redirect` 表示该 bot 已经连接，本地会将扫码会话视为成功并继续复用原凭证，
 不会把原连接标为失败或轮换 token；只有 `confirmed` 返回一组新 bot 凭证时才执行原子替换。
 
+`local_token_list` 是**发码时刻的快照**。任一会话激活成功后，数据库会把其它仍处于
+`pending` / `scanned` / `verification_required` 的扫码会话标为
+`expired`（`error_code=superseded_by_activation`），迫使路演页立刻换一张**包含新上线
+bot** 的码；否则旧码被下一人扫中会踢掉刚接入的长轮询。
+
+发码时若某个 active 连接解密失败，API 会打
+`wechat_qr_local_token_decrypt_failed` / `wechat_qr_local_token_list_empty` 警告（仍允许
+发码），并跳过该 token——此时多人在线保护不完整，应先对齐
+`WECHAT_CREDENTIAL_ENCRYPTION_KEY` 并让受影响用户重扫。
+
+### 8.1 同域多用户扫码页（推荐路演入口）
+
+API 托管全新 kiosk 页（不依赖仓外 Vercel 旧页）：
+
+```text
+GET https://<wechat-api>/wechat/connect/
+```
+
+行为约定（与 [`wechat-qr-api.md`](./wechat-qr-api.md) 一致，并避免发码风暴）：
+
+- `scanned` 后遮住旧码并立即创建下一张展示码，旧会话继续监听至终态；
+- 任一用户**确认接入**后，其它未终态扫码会话会被后端作废，展示页应换新码；
+- SSE 断开只重连 SSE / 降级轮询，**不会**因此 `POST` 新会话；
+- 仅临近过期、终态失败（含 `superseded_by_activation`）、或用户点「换一张码」时才新建展示会话。
+
+静态资源：`/wechat/connect/qr-encode.js`（同域，无第三方 QR CDN）。
+
 验收：
 
 1. 手机 A、B（不同微信号）先后扫码确认，DB 中两行均为 `status='active'`，且
@@ -319,7 +346,7 @@ iLink `get_bot_qrcode`，让上游识别已在线 bot，避免重复签发会话
 ## 9. 上线验收
 
 1. API 和微信 worker 的 `/health`、`/ready` 均返回 200。
-2. `/wechat` 能生成二维码并显示扫码、验证、成功和过期状态。
+2. `/wechat/connect/` 能生成二维码并显示扫码、验证、成功和过期状态；两人连续扫码均可保持 active。
 3. Supabase 出现一个 `channel_identities(provider='wechat')` 及 active
    `wechat_ilink_connections`，凭证字段中不存在明文 token。
 4. 新用户同时具备 users、conversation、user model 和 memory profile。

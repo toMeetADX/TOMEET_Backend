@@ -1,4 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { StoreConflictError, type WechatConnectionStore } from "@tomeet/data";
@@ -12,6 +15,11 @@ import {
   type WechatQrStatus
 } from "@tomeet/wechat-ilink";
 import { uuidSchema } from "@tomeet/contracts";
+
+const WECHAT_CONNECT_PUBLIC_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../public/wechat-connect"
+);
 
 const sessionParamsSchema = z.object({ sessionId: uuidSchema });
 const verifyCodeSchema = z.object({
@@ -505,6 +513,44 @@ export function registerWechatRoutes(
     });
   };
 
+  app.get("/wechat/connect", { config: { rateLimit: false } }, async (_request, reply) => (
+    reply.redirect("/wechat/connect/")
+  ));
+
+  app.get("/wechat/connect/", { config: { rateLimit: false } }, async (_request, reply) => {
+    try {
+      const html = await readFile(join(WECHAT_CONNECT_PUBLIC_DIR, "index.html"), "utf8");
+      return reply
+        .type("text/html; charset=utf-8")
+        .header("Cache-Control", "no-store")
+        .send(html);
+    } catch {
+      return reply.code(503).send({
+        error: "wechat_connect_page_unavailable",
+        message: "微信扫码页暂不可用"
+      });
+    }
+  });
+
+  app.get("/wechat/connect/index.html", { config: { rateLimit: false } }, async (_request, reply) => (
+    reply.redirect("/wechat/connect/")
+  ));
+
+  app.get("/wechat/connect/qr-encode.js", { config: { rateLimit: false } }, async (_request, reply) => {
+    try {
+      const script = await readFile(join(WECHAT_CONNECT_PUBLIC_DIR, "qr-encode.js"), "utf8");
+      return reply
+        .type("application/javascript; charset=utf-8")
+        .header("Cache-Control", "public, max-age=300")
+        .send(script);
+    } catch {
+      return reply.code(404).send({
+        error: "not_found",
+        message: "资源不存在"
+      });
+    }
+  });
+
   const monitorScannedSession: ScannedSessionHandler = (session, credentials) => {
     const runtime = options.runtime;
     if (!runtime || claimedSessionMonitors.has(session.id)) return;
@@ -639,6 +685,7 @@ export function registerWechatRoutes(
       requestedUserId
     );
     const localTokenList: string[] = [];
+    let decryptFailures = 0;
     for (const connection of connections) {
       try {
         localTokenList.push(
@@ -648,14 +695,36 @@ export function registerWechatRoutes(
           )
         );
       } catch (error) {
+        // Missing tokens omit bots from iLink local_token_list and can cause -14 kicks.
+        decryptFailures += 1;
+        app.log.warn({
+          event: "wechat_qr_local_token_decrypt_failed",
+          connection: createHash("sha256").update(connection.id).digest("hex").slice(0, 12),
+          activeConnectionCount: connections.length,
+          localTokenCount: localTokenList.length,
+          requestedConnection: requestedUserId === connection.userId
+        });
         if (requestedUserId && connection.userId === requestedUserId) {
           // Creating a QR without this user's current token could turn a repeat scan into a
           // new login and invalidate the still-working bot. Preserve the existing connection.
           throw error;
         }
-        // A damaged credential for another user must not block this QR. It is never logged or
-        // included in the request, and the current user's token remains first when available.
+        // A damaged credential for another user must not block this QR.
       }
+    }
+    if (connections.length > 0 && localTokenList.length === 0) {
+      app.log.error({
+        event: "wechat_qr_local_token_list_empty",
+        activeConnectionCount: connections.length,
+        decryptFailures
+      });
+    } else if (decryptFailures > 0) {
+      app.log.warn({
+        event: "wechat_qr_local_token_list_partial",
+        activeConnectionCount: connections.length,
+        localTokenCount: localTokenList.length,
+        decryptFailures
+      });
     }
     const qr = await runtime.client.createLoginQr({ localTokenList });
     const expiresAt = new Date(

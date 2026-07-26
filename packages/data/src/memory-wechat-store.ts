@@ -223,6 +223,20 @@ export class MemoryWechatStore implements WechatConnectionStore {
       errorMessage: null,
       updatedAt: now
     });
+    for (const other of this.sessions.values()) {
+      if (
+        other.id === session.id
+        || !["pending", "scanned", "verification_required"].includes(other.status)
+      ) {
+        continue;
+      }
+      Object.assign(other, {
+        status: "expired" as const,
+        errorCode: "superseded_by_activation",
+        errorMessage: "已有新用户接入，请扫描当前最新二维码",
+        updatedAt: now
+      });
+    }
     return {
       session: structuredClone(session),
       connection: structuredClone(connection)
